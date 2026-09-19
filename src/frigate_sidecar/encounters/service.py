@@ -17,7 +17,7 @@ from frigate_sidecar.analysis.clock_offset import event_clock_offset_s
 from frigate_sidecar.config import Settings
 from frigate_sidecar.encounters import store
 from frigate_sidecar.encounters.adjacency import Adjacency
-from frigate_sidecar.encounters.linker import Atom, LinkerConfig, apply, decide
+from frigate_sidecar.encounters.linker import Atom, LinkerConfig, apply, decide, normalise_labels
 from frigate_sidecar.push.models import ReviewEvent
 
 logger = logging.getLogger(__name__)
@@ -135,15 +135,19 @@ class EncounterService:
                 end_time = ev.end_time if ev.end_time is not None else now
             else:
                 end_time = None
+            labels, qualifiers = normalise_labels(ev.labels)
+            sub_labels = tuple(ev.sub_labels) + tuple(
+                q for q in qualifiers if q not in ev.sub_labels
+            )
             atom = Atom(
                 atom_id=ev.review_id,
                 camera=ev.camera,
                 start_time=ev.start_time,
                 end_time=end_time,
-                labels=ev.labels,
+                labels=labels,
                 zones=ev.zones,
                 event_ids=ev.track_ids,
-                sub_labels=ev.sub_labels,
+                sub_labels=sub_labels,
                 severity=ev.severity,
             )
             conn = self._conn()
@@ -194,15 +198,18 @@ class EncounterService:
         data = _review_data(row["data"])
         start_time = float(row["start_time"]) + offset_s
         end_time = float(row["end_time"]) + offset_s if row["end_time"] is not None else None
+        raw_sub_labels = _strings(data.get("sub_labels"))
+        labels, qualifiers = normalise_labels(_strings(data.get("objects")))
+        sub_labels = raw_sub_labels + tuple(q for q in qualifiers if q not in raw_sub_labels)
         return Atom(
             atom_id=str(row["id"]),
             camera=camera,
             start_time=start_time,
             end_time=end_time,
-            labels=_strings(data.get("objects")),
+            labels=labels,
             zones=_strings(data.get("zones")),
             event_ids=_strings(data.get("detections")),
-            sub_labels=_strings(data.get("sub_labels")),
+            sub_labels=sub_labels,
             severity=str(row["severity"]),
         )
 

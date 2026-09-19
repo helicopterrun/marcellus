@@ -74,6 +74,60 @@ def _insert_review(
     conn.close()
 
 
+def test_reconcile_normalises_sub_label_qualified_objects(tmp_path: Path) -> None:
+    """Production Frigate promotes a sub_label into `data.objects` alongside
+    the base label (e.g. "person-verified" next to "person"). A plain
+    `person` atom followed 120s later, on an adjacent camera, by a
+    "person-verified" atom should link as one encounter -- and the linked
+    member's labels/sub_labels should reflect the normalised split, not the
+    raw hyphenated string."""
+    frigate_db = _reviewsegment_db(tmp_path)
+    now = time.time()
+    _insert_review(
+        frigate_db,
+        rid="r1",
+        camera="alley-wide",
+        start=now - 300,
+        end=now - 290,
+        objects=("person",),
+    )
+    _insert_review(
+        frigate_db,
+        rid="r2",
+        camera="shed",
+        start=now - 290 + 120,
+        end=now - 290 + 130,
+        objects=("person", "person-verified"),
+    )
+
+    cfg = tmp_path / "frigate-config.yml"
+    cfg.write_text("cameras: {}\n")
+    settings = Settings(
+        frigate={"base_url": "http://frigate.test:5000", "config_path": cfg, "db_path": frigate_db},
+        sidecar={"db_path": tmp_path / "sidecar.db"},
+        encounters={"gap_s": {"person": 150.0, "default": 60.0}},
+    )
+
+    adjacency = Adjacency(edges=frozenset({frozenset({"alley-wide", "shed"})}))
+    service = EncounterService(settings, adjacency=adjacency, now=lambda: now)
+    stats = service.reconcile()
+    assert stats.rows == 2
+    assert stats.new == 2
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        rows = {
+            r["atom_id"]: dict(r)
+            for r in conn.execute("SELECT * FROM encounter_members").fetchall()
+        }
+        assert rows["r1"]["encounter_id"] == rows["r2"]["encounter_id"]
+        assert rows["r2"]["link_reason"] in ("identity", "adjacent")
+        assert json.loads(rows["r2"]["labels_json"]) == ["person"]
+        assert "verified" in json.loads(rows["r2"]["sub_labels_json"])
+    finally:
+        conn.close()
+
+
 def test_reconcile_over_reviewsegment(tmp_path: Path) -> None:
     frigate_db = _reviewsegment_db(tmp_path)
     now = time.time()

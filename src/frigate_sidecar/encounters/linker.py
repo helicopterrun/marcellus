@@ -11,10 +11,11 @@ existing (open) encounter or starts a new one, and why.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from frigate_sidecar.encounters.adjacency import Adjacency
+from frigate_sidecar.push.live_activities import BIN_LABELS, OPENING_LABELS
 
 LABEL_FAMILIES: dict[str, frozenset[str]] = {
     "person": frozenset({"person"}),
@@ -45,6 +46,56 @@ _LABEL_TO_FAMILY: dict[str, str] = {
 def family_of(label: str) -> str:
     """The label family for one Frigate label, or "default" if unknown."""
     return _LABEL_TO_FAMILY.get(label, "default")
+
+
+#: Every base label this codebase knows about, beyond `LABEL_FAMILIES`:
+#: `push/live_activities.py`'s `BIN_LABELS`/`OPENING_LABELS` are Frigate
+#: object labels too (a waste bin, a garage door), just not ones that get a
+#: continuity family of their own. Reused here rather than duplicated so the
+#: two lists can't drift.
+KNOWN_LABELS: frozenset[str] = frozenset(_LABEL_TO_FAMILY) | BIN_LABELS | OPENING_LABELS
+
+
+def normalise_labels(
+    objects: Iterable[str], known_labels: Collection[str] = KNOWN_LABELS
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split Frigate's `data.objects` (or `ReviewEvent.labels`) into base
+    labels and qualifiers.
+
+    Production Frigate promotes a sub_label into `objects` alongside the
+    base label, e.g. `["person", "person-verified"]`, and can also list a
+    bare sub_label with no base counterpart, e.g. `["amazon"]`. Left as-is,
+    `person-verified` reads as an unknown label (family "default"), which
+    breaks continuity with the plain `person` atom next to it and shows as
+    label-chip noise on `/encounters`.
+
+    Rules, applied per object, first match wins:
+    - equal to a known base label -> stays a label
+    - `<known>-<qualifier>` (split on the FIRST hyphen only, base must be a
+      known label) -> base label + qualifier `<qualifier>`
+    - anything else (e.g. a bare sub_label like "amazon") -> qualifier only,
+      never added to labels
+
+    Both outputs are deduped, order-preserving (first appearance wins).
+    """
+    known = known_labels if isinstance(known_labels, (set, frozenset)) else set(known_labels)
+    labels: list[str] = []
+    qualifiers: list[str] = []
+    for obj in objects:
+        if obj in known:
+            if obj not in labels:
+                labels.append(obj)
+            continue
+        base, sep, qualifier = obj.partition("-")
+        if sep and base in known:
+            if base not in labels:
+                labels.append(base)
+            if qualifier not in qualifiers:
+                qualifiers.append(qualifier)
+        else:
+            if obj not in qualifiers:
+                qualifiers.append(obj)
+    return tuple(labels), tuple(qualifiers)
 
 
 @dataclass(frozen=True)

@@ -9,6 +9,7 @@ from frigate_sidecar.encounters.linker import (
     OpenEncounter,
     decide,
     fold,
+    normalise_labels,
 )
 
 CFG = LinkerConfig(
@@ -240,6 +241,48 @@ def test_open_ended_atom_extends_to_now_not_its_own_start() -> None:
     encs = fold(atoms, ADJ, CFG, now=now)
     assert len(encs) == 1
     assert encs[0].atom_ids == ["a1", "a2"]
+
+
+def test_normalise_labels_plain_known_label() -> None:
+    labels, qualifiers = normalise_labels(["person"])
+    assert labels == ("person",)
+    assert qualifiers == ()
+
+
+def test_normalise_labels_hyphen_qualified_known_label() -> None:
+    labels, qualifiers = normalise_labels(["person", "person-verified"])
+    assert labels == ("person",)
+    assert qualifiers == ("verified",)
+
+
+def test_normalise_labels_unknown_object_is_qualifier_only() -> None:
+    # A bare promoted sub_label (e.g. Frigate's "amazon") with no matching
+    # base label in `objects` -- never added to labels.
+    labels, qualifiers = normalise_labels(["person", "amazon"])
+    assert labels == ("person",)
+    assert qualifiers == ("amazon",)
+
+
+def test_normalise_labels_hyphen_prefix_not_a_known_label_is_qualifier() -> None:
+    # "amazon-driver" splits on the first hyphen to base "amazon", which
+    # isn't a known label -- the whole string falls through to qualifier.
+    labels, qualifiers = normalise_labels(["amazon-driver"])
+    assert labels == ()
+    assert qualifiers == ("amazon-driver",)
+
+
+def test_normalise_labels_dedupes_and_preserves_first_appearance_order() -> None:
+    labels, qualifiers = normalise_labels(
+        ["car", "person", "person-verified", "person", "car-blue", "person-verified"]
+    )
+    assert labels == ("car", "person")
+    assert qualifiers == ("verified", "blue")
+
+
+def test_normalise_labels_splits_only_on_first_hyphen() -> None:
+    labels, qualifiers = normalise_labels(["car-two-door"])
+    assert labels == ("car",)
+    assert qualifiers == ("two-door",)
 
 
 def test_companion_joins_while_first_subject_still_on_camera() -> None:
