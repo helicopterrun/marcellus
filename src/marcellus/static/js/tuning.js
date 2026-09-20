@@ -220,6 +220,39 @@
     return ta;
   }
 
+  function pairListControl(knob, value, onChange, onRemove, onInvalidChange) {
+    // One "camera_a, camera_b" pair per line -- friendlier than raw JSON for
+    // a list[list[str]] knob (encounters.adjacency/not_adjacent).
+    var ta = el("textarea", { class: "tuning-pairlist", rows: "3" });
+    ta.value = (value || []).map(function (pair) { return pair.join(", "); }).join("\n");
+    ta.addEventListener("change", function () {
+      var text = ta.value.trim();
+      if (text === "") {
+        onInvalidChange(false);
+        onRemove();
+        return;
+      }
+      var pairs = [];
+      var lines = text.split("\n");
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line) continue;
+        var parts = line.split(",").map(function (s) { return s.trim(); })
+          .filter(function (s) { return s.length; });
+        if (parts.length !== 2 || parts[0] === parts[1]) {
+          ta.classList.add("invalid");
+          onInvalidChange(true);
+          return;
+        }
+        pairs.push(parts);
+      }
+      ta.classList.remove("invalid");
+      onInvalidChange(false);
+      onChange(pairs);
+    });
+    return ta;
+  }
+
   function buildControl(knob, value, onChange, onRemove, onInvalidChange) {
     switch (knob.kind) {
       case "int":
@@ -235,6 +268,8 @@
         return dictIntControl(knob, value, onChange);
       case "json":
         return jsonControl(knob, value, onChange, onRemove, onInvalidChange);
+      case "pair_list":
+        return pairListControl(knob, value, onChange, onRemove, onInvalidChange);
       default: // str, path, url, secret -- editable ones are plain text
         return textControl(knob, value, onChange, onRemove);
     }

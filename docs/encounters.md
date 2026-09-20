@@ -75,6 +75,17 @@ name** (`load_camera_zones` output). Config `adjacency` adds edges,
 `not_adjacent` removes them (config wins). Footprint-overlap adjacency
 (camera_layout/optics) is a documented follow-up, not slice 1.
 
+Both `encounters.adjacency` and `encounters.not_adjacent` are live,
+user-editable `/settings` knobs (`tuning.py` kind `pair_list`, rendered as a
+textarea of one `camera_a, camera_b` pair per line) -- no restart needed.
+`EncounterService.reconcile()` diffs the effective lists against what
+`self.adjacency` was last built from and only re-derives zones + rebuilds
+the `Adjacency` graph when they actually changed; the live MQTT hook reads
+the same `self.adjacency` attribute, so it picks up a rebuild for free. The
+`/encounters` admin page renders the same `Adjacency.describe()`-shaped data
+`/v1/encounters/adjacency` serves, with a link to `/settings#encounters` to
+edit it.
+
 ## linker.py (pure, fully unit-testable)
 
 ```python
@@ -82,7 +93,7 @@ LABEL_FAMILIES = {"person": {"person"},
                   "vehicle": {"car","truck","bus","motorcycle","bicycle"},
                   "animal": {"dog","cat","raccoon","bird","squirrel","fox","deer","skunk","opossum","rabbit","bear"},
                   "package": {"package"}}
-def family_of(label: str) -> str   # "default" if unknown
+def family_of(label: str) -> str   # unnamed labels are their own family (not a shared "default")
 
 @dataclass(frozen=True)
 class Atom:
@@ -118,9 +129,12 @@ if `pinned_to` is given and that encounter is open, return it with reason
    atom.sub_labels and enc.identities both non-empty and disjoint
    (contradictory identity).
 2. **Gap**: `gap = atom.start_time - enc.last_end` (negative = overlap).
-   Allowed gap = max over the atom's label families of `gap_s[family]`
-   (fallback `gap_s["default"]`). Identity match (sub_labels ∩ identities)
-   allows 3× that gap.
+   Allowed gap = max over the families the atom and encounter *share*
+   (atom.labels' families ∩ enc.labels' families) of `gap_s[family]`
+   (fallback `gap_s["default"]`) -- an atom with an extra, unshared label
+   family (e.g. person+car joining a person-only encounter) doesn't get
+   that family's allowance. Identity match (sub_labels ∩ identities) allows
+   3× that gap.
 3. **Continuity** (needs a shared label family between atom.labels and
    enc.labels, and gap within allowance). Spatial test against the last
    `recent_cameras` distinct cameras of the encounter:

@@ -26,7 +26,9 @@ def _settings(frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path) -> S
     fake_config.write_text("cameras: {}\n")
     return Settings(
         frigate=FrigateSection(
-            base_url="http://frigate.test:5000", config_path=fake_config, db_path=frigate_db_path,
+            base_url="http://frigate.test:5000",
+            config_path=fake_config,
+            db_path=frigate_db_path,
         ),
         sidecar=SidecarSection(
             db_path=sidecar_db_path,
@@ -67,9 +69,7 @@ def test_put_happy_path_mutates_settings_in_place(client: TestClient, settings: 
     get_resp = client.get("/v1/tuning")
     rev = get_resp.json()["rev"]
 
-    put_resp = client.put(
-        "/v1/tuning", json={"rev": rev, "overrides": {"scrub.cell_w": 400}}
-    )
+    put_resp = client.put("/v1/tuning", json={"rev": rev, "overrides": {"scrub.cell_w": 400}})
     assert put_resp.status_code == 200
     body = put_resp.json()
     # No override file existed yet, so both GET's implicit rev (1) and the
@@ -89,25 +89,19 @@ def test_put_rev_conflict(client: TestClient):
 
 
 def test_put_invalid_returns_400(client: TestClient):
-    resp = client.put(
-        "/v1/tuning", json={"rev": 1, "overrides": {"scrub.format": "png"}}
-    )
+    resp = client.put("/v1/tuning", json={"rev": 1, "overrides": {"scrub.format": "png"}})
     assert resp.status_code == 400
     assert resp.json()["detail"]["error"] == "invalid_tuning"
 
 
 def test_put_non_editable_key_returns_400(client: TestClient):
-    resp = client.put(
-        "/v1/tuning", json={"rev": 1, "overrides": {"frigate.base_url": "http://x"}}
-    )
+    resp = client.put("/v1/tuning", json={"rev": 1, "overrides": {"frigate.base_url": "http://x"}})
     assert resp.status_code == 400
 
 
 def test_put_removal_reverts_to_base(client: TestClient, settings: Settings):
     rev = client.get("/v1/tuning").json()["rev"]
-    put1 = client.put(
-        "/v1/tuning", json={"rev": rev, "overrides": {"scrub.cell_w": 400}}
-    )
+    put1 = client.put("/v1/tuning", json={"rev": rev, "overrides": {"scrub.cell_w": 400}})
     assert settings.scrub.cell_w == 400
     rev2 = put1.json()["rev"]
 
@@ -134,9 +128,7 @@ def test_pending_restart_lists_non_live_not_live(client: TestClient):
 
 def test_log_level_put_changes_root_logger(client: TestClient):
     rev = client.get("/v1/tuning").json()["rev"]
-    resp = client.put(
-        "/v1/tuning", json={"rev": rev, "overrides": {"log_level": "ERROR"}}
-    )
+    resp = client.put("/v1/tuning", json={"rev": rev, "overrides": {"log_level": "ERROR"}})
     assert resp.status_code == 200
     assert logging.getLogger().level == logging.ERROR
     logging.getLogger().setLevel(logging.NOTSET)
@@ -183,3 +175,58 @@ def test_put_dict_int_override_round_trips_only_user_set_keys(client: TestClient
 
     get_body = client.get("/v1/tuning").json()
     assert get_body["overrides"]["encounters.gap_s"] == {"person": 30}
+
+
+def test_put_adjacency_normalises_pairs(client: TestClient, settings: Settings):
+    get_resp = client.get("/v1/tuning")
+    rev = get_resp.json()["rev"]
+    put_resp = client.put(
+        "/v1/tuning",
+        json={
+            "rev": rev,
+            "overrides": {"encounters.adjacency": [["shed", "alley-wide"]]},
+        },
+    )
+    assert put_resp.status_code == 200
+    assert settings.encounters.adjacency == [["alley-wide", "shed"]]
+
+
+def test_put_adjacency_rejects_self_pair(client: TestClient):
+    get_resp = client.get("/v1/tuning")
+    rev = get_resp.json()["rev"]
+    put_resp = client.put(
+        "/v1/tuning",
+        json={"rev": rev, "overrides": {"encounters.adjacency": [["shed", "shed"]]}},
+    )
+    assert put_resp.status_code == 400
+    assert put_resp.json()["detail"]["error"] == "invalid_tuning"
+
+
+def test_put_adjacency_rejects_unknown_camera(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path
+):
+    fake_config = tmp_path / "frigate-config.yml"
+    fake_config.write_text("cameras:\n  alley-wide: {}\n  shed: {}\n")
+    settings = Settings(
+        frigate=FrigateSection(
+            base_url="http://frigate.test:5000",
+            config_path=fake_config,
+            db_path=frigate_db_path,
+        ),
+        sidecar=SidecarSection(
+            db_path=sidecar_db_path,
+            bind_port=5001,
+            require_frigate_auth=False,
+            tuning_path=str(tmp_path / "tuning.json"),
+        ),
+    )
+    tuning.snapshot_startup(settings)
+    client = TestClient(create_app(settings))
+    get_resp = client.get("/v1/tuning")
+    rev = get_resp.json()["rev"]
+    put_resp = client.put(
+        "/v1/tuning",
+        json={"rev": rev, "overrides": {"encounters.adjacency": [["alley-wide", "nope"]]}},
+    )
+    assert put_resp.status_code == 400
+    assert put_resp.json()["detail"]["error"] == "invalid_tuning"

@@ -210,7 +210,7 @@
   <div id="tuning-restart-banner" class="help page-intro" style="display:none"></div>
   <div id="tuning-sections">
     {% for sec in tuning_sections %}
-    <details class="tuning-section" open data-section="{{ sec.name }}">
+    <details class="tuning-section" open data-section="{{ sec.name }}" id="{{ sec.name }}">
       <summary>{{ sec.title }}</summary>
       <div class="tuning-grid" id="tuning-grid-{{ sec.name or 'root' }}"></div>
     </details>

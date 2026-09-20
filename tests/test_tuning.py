@@ -45,12 +45,25 @@ def test_wiring_and_secret_fields_are_not_editable():
     assert tuning.KNOBS_BY_KEY["push.mqtt_password"].kind == "secret"
     assert tuning.KNOBS_BY_KEY["push.relay_key"].editable is False
     assert tuning.KNOBS_BY_KEY["push.relay_key"].kind == "secret"
-    assert tuning.KNOBS_BY_KEY["encounters.adjacency"].editable is False
+
+
+def test_encounters_adjacency_is_editable_and_live() -> None:
+    # Was wiring (restart-required, config-file-only) -- now live-editable
+    # from /settings, rebuilt by EncounterService.reconcile().
+    for key in ("encounters.adjacency", "encounters.not_adjacent"):
+        knob = tuning.KNOBS_BY_KEY[key]
+        assert knob.editable is True, key
+        assert knob.live is True, key
+        assert knob.kind == "pair_list", key
 
 
 def test_face_capture_and_watchdog_are_editable_but_restart_required():
-    for key in ("face_capture.capture_camera", "face_capture.trigger_cameras",
-                "watchdog.restart_command", "watchdog.probe_path"):
+    for key in (
+        "face_capture.capture_camera",
+        "face_capture.trigger_cameras",
+        "watchdog.restart_command",
+        "watchdog.probe_path",
+    ):
         knob = tuning.KNOBS_BY_KEY[key]
         assert knob.editable is True, key
         assert knob.live is False, key

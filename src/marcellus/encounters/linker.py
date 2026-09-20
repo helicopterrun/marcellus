@@ -44,8 +44,13 @@ _LABEL_TO_FAMILY: dict[str, str] = {
 
 
 def family_of(label: str) -> str:
-    """The label family for one Frigate label, or "default" if unknown."""
-    return _LABEL_TO_FAMILY.get(label, "default")
+    """The label family for one Frigate label, or the label itself if it has
+    no named family (e.g. a waste bin or garage door label from
+    `BIN_LABELS`/`OPENING_LABELS`). Unknown labels used to all collapse into
+    one shared "default" family, which let unrelated labels (a waste bin and
+    a garage door) continue each other's encounters by continuity -- using
+    the label itself as its own family keeps them distinct."""
+    return _LABEL_TO_FAMILY.get(label, label)
 
 
 #: Every base label this codebase knows about, beyond `LABEL_FAMILIES`:
@@ -144,8 +149,8 @@ class LinkerConfig:
     min_copresence_s: float
 
 
-def _allowed_gap(atom: Atom, cfg: LinkerConfig, *, identity_match: bool) -> float:
-    families = {family_of(label) for label in atom.labels} or {"default"}
+def _allowed_gap(families: Collection[str], cfg: LinkerConfig, *, identity_match: bool) -> float:
+    families = families or {"default"}
     allowed = max(cfg.gap_s.get(family, cfg.gap_s.get("default", 60.0)) for family in families)
     if identity_match:
         allowed *= 3.0
@@ -187,14 +192,19 @@ def _candidate_decision(
 
     identity_match = bool(set(atom.sub_labels) & enc.identities)
     gap = atom.start_time - enc.last_end
-    allowed_gap = _allowed_gap(atom, cfg, identity_match=identity_match)
 
     best: LinkDecision | None = None
 
-    # -- Continuity: needs a shared label family and the gap within allowance. --
+    # -- Continuity: needs a shared label family and the gap within allowance.
+    # The allowance is computed over the families the atom and encounter
+    # actually share, not every family the atom carries -- otherwise a
+    # person+car atom joining a person-only encounter would get the (looser
+    # or tighter) car allowance even though "car" isn't the shared reason. --
     atom_families = {family_of(label) for label in atom.labels}
     enc_families = {family_of(label) for label in enc.labels}
-    if atom_families & enc_families and gap <= allowed_gap:
+    shared_families = atom_families & enc_families
+    allowed_gap = _allowed_gap(shared_families, cfg, identity_match=identity_match)
+    if shared_families and gap <= allowed_gap:
         recent = _recent_cameras(enc, cfg)
         if identity_match:
             best = LinkDecision(enc.encounter_id, "identity", 0.95)
