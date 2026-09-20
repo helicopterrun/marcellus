@@ -66,3 +66,10 @@ each atom's underlying Frigate events.
 
 There's no pin/split UI yet — a human overriding the linker for one atom is
 a later slice.
+
+## Retention
+
+Sealed encounters (and their members and decisions) older than
+`retention_days` (default 30) are dropped by an hourly prune folded into the
+reconciler; unsealed encounters are never pruned regardless of age. Run it
+by hand with `marcellus encounters prune`.
