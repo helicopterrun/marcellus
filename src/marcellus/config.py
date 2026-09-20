@@ -109,6 +109,13 @@ class SidecarSection(BaseModel):
     login_rate_limit_attempts: int = 10
     # Sliding window, in seconds, the attempts above are counted over.
     login_rate_limit_window_s: float = 60.0
+    # JSON file of runtime overrides written by /settings' Tuning panel
+    # (`marcellus.tuning`) -- same runtime-data class and directory as
+    # `push.push_settings_path`: not part of the YAML/env config surface,
+    # created on first PUT, read back on every `load_settings` (including
+    # the CLI, the watchdog, and the face_capture timer processes) so an
+    # override applies everywhere, not just to the running web process.
+    tuning_path: str = "config/tuning.json"
 
 
 class FaceCaptureSection(BaseModel):
@@ -1012,4 +1019,37 @@ def load_settings(config_path: str | os.PathLike[str] | None = None) -> Settings
                 file_secret_settings,
             )
 
-    return _BoundSettings()
+    settings = _BoundSettings()
+
+    # Lazy import: `tuning.py` imports `config` (for `Settings`/the section
+    # models), so importing it at module scope here would be a cycle.
+    from marcellus import tuning
+
+    tuning.snapshot_base(settings)
+    overrides_file = tuning.overrides_path(settings)
+    file_overrides = tuning.read_overrides(overrides_file)
+    applicable = {
+        key: value
+        for key, value in file_overrides.items()
+        if value is not None and not tuning.is_env_locked(key, os.environ)
+    }
+    # The file is hand-editable and may predate a rename or a tightened
+    # range: drop any entry that fails validation (one at a time, so a single
+    # bad key does not take the rest down) rather than trusting it blindly.
+    for key in list(applicable):
+        problems = tuning.validate({key: applicable[key]}, settings)
+        if problems:
+            logger.warning(
+                "tuning: ignoring %s from %s: %s", key, overrides_file, "; ".join(problems)
+            )
+            del applicable[key]
+    if applicable:
+        tuning.apply_overrides(settings, applicable)
+        logger.info(
+            "tuning: applied %d override(s) from %s: %s",
+            len(applicable),
+            overrides_file,
+            ", ".join(sorted(applicable)),
+        )
+    tuning.snapshot_startup(settings)
+    return settings

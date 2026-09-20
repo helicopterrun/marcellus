@@ -7,10 +7,13 @@
 <main id="main-content">
   <nav class="settings-nav" aria-label="Settings sections">
     <a href="#zones" class="page-link">Zones</a>
+    <a href="#routing" class="page-link">Routing</a>
+    <a href="#notifications" class="page-link">Notifications</a>
     <a href="#cameras" class="page-link">Cameras</a>
     <a href="#alignment" class="page-link">Alignment</a>
     <a href="#push" class="page-link">Push</a>
-    <a href="#services" class="page-link">Services</a>
+    <a href="#tuning" class="page-link">Tuning</a>
+    <a href="#config" class="page-link">Config</a>
     <a href="#data" class="page-link">Data</a>
     <a href="#about" class="page-link">About</a>
   </nav>
@@ -48,6 +51,49 @@
     <button id="save-btn" class="btn-primary">Save</button>
     <span id="save-state" class="save-state"></span>
   </div>
+
+  {# ---- Routing (element ids shared with policy.js) ---- #}
+  <h3 class="section-title" id="routing">Routing</h3>
+  <p class="help page-intro">
+    What happens when each kind of subject is seen in each place, from Off
+    (suppressed) up through Log, Glance (Live Activity only), Notify (banner)
+    to Alarm (urgent — sound, re-sounds, time-sensitive). Recognition relaxes
+    the outcome for a subject the app already knows.
+  </p>
+  <div id="outcomes-matrix"></div>
+  <h4 class="sub-title">Recognition</h4>
+  <div id="recognition-controls"></div>
+  <h4 class="sub-title">Zone overrides</h4>
+  <p class="help page-intro">
+    Per-zone exceptions to the matrix above — blank means "inherit the matrix".
+  </p>
+  <div id="zone-overrides-matrix"></div>
+
+  <h4 class="sub-title">What the phone will say</h4>
+  <p class="help page-intro">
+    Rendered by the same code that writes the real notifications — titles and
+    bodies here are exactly what the phone shows for these situations.
+  </p>
+  <div class="notif-examples">
+    {% for ex in notif_examples %}
+    <div class="notif-example">
+      <span class="notif-icon">{{ ex.emoji }}</span>
+      <span class="notif-text">
+        <span class="notif-title">{{ ex.primary }}</span>
+        {% if ex.secondary %}<span class="notif-body">{{ ex.secondary }}</span>{% endif %}
+        <span class="notif-meta">{{ ex.situation }}</span>
+      </span>
+      <span class="lvl lvl-{{ ex.level }}">{{ ex.level_label }}</span>
+    </div>
+    {% endfor %}
+  </div>
+
+  {# ---- Notifications (element ids shared with policy.js) ---- #}
+  <h3 class="section-title" id="notifications">Notifications</h3>
+  <h4 class="sub-title">Quiet hours</h4>
+  <div id="quiet-hours-controls"></div>
+  <h4 class="sub-title">Sound &amp; Live Activities</h4>
+  <div id="sound-la-controls"></div>
 
   {# ---- Cameras ---- #}
   <h3 class="section-title" id="cameras">Cameras</h3>
@@ -143,70 +189,48 @@
     <div class="empty">no devices registered — pair the Elsinore app with this server to register one</div>
   {% endif %}
 
-  <h4 class="sub-title">How notifications are decided</h4>
   <p class="help page-intro">
-    Every detection is scored on the attention ladder — who was seen crossed
-    with the place class of the zone. Full explanation in the
-    <a href="/guide/push-notifications#the-attention-ladder" class="page-link">push notifications guide</a>.
+    Full explanation of how outcomes are decided in the
+    <a href="/guide/push-notifications#the-attention-ladder" class="page-link">push notifications guide</a>;
+    edit the matrix on <a href="#routing" class="page-link">Routing</a>.
   </p>
-  <table class="motion-table ladder-table">
-    <thead><tr><th></th>{% for p in ladder.places %}<th>{{ p }}</th>{% endfor %}</tr></thead>
-    <tbody>
-    {% for row in ladder.rows %}
-      <tr>
-        <td>{{ row.subject }}</td>
-        {% for cell in row.cells %}
-        <td><span class="lvl lvl-{{ cell.level }}">{{ cell.label }}</span></td>
-        {% endfor %}
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% if ladder.overrides %}
-  <p class="help">Zone overrides in effect:
-    {% for o in ladder.overrides %}
-      <span class="lvl-override">{{ o.zone }}: {{ o.subject }} → {{ o.label }}</span>{% if not loop.last %} · {% endif %}
-    {% endfor %}
-  </p>
-  {% endif %}
 
-  <h4 class="sub-title">What they look like</h4>
+  {# ---- Tuning (element ids/data consumed by tuning.js) ---- #}
+  <h3 class="section-title" id="tuning">Tuning</h3>
   <p class="help page-intro">
-    Rendered by the same code that writes the real notifications — titles and
-    bodies here are exactly what the phone shows for these situations.
+    Every runtime knob the sidecar exposes, grouped by config section. A
+    <span class="badge src-override">override</span> badge marks a value
+    changed here; <span class="badge src-env">env</span> means an environment
+    variable pins it (locked, edit <code>sidecar.yml</code>'s environment
+    instead); <span class="badge restart">restart</span> means the change
+    needs a process restart to take effect. See
+    <a href="/guide/settings#tuning" class="page-link">the guide</a> for
+    details.
   </p>
-  <div class="notif-examples">
-    {% for ex in notif_examples %}
-    <div class="notif-example">
-      <span class="notif-icon">{{ ex.emoji }}</span>
-      <span class="notif-text">
-        <span class="notif-title">{{ ex.primary }}</span>
-        {% if ex.secondary %}<span class="notif-body">{{ ex.secondary }}</span>{% endif %}
-        <span class="notif-meta">{{ ex.situation }}</span>
-      </span>
-      <span class="lvl lvl-{{ ex.level }}">{{ ex.level_label }}</span>
-    </div>
+  <div id="tuning-restart-banner" class="help page-intro" style="display:none"></div>
+  <div id="tuning-sections">
+    {% for sec in tuning_sections %}
+    <details class="tuning-section" open data-section="{{ sec.name }}">
+      <summary>{{ sec.title }}</summary>
+      <div class="tuning-grid" id="tuning-grid-{{ sec.name or 'root' }}"></div>
+    </details>
     {% endfor %}
   </div>
+  <div class="section-block">
+    <button id="tuning-save" class="btn-primary">Save tuning</button>
+    <span id="tuning-state" class="save-state"></span>
+  </div>
 
-  {# ---- Services (read-only YAML config surface) ---- #}
-  <h3 class="section-title" id="services">Services</h3>
+  {# ---- Effective configuration (read-only, includes wiring/secrets) ---- #}
+  <h3 class="section-title" id="config">Effective configuration</h3>
   <p class="help page-intro">
-    Feature switches from the sidecar's YAML config — read-only here; edit
-    <code>sidecar.yml</code> and restart to change them. Each link opens the
-    guide topic that explains the section.
+    Wiring, paths and secrets — read-only here; edit <code>sidecar.yml</code>
+    and restart to change them. Secrets are masked.
   </p>
-  <table class="motion-table services-table">
-    <tbody>
-    {% for row in service_rows %}
-      <tr>
-        <td>{{ row.name }}</td>
-        <td>{% if row.value in ('on', 'off') %}<span class="cell-class {{ 'ok' if row.value == 'on' else 'muted' }}">{{ row.value }}</span>{% else %}{{ row.value }}{% endif %}</td>
-        <td><a href="{{ row.guide }}" class="page-link">guide</a></td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
+  <div id="config-table" class="skeleton">
+    <div class="skeleton-row"></div>
+    <div class="skeleton-row"></div>
+  </div>
 
   {# ---- Data ---- #}
   <h3 class="section-title" id="data">Data</h3>
@@ -252,7 +276,9 @@
 
 {% block scripts %}
 <script src="/static/js/zones.js?v={{ asset_v }}"></script>
+<script src="/static/js/policy.js?v={{ asset_v }}"></script>
 <script src="/static/js/devices.js?v={{ asset_v }}"></script>
 <script src="/static/js/eventcalib.js?v={{ asset_v }}"></script>
 <script src="/static/js/eventalign.js?v={{ asset_v }}"></script>
+<script src="/static/js/tuning.js?v={{ asset_v }}"></script>
 {% endblock %}

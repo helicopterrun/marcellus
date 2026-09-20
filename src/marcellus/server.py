@@ -58,6 +58,7 @@ from marcellus.routes import settings_page as settings_page_routes
 from marcellus.routes import status as status_routes
 from marcellus.routes import toybox as toybox_routes
 from marcellus.routes import triage as triage_routes
+from marcellus.routes import tuning as tuning_routes
 from marcellus.routes import zone_hits as zone_hits_routes
 from marcellus.scrub.lock import ScrubCacheLock, ScrubLockHeld
 
@@ -317,9 +318,8 @@ async def _face_enrich_loop(app: FastAPI) -> None:
     from marcellus.faces import enrich
 
     settings: Settings = app.state.settings
-    interval = settings.face_enrich.interval_s
     while True:
-        await asyncio.sleep(interval)
+        await asyncio.sleep(settings.face_enrich.interval_s)
         try:
             await asyncio.to_thread(enrich.run_cycle, settings)
             app.state.face_enrich_last_cycle = time.time()
@@ -340,9 +340,8 @@ async def _encounters_loop(app: FastAPI) -> None:
     """
     settings: Settings = app.state.settings
     service = app.state.encounters
-    interval = settings.encounters.reconcile_interval_s
     while True:
-        await asyncio.sleep(interval)
+        await asyncio.sleep(settings.encounters.reconcile_interval_s)
         try:
             await asyncio.to_thread(service.reconcile)
         except asyncio.CancelledError:
@@ -675,6 +674,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(search_routes.router)
     app.include_router(push_routes.router)
     app.include_router(push_settings_routes.router)
+    app.include_router(tuning_routes.router)
     app.include_router(push_floorplan_routes.router)
     app.include_router(push_map_routes.router)
     app.include_router(replay_routes.router)

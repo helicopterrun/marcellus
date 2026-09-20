@@ -10,11 +10,6 @@
     private: "Private",
     off_limits: "Restricted",
   };
-  var SUBJECTS = ["person", "vehicle", "animal", "thing"];
-  var LEVELS = ["log", "quiet", "notify", "urgent"];
-  // Override values are routing *levels*, displayed in the app's outcome
-  // vocabulary (Log/Glance/Notify/Alarm — glance ⇄ quiet, alarm ⇄ urgent).
-  var LEVEL_LABELS = { log: "Log", quiet: "Glance", notify: "Notify", urgent: "Alarm" };
 
   var banner = document.getElementById("zones-banner");
   var zonesList = document.getElementById("zones-list");
@@ -25,6 +20,7 @@
   var doc = null; // the settings document we mutate and PUT back
   var rev = null; // settings revision — stale PUTs 409 instead of clobbering
   var dirty = false;
+  var lastData = null; // last full GET /v1/push/settings response
 
   var showBanner = SC.banner(banner);
   var fetchJson = SC.fetchJson;
@@ -34,6 +30,26 @@
     dirty = true;
     saveState.textContent = "unsaved changes";
   }
+
+  // Extension point for policy.js: shares the live doc/markDirty/rev so the
+  // routing+notifications editors can mutate the same document that this
+  // file's #save-btn PUTs, without a second save button or document fetch.
+  var policyLoadedCbs = [];
+  function notifyPolicyLoaded() {
+    policyLoadedCbs.forEach(function (cb) {
+      try { cb(doc, lastData); } catch (err) { showBanner(err.message, true); }
+    });
+  }
+  window.SC = window.SC || {};
+  window.SC.policy = {
+    get doc() { return doc; },
+    get data() { return lastData; },
+    markDirty: markDirty,
+    onLoaded: function (cb) {
+      policyLoadedCbs.push(cb);
+      if (doc) cb(doc, lastData);
+    },
+  };
 
 
   function renderZone(zone) {
@@ -94,32 +110,8 @@
     classRow.appendChild(select);
     card.appendChild(classRow);
 
-    // Per-subject overrides.
-    var ovRow = el("div", { style: "margin:0.25em 0" });
-    SUBJECTS.forEach(function (subject) {
-      var wrap = el("label", { style: "margin-right:0.6em;white-space:nowrap" });
-      wrap.appendChild(el("span", { class: "help", text: subject + " " }));
-      var sel = el("select", {});
-      sel.appendChild(el("option", { value: "", text: "inherit" }));
-      var ov = ((doc.zone_overrides || {})[zone.zone] || {})[subject] || "";
-      LEVELS.forEach(function (lvl) {
-        var opt = el("option", { value: lvl, text: LEVEL_LABELS[lvl] });
-        if (lvl === ov) opt.selected = true;
-        sel.appendChild(opt);
-      });
-      sel.addEventListener("change", function () {
-        if (!doc.zone_overrides) doc.zone_overrides = {};
-        var row = doc.zone_overrides[zone.zone] || {};
-        if (sel.value) row[subject] = sel.value;
-        else delete row[subject];
-        if (Object.keys(row).length) doc.zone_overrides[zone.zone] = row;
-        else delete doc.zone_overrides[zone.zone];
-        markDirty();
-      });
-      wrap.appendChild(sel);
-      ovRow.appendChild(wrap);
-    });
-    card.appendChild(ovRow);
+    // Per-subject overrides are edited in the single #zone-overrides-matrix
+    // editor (policy.js), not per-zone-card here.
     return card;
   }
 
@@ -202,12 +194,14 @@
     var data = await fetchJson("/v1/push/settings");
     doc = data.settings;
     rev = data.rev;
+    lastData = data;
     zonesList.textContent = "";
     zonesList.classList.remove("skeleton");
     (data.available_zones || []).forEach(function (zone) {
       zonesList.appendChild(renderZone(zone));
     });
     renderNeighbors(data.available_cameras || []);
+    notifyPolicyLoaded();
     return data;
   }
 
@@ -256,6 +250,7 @@
             rev = j.rev;
             dirty = false;
             saveState.textContent = "saved ✓";
+            notifyPolicyLoaded();
           } catch (err) {
             saveState.textContent = "error: " + err.message;
           }
@@ -272,10 +267,21 @@
         } catch (e) { /* keep status text */ }
         throw new Error(msg);
       }
-      var okJson = await resp.json();
-      rev = okJson.rev;
+      await resp.json(); // PUT response contract unchanged; re-GET below for the normalized doc
+      // Re-fetch so server-side normalization (e.g. zone_overrides cleanup)
+      // is reflected in the editors rather than the pre-save local doc.
+      var fresh = await fetchJson("/v1/push/settings");
+      doc = fresh.settings;
+      rev = fresh.rev;
+      lastData = fresh;
       dirty = false;
       saveState.textContent = "saved ✓";
+      notifyPolicyLoaded();
+      zonesList.textContent = "";
+      (fresh.available_zones || []).forEach(function (zone) {
+        zonesList.appendChild(renderZone(zone));
+      });
+      renderNeighbors(fresh.available_cameras || []);
     } catch (err) {
       saveState.textContent = "error: " + err.message;
     }

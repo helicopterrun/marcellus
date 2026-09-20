@@ -66,6 +66,10 @@ warning logged at startup (see `docs/deployment.md`).
   guessing a valid one is infeasible anyway). Once the limit is hit the
   sidecar answers 429 with a `Retry-After` header until the window clears.
   Set `login_rate_limit_attempts` to `0` to disable.
+- `tuning_path` — JSON file of runtime overrides written by the `/settings`
+  Tuning panel (default `config/tuning.json`, next to `push.push_settings_path`).
+  Read on every process start (web app, CLI, watchdog, face-capture timer) so
+  a tuned value applies everywhere, not just to the running server.
 
 `log_level` (top level) defaults to `INFO`.
 

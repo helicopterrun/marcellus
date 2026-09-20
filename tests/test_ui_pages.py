@@ -78,6 +78,22 @@ def test_devices_page_empty(client: TestClient) -> None:
     assert "no devices registered" in r.text
 
 
+def test_settings_page_has_tuning_and_config_anchors(client: TestClient) -> None:
+    """Part C: the Tuning + Effective configuration sections replaced the
+    old read-only Services block, and the nav links added in Part B
+    (`#tuning`, `#config`) must resolve to real ids."""
+    r = client.get("/settings")
+    assert r.status_code == 200
+    assert 'id="tuning"' in r.text
+    assert 'id="config"' in r.text
+    assert 'id="tuning-sections"' in r.text
+    assert 'id="tuning-save"' in r.text
+    assert 'id="config-table"' in r.text
+    assert "/static/js/tuning.js" in r.text
+    # The old read-only Services block is gone.
+    assert 'id="services"' not in r.text
+
+
 def test_settings_page_renders_with_off_cell(client: TestClient) -> None:
     """A routing cell switched off makes the ladder answer "suppressed" for
     the notification examples; that level is outside LEVELS and used to

@@ -217,6 +217,10 @@ class EncounterService:
         """BACKFILL/repair sweep over `reviewsegment` -- the "belt" catching
         anything the MQTT path missed or saw only partially. Sync; run via
         `asyncio.to_thread` from the server's loop."""
+        # Rebuild every reconcile (cheap) so gap_s/max_duration_s/
+        # recent_cameras/min_copresence_s pick up a tuning override live,
+        # without needing a restart to recreate the service.
+        self._cfg = _linker_config(self.settings)
         now = self._now()
         frigate_conn = db.open_frigate_ro(self.settings.frigate.db_path)
         sidecar_conn = self._conn()
