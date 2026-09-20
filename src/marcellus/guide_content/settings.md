@@ -14,6 +14,15 @@ the sidecar's own knobs in one place.
 - **Zones** (`/settings#zones`) — the zone routing policy that decides which
   zones matter for alerts, zone neighbor relationships, and export/import of
   the whole policy as JSON.
+- **Routing** (`/settings#routing`) — the outcomes matrix (subject × place →
+  Off/Log/Glance/Notify/Alarm), recognition relaxation for known people and
+  vehicles, and per-zone overrides; edits here replace the old read-only
+  attention-ladder table. "What the phone will say" underneath renders live
+  example notifications from the current matrix.
+- **Notifications** (`/settings#notifications`) — quiet hours (start/end and
+  whether they cap at Glance or just mute sounds), the escalation sound,
+  Live Activity delivery mode, and which opening-class zones get Live
+  Activity picks.
 - **Push devices** (`/settings#push`) — every registered phone, with per-
   device **Test** buttons, plus the live attention-ladder table and example
   notifications rendered by the real pipeline. Currently
@@ -49,6 +58,21 @@ the sidecar's own knobs in one place.
   **Restart Frigate to apply** once (~30 s of blind cameras). Worth doing once at setup and again if
   a camera is replaced or its streams reconfigured.
 - **Faces** — a read-only view of the face pipeline configuration.
+- **Tuning** (`/settings#tuning`) — every runtime knob (`GET`/`PUT
+  /v1/tuning`), grouped by config section, editable in place. A knob whose
+  value comes from an environment variable is **locked** (env always wins
+  over an override, shown with an `env` badge) and can only be changed by
+  editing that environment variable and restarting. Most numeric/interval
+  knobs on `face_enrich`, `encounters`, `scrub`, `sidecar` and `push`
+  (delivery timing/backfill/rate-limit fields) apply **live** — no restart —
+  the rest need a restart, which the page flags with a **restart** badge per
+  row and a persistent banner after saving or on reload naming the affected
+  keys. Wiring fields (hosts, paths, secrets) are read-only here and shown
+  masked when secret.
+- **Effective configuration** (`/settings#config`) — the same data as
+  Tuning, filtered to the non-editable (wiring/secret) knobs, as a compact
+  key/value/source table — the quickest way to see exactly what the running
+  process resolved for a host, path or secret without opening the YAML.
 - **Help** — a link to this guide; on phones this is the guide's front door.
 - **About** — version and debug links.
 

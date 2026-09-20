@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from marcellus import __version__, db
 from marcellus.push import policy_settings, store
 from marcellus.routes import scrub as scrub_routes
+from marcellus.routes.tuning import _sections as _tuning_sections
 from marcellus.zones import load_camera_zones
 
 router = APIRouter(tags=["settings"])
@@ -49,37 +50,6 @@ def _camera_summary(settings: Any) -> list[dict[str, Any]]:
             }
         )
     return rows
-
-
-def _service_rows(settings: Any) -> list[dict[str, str]]:
-    """Read-only summary of the YAML-only feature switches, so the settings
-    page reflects the whole configuration surface (edits happen in the
-    sidecar's config file; the guide link explains each one)."""
-
-    def onoff(flag: bool) -> str:
-        return "on" if flag else "off"
-
-    return [
-        {"name": "Scrub cache", "value": onoff(settings.scrub.enabled), "guide": "/guide/scrub"},
-        {
-            "name": "Push",
-            "value": f"{onoff(settings.push.enabled)} · {settings.push.transport}",
-            "guide": "/guide/push-notifications",
-        },
-        {
-            "name": "Face capture",
-            "value": onoff(settings.face_capture.enabled),
-            "guide": "/guide/faces-pipeline",
-        },
-        {
-            "name": "Face enrichment",
-            "value": onoff(settings.face_enrich.enabled),
-            "guide": "/guide/identities",
-        },
-        {"name": "Watchdog", "value": onoff(settings.watchdog.enabled), "guide": "/guide/settings"},
-        {"name": "Proxy", "value": onoff(settings.proxy.enabled), "guide": "/guide/settings"},
-        {"name": "Log level", "value": settings.log_level, "guide": "/guide/first-run"},
-    ]
 
 
 #: Shared display vocabulary (mirrors zones.js / the app).
@@ -193,7 +163,7 @@ async def settings_view(request: Request) -> Any:
             "push_enabled": settings.push.enabled,
             "transport": settings.push.transport,
             "camera_rows": _camera_summary(settings),
-            "service_rows": _service_rows(settings),
+            "tuning_sections": _tuning_sections(),
             "ladder": _ladder_matrix(),
             "notif_examples": _notification_examples(),
             "version": __version__,

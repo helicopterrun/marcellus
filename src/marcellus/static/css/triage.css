@@ -793,6 +793,71 @@ body.map-full-open { overflow: hidden; }
 @media (max-width: 720px) {
   .ladder-table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
 }
+
+/* Settings › Routing/Notifications: editable outcomes/zone-override
+   matrices (policy.js) and toggle rows shared across both sections. */
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 8px; }
+.matrix-table td, .matrix-table th { text-align: center; white-space: nowrap; }
+.matrix-table td:first-child, .matrix-table th:first-child { text-align: left; }
+.matrix-table select {
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm);
+  padding: 3px 6px;
+}
+.toggle-row { display: flex; align-items: center; gap: 8px; margin: 0.4em 0; font-size: 13px; color: var(--text); }
+.toggle-row select, .toggle-row input[type=text], .toggle-row input[type=time] {
+  background: var(--panel); color: var(--text); border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm); padding: 4px 8px; font-size: 13px; font-family: var(--font-mono);
+}
+select[data-level="off"] { background: var(--surface-2); color: var(--muted-2); }
+select[data-level="log"] { background: var(--surface-2); color: var(--muted); }
+select[data-level="glance"] { background: var(--mixed-bg); color: var(--mixed-text); }
+select[data-level="notify"] { background: var(--warn-bg); color: var(--warn-text); }
+select[data-level="alarm"] { background: var(--danger-bg); color: var(--danger-text); }
+/* Settings › Tuning/Effective configuration (tuning.js). */
+.tuning-section { margin: 0.6em 0; }
+.tuning-section > summary { font-weight: 600; cursor: pointer; padding: 4px 0; }
+.tuning-grid {
+  display: grid;
+  grid-template-columns: minmax(160px, 260px) 1fr auto auto auto;
+  gap: 6px 10px;
+  align-items: center;
+  font-size: 13px;
+  padding: 4px 0 10px;
+}
+.tuning-label code { font-family: var(--font-mono); color: var(--text); }
+.tuning-label .help { font-size: 11px; margin-top: 1px; }
+.tuning-control input[type=text], .tuning-control input[type=number],
+.tuning-control select, .tuning-control textarea {
+  font: inherit; font-family: var(--font-mono); font-size: 12px;
+  background: var(--panel); color: var(--text); border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm); padding: 3px 6px; width: 100%; box-sizing: border-box;
+}
+.tuning-control textarea.invalid { border-color: var(--danger-text); }
+.tuning-value { color: var(--muted); font-family: var(--font-mono); word-break: break-word; }
+.tuning-dict { display: flex; flex-wrap: wrap; gap: 8px; }
+.tuning-dict-item { display: inline-flex; align-items: center; gap: 4px; }
+.tuning-dict-item input[type=number] { width: 5em; }
+.tuning-reset { font-size: 11px; color: var(--muted); text-decoration: none; white-space: nowrap; }
+.tuning-reset:hover { color: var(--accent); }
+.badge.src-default { background: var(--surface-2); color: var(--muted); }
+.badge.src-yaml { background: var(--info-bg); color: var(--info-text); }
+.badge.src-env { background: var(--btn-neutral); color: var(--text); }
+.badge.src-override { background: var(--mixed-bg); color: var(--mixed-text); }
+.badge.restart { background: var(--warn-bg); color: var(--warn-text); }
+@media (max-width: 720px) {
+  .tuning-grid { grid-template-columns: 1fr; }
+  .tuning-row {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;
+    border-top: 1px solid var(--stroke); padding-top: 6px; margin-top: 6px;
+  }
+  .tuning-row .tuning-label, .tuning-row .tuning-control { flex: 1 1 100%; }
+}
 .section-h .section-link { color: var(--text); text-decoration: none; }
 .section-h .section-link:hover { color: var(--accent); }
 .event-strip { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 8px; mask-image: linear-gradient(to right, black calc(100% - 40px), transparent); -webkit-mask-image: linear-gradient(to right, black calc(100% - 40px), transparent); }
