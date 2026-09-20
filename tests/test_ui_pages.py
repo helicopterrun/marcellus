@@ -78,6 +78,22 @@ def test_devices_page_empty(client: TestClient) -> None:
     assert "no devices registered" in r.text
 
 
+def test_settings_page_renders_with_off_cell(client: TestClient) -> None:
+    """A routing cell switched off makes the ladder answer "suppressed" for
+    the notification examples; that level is outside LEVELS and used to
+    KeyError the page (prod 2026-09-20)."""
+    from marcellus.push import ladder_policy
+
+    before = set(ladder_policy.OFF_CELLS)
+    ladder_policy.set_off_cells({("animal", "yard"), ("stranger", "doors")})
+    try:
+        r = client.get("/settings")
+    finally:
+        ladder_policy.set_off_cells(before)
+    assert r.status_code == 200
+    assert "Off" in r.text
+
+
 def test_devices_page_lists_registered(
     client: TestClient, sidecar_db_path: Path
 ) -> None:

@@ -88,7 +88,14 @@ _PLACE_LABELS = {
     "street": "Public", "yard": "Semi-private", "doors": "Entry / exit",
     "private": "Private", "off_limits": "Restricted",
 }
-_LEVEL_LABELS = {"log": "Log", "quiet": "Glance", "notify": "Notify", "urgent": "Alarm"}
+# `ladder.SUPPRESSED` ("suppressed") is what `base_level` answers for a
+# subject x place cell the user switched off (policy.OFF_CELLS) -- it is not
+# in ladder_policy.LEVELS but the example composer hits it whenever a
+# scenario's cell is off, so it needs a label here or /settings 500s.
+_LEVEL_LABELS = {
+    "log": "Log", "quiet": "Glance", "notify": "Notify", "urgent": "Alarm",
+    "suppressed": "Off",
+}
 _SUBJECT_LABELS = {
     "stranger": "Unknown person", "known": "Known person",
     "animal": "Animal", "thing": "Vehicle / thing",
