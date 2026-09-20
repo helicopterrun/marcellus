@@ -48,13 +48,11 @@
   --space-4: 16px;
   --space-5: 24px;
   --space-6: 32px;
-  /* Type scale. Departure Mono is a pixel font drawn on an 11px em, so the
-     steps sit on 11px and its multiples where readability allows; 16px is
-     the iOS no-zoom floor for focused inputs and stays as-is. */
+  /* Type scale. */
   --text-xs: 11px;
-  --text-sm: 11px;
+  --text-sm: 12px;
   --text-base: 13px;
-  --text-lg: 16px;
+  --text-lg: 15px;
   --text-xl: 22px;
   /* Motion. */
   --dur-fast: 120ms;
@@ -68,10 +66,11 @@
   --warn: #E3B341;    --warn-bg: #78350F;   --warn-text: #FDE68A;
   --danger: #F87171;  --danger-bg: #991B1B; --danger-text: #FECACA;
   --info: #93C5FD;    --info-bg: #1E40AF;   --info-text: #BFDBFE;
-  /* Departure Mono is the Elsinore app's preset font (ThemePalette.elsinore
-     -> monoFamily: .departureMono); shipped in static/fonts/ under the OFL. */
+  /* Mirrors the Elsinore app's preset: Departure Mono (ThemePalette.elsinore
+     -> monoFamily: .departureMono; shipped in static/fonts/ under the OFL)
+     for titles and data readouts, San Francisco / the system sans for prose. */
   --font-mono: "Departure Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  --font-body: "Departure Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-body: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto, sans-serif;
 }
 
 /* ============================================================ base */
@@ -94,6 +93,8 @@ button, a, select, input, summary { transition: background-color var(--dur-fast)
    and rubber-band overscroll shows panel, not white. */
 html { background: var(--panel); -webkit-tap-highlight-color: transparent; }
 body { font-family: var(--font-body); font-variant-numeric: tabular-nums; margin: 0; background: var(--panel); color: var(--text); }
+/* Titles in Departure Mono, like the app's readout headers; prose stays sans. */
+h1, h2, h3, .section-title { font-family: var(--font-mono); font-weight: 400; }
 table { font-family: var(--font-mono); }
 /* Pressed-state feedback where hover can't exist (touch). */
 button:active, .btn:active, .page-link:active, .tabbar .tab:active { opacity: 0.75; }
@@ -1315,13 +1316,13 @@ body.map-full-open .me-toolbar {
 .login-brand h2 { margin: 0; font-family: var(--font-mono); font-size: 22px; font-weight: 400; letter-spacing: 0.02em; }
 .login-tagline { margin: 0 0 22px; font-family: var(--font-mono); font-size: var(--text-sm); color: var(--muted); }
 .login-card { background: var(--surface); border: 1px solid var(--stroke); border-radius: var(--radius-lg); padding: 20px; }
-.login-card .page-intro { margin: 0 0 16px; font-size: var(--text-sm); color: var(--muted); line-height: 1.6; }
+.login-card .page-intro { margin: 0 0 16px; font-size: var(--text-sm); color: var(--muted); line-height: 1.45; }
 .login-field { display: block; margin-top: 14px; font-family: var(--font-mono); font-size: var(--text-sm); color: var(--muted); }
 /* One rule for both fields: the base sheet's iOS 16px rule only matches
    type=text, which is what left the password box shorter than the username. */
 .login-field input { display: block; width: 100%; margin-top: 6px; height: 40px; padding: 0 12px; font: inherit; font-size: 16px; color: var(--text); background: var(--panel); border: 1px solid var(--stroke); border-radius: var(--radius-sm); }
 .login-field input:focus { border-color: var(--accent); outline: none; }
-.login-remember { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: var(--text-sm); color: var(--muted); cursor: pointer; }
+.login-remember { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-family: var(--font-mono); font-size: var(--text-sm); color: var(--muted); cursor: pointer; }
 .login-remember input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
 .login-actions { display: flex; align-items: center; gap: 12px; margin-top: 20px; }
 .login-actions .btn-primary { min-width: 6.5rem; height: 40px; }
