@@ -1,4 +1,4 @@
-# frigate-sidecar: scrub-cache + Frigate proxy — implementation spec
+# Marcellus: scrub-cache + Frigate proxy — implementation spec
 
 **Status:** design spec, ready to build against. Written 2026-07-30, revised 2026-07-30 after client-side review (PR #3) and Phase 1 measurements against the live box.
 **Audience:** whoever implements the sidecar side of Elsinore's reel.
@@ -40,7 +40,7 @@ Plus a small set of `/v1` read endpoints that collapse the reel's per-window fan
 
 ```
                          ┌─────────────────────────────────────────────┐
-   Elsinore (iOS) ──────▶│  frigate-sidecar  (single origin, :5001)     │
+   Elsinore (iOS) ──────▶│  Marcellus        (single origin, :5001)     │
    one base URL          │                                              │
                          │  /v1/scrub/…    ── sprite cache (disk)  ◀──┐  │
                          │  /v1/coverage/… ── reads frigate.db RO    │  │

@@ -7,7 +7,7 @@ routes: ["/guide"]
 
 This guide covers the two halves of the Elsinore camera system:
 
-- **frigate-sidecar** — the web app you're reading this in. It sits beside a
+- **Marcellus** — the web app you're reading this in. It sits beside a
   [Frigate](https://frigate.video) NVR and adds review tooling, analytics,
   smooth timeline scrubbing, face recognition, and push notifications.
 - **Elsinore** — the native iOS companion app: live grid, scrub reel,

@@ -35,7 +35,7 @@ def client(frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path) -> Test
 def test_list_html(client: TestClient) -> None:
     r = client.get("/triage")
     assert r.status_code == 200
-    assert "frigate-sidecar" in r.text
+    assert "Marcellus" in r.text
     # Each fixture camera should appear in the camera filter.
     assert "alley-overview" in r.text
     assert "street-overview" in r.text
@@ -286,7 +286,7 @@ def test_motion_blank_form(client: TestClient) -> None:
     # No baseline/target: page renders the form + a "set a target" empty state.
     r = client.get("/motion")
     assert r.status_code == 200
-    assert "frigate-sidecar" in r.text
+    assert "Marcellus" in r.text
     # Header nav renders both pages and motion is the active link.
     assert 'class="page-link active"' in r.text
     assert "Motion" in r.text

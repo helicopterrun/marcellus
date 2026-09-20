@@ -1,13 +1,13 @@
 {% extends "base.html" %}
 {% set active_page = 'status' %}
-{% block title %}Status · frigate-sidecar{% endblock %}
+{% block title %}Status · Marcellus{% endblock %}
 
 {% block page_heading %}<h1 class="sr-only">Status</h1>{% endblock %}
 {% block body %}
 <main id="main-content">
   <div class="stat-row">
     <div class="stat-card">
-      <div class="stat-label">Sidecar</div>
+      <div class="stat-label">Marcellus</div>
       <div class="stat-value">v{{ status.version }}</div>
     </div>
     <div class="stat-card">
@@ -69,7 +69,7 @@
     </div>
     {% endif %}
     <div class="stat-card">
-      <div class="stat-label">Sidecar DB</div>
+      <div class="stat-label">Marcellus DB</div>
       <div class="stat-value" data-k="sidecar-db">{{ fmt_bytes(status.sizes.sidecar_db) }}</div>
     </div>
     <div class="stat-card">
@@ -128,7 +128,7 @@
     {% endif %}
     {% if hw.host.rss_bytes is defined %}
     <div class="stat-card">
-      <div class="stat-label">Sidecar RSS</div>
+      <div class="stat-label">Marcellus RSS</div>
       <div class="stat-value" data-hw="rss">{{ fmt_bytes(hw.host.rss_bytes) }}</div>
     </div>
     {% endif %}
@@ -200,7 +200,7 @@
   <h2 class="section-h">Counters</h2>
   <div class="stat-row">
     <div class="stat-card">
-      <div class="stat-label">Sidecar uptime</div>
+      <div class="stat-label">Marcellus uptime</div>
       <div class="stat-value" data-k="uptime">{{ c.uptime_s }}s</div>
     </div>
     <div class="stat-card">

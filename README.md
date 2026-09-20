@@ -1,6 +1,8 @@
-# frigate-sidecar
+# Marcellus
 
-A small companion server for [Frigate NVR](https://github.com/blakeblackshear/frigate).
+A companion sidecar for [Frigate NVR](https://github.com/blakeblackshear/frigate): scrub
+cache, push notifications, triage and analysis pages, face pipeline.
+
 It adds:
 
 - **Triage UI** for labeling tracked-object events as true-positive / false-positive

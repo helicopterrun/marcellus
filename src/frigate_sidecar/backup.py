@@ -223,7 +223,7 @@ def restore_backup(settings: Settings, src: Path, *, force: bool = False) -> Bac
     with _read_dir(src) as src_dir:
         manifest_path = src_dir / MANIFEST_NAME
         if not manifest_path.exists():
-            raise BackupError(f"not a frigate-sidecar backup: no {MANIFEST_NAME} in {src}")
+            raise BackupError(f"not a Marcellus backup: no {MANIFEST_NAME} in {src}")
         manifest = BackupManifest.from_json(manifest_path.read_text())
 
         for name, meta in manifest.files.items():

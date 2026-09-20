@@ -1,5 +1,5 @@
 [Unit]
-Description=Frigate Sidecar (triage UI + analysis)
+Description=Marcellus (triage UI + analysis)
 Documentation=https://github.com/helicopterrun/frigate-sidecar
 After=network.target
 

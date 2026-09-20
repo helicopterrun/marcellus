@@ -582,7 +582,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     app = FastAPI(
-        title="frigate-sidecar",
+        title="Marcellus",
         version=__version__,
         docs_url="/docs",
         redoc_url=None,

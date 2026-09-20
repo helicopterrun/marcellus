@@ -1,4 +1,4 @@
-"""Top-level CLI for frigate-sidecar."""
+"""Top-level CLI for Marcellus."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from frigate_sidecar.tables import render_table
 
 app = typer.Typer(
     name="fsc",
-    help="frigate-sidecar: triage UI + read-only analysis for Frigate NVR.",
+    help="Marcellus: triage UI + read-only analysis for Frigate NVR.",
     no_args_is_help=True,
 )
 
