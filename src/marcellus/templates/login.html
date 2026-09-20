@@ -4,28 +4,44 @@
 
 {% block page_heading %}<h1 class="sr-only">Login</h1>{% endblock %}
 {% block body %}
-<main id="main-content" style="max-width:22rem;margin:12vh auto 0">
-  <h2 class="section-title">Marcellus</h2>
-  <p class="help page-intro">
-    Log in with your <strong>Frigate</strong> account — the sidecar has no
-    users of its own. The form posts straight to Frigate through the
-    sidecar's proxy, so the session cookie lands here too.
-  </p>
-  <form id="login-form">
-    <label class="help" style="display:block;margin-top:0.8em">username
-      <input id="login-user" name="username" type="text" autocomplete="username" required
-             style="display:block;width:100%;margin-top:0.2em">
-    </label>
-    <label class="help" style="display:block;margin-top:0.8em">password
-      <input id="login-password" name="password" type="password" autocomplete="current-password" required
-             style="display:block;width:100%;margin-top:0.2em">
-    </label>
-    <label class="help" style="display:block;margin-top:0.8em">
-      <input id="login-remember" type="checkbox" checked> stay signed in on this device
-    </label>
-    <button type="submit" class="btn-primary" style="margin-top:1em">Log in</button>
-    <span id="login-state" class="help" style="margin-left:0.6em"></span>
-  </form>
+<main id="main-content" class="login">
+  <div class="login-brand">
+    <img src="/static/icons/icon-192.png" alt="" width="44" height="44">
+    <h2>Marcellus</h2>
+  </div>
+  <p class="login-tagline">Frigate sidecar · scrub, triage, encounters, push for Elsinore</p>
+  <div class="login-card">
+    <p class="help page-intro">
+      Log in with your <strong>Frigate</strong> account — the sidecar has no
+      users of its own. The form posts straight to Frigate through the
+      sidecar's proxy, so the session cookie lands here too.
+    </p>
+    <form id="login-form">
+      <label class="login-field">username
+        <input id="login-user" name="username" type="text" autocomplete="username"
+               autocapitalize="none" autocorrect="off" spellcheck="false" required>
+      </label>
+      <label class="login-field">password
+        <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <label class="login-remember">
+        <input id="login-remember" type="checkbox" checked> stay signed in on this device
+      </label>
+      <div class="login-actions">
+        <button type="submit" class="btn-primary">Log in</button>
+        <span id="login-state" class="help" role="status" aria-live="polite"></span>
+      </div>
+    </form>
+  </div>
+  <ul class="login-links">
+    <li><a href="https://github.com/helicopterrun/marcellus" rel="noopener">GitHub</a></li>
+    <li><a href="https://github.com/helicopterrun/marcellus#readme" rel="noopener">README</a></li>
+    <li><a href="https://github.com/helicopterrun/marcellus/blob/main/docs/deployment.md" rel="noopener">Deployment</a></li>
+    <li><a href="https://github.com/helicopterrun/marcellus/issues" rel="noopener">Issues</a></li>
+    <li><a href="https://helicopterrun.github.io/" rel="noopener">Elsinore app</a></li>
+    <li><a href="https://docs.frigate.video/" rel="noopener">Frigate docs</a></li>
+  </ul>
+  <p class="login-version">marcellus v{{ version }} · MIT · the in-app <a href="/guide">Guide</a> opens after login</p>
 </main>
 {% endblock %}
 

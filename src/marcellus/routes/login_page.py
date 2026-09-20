@@ -21,7 +21,9 @@ router = APIRouter(tags=["auth"])
 @router.get("/login", response_class=HTMLResponse)
 def login_view(request: Request) -> Any:
     templates = request.app.state.templates
-    return templates.TemplateResponse(request, "login.html", {})
+    from marcellus import __version__
+
+    return templates.TemplateResponse(request, "login.html", {"version": __version__})
 
 
 @router.post("/login/remember", status_code=204)
