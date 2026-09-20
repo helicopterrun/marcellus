@@ -992,3 +992,74 @@ def test_reconcile_picks_up_live_adjacency_override(tmp_path: Path) -> None:
     conn.close()
     assert r3_row["link_reason"] == "adjacent"
     assert r3_row["encounter_id"] == r2_row["encounter_id"]
+
+
+def test_reconcile_honours_split_across_two_cycles(tmp_path: Path) -> None:
+    """After a human splits an atom out of its encounter, a later reconcile
+    (even one where the old encounter is still open and would otherwise be
+    the obvious re-link target) must not re-join it -- `split_from` (fed by
+    `service._pin_split`) excludes the donor, and the `pinned/split`
+    membership lock in `store.upsert_atom` refuses any move regardless."""
+    frigate_db = _reviewsegment_db(tmp_path)
+    now = time.time()
+    _insert_review(
+        frigate_db, rid="p1", camera="alley-wide", start=now, end=now + 6, objects=("person",)
+    )
+    _insert_review(
+        frigate_db,
+        rid="p2",
+        camera="alley-wide",
+        start=now + 10,
+        end=now + 16,
+        objects=("person",),
+    )
+
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(
+        settings, adjacency=Adjacency(edges=frozenset()), now=lambda: now + 20
+    )
+    stats = service.reconcile()
+    assert stats.new == 2
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        p1_encounter = store.member_row(conn, "p1")["encounter_id"]
+        p2_encounter = store.member_row(conn, "p2")["encounter_id"]
+        assert p1_encounter == p2_encounter  # same_camera/gap linked them
+        donor_id = store.split_atom(conn, "p2", now + 20)
+        assert donor_id != p1_encounter
+    finally:
+        conn.close()
+
+    # Cycle 1: p2's reviewsegment end_time extends -- would ordinarily still
+    # link back to p1's encounter (same camera, in-gap) but must not.
+    conn = sqlite3.connect(frigate_db)
+    conn.execute("UPDATE reviewsegment SET end_time = ? WHERE id = 'p2'", (now + 17,))
+    conn.commit()
+    conn.close()
+    service.reconcile()
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        row = store.member_row(conn, "p2")
+        assert row["encounter_id"] != p1_encounter
+        assert row["link_reason"] == "split"
+        first_encounter = row["encounter_id"]
+    finally:
+        conn.close()
+
+    # Cycle 2: still split, still not re-joined.
+    conn = sqlite3.connect(frigate_db)
+    conn.execute("UPDATE reviewsegment SET end_time = ? WHERE id = 'p2'", (now + 18,))
+    conn.commit()
+    conn.close()
+    service.reconcile()
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        row = store.member_row(conn, "p2")
+        assert row["encounter_id"] == first_encounter
+        assert row["encounter_id"] != p1_encounter
+        assert row["link_reason"] == "split"
+    finally:
+        conn.close()

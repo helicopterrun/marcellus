@@ -16,6 +16,8 @@
     </form>
   </div>
 
+  {% if msg %}<p class="badge ok">{{ msg }}</p>{% endif %}
+
   {% if not enabled %}
   <p class="empty"><b>encounters.enabled is false.</b> Encounters still lists
     whatever was linked while it was on.</p>

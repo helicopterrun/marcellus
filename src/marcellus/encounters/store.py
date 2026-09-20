@@ -256,13 +256,20 @@ def upsert_atom(
 
     if existing is not None:
         current_encounter_id = str(existing["encounter_id"])
+        # A human decision (split/pin) locks this atom's membership -- it is
+        # never re-homed by a later decide()/reconcile pass, sealed donor or
+        # not. `pin_atom`/`split_atom` are the only ways to move it after
+        # that; see docs/encounters.md "Correcting encounters".
+        human_locked = existing["link_reason"] in ("pinned", "split")
         sealed_rehome = (
-            decision.encounter_id is not None
+            not human_locked
+            and decision.encounter_id is not None
             and decision.encounter_id != current_encounter_id
             and _encounter_sealed(conn, current_encounter_id)
         )
         founder_rehome = (
-            not sealed_rehome
+            not human_locked
+            and not sealed_rehome
             and decision.encounter_id is not None
             and decision.encounter_id != current_encounter_id
             and decision.reason != "new"
@@ -475,6 +482,139 @@ def decisions_for(conn: sqlite3.Connection, atom_id: str) -> list[dict[str, Any]
         "SELECT * FROM encounter_decisions WHERE atom_id = ? ORDER BY created_at", (atom_id,)
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def add_decision(
+    conn: sqlite3.Connection,
+    atom_id: str,
+    action: str,
+    encounter_id: str,
+    note: str | None,
+    now: float,
+) -> None:
+    """Record one human decision, replacing any existing decision for the
+    same atom+action+encounter (the table's PK)."""
+    conn.execute(
+        "INSERT INTO encounter_decisions (atom_id, action, encounter_id, created_at, note) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(atom_id, action, encounter_id) DO UPDATE SET "
+        "created_at = excluded.created_at, note = excluded.note",
+        (atom_id, action, encounter_id, f"{now:.6f}", note),
+    )
+
+
+def clear_decisions(conn: sqlite3.Connection, atom_id: str) -> None:
+    conn.execute("DELETE FROM encounter_decisions WHERE atom_id = ?", (atom_id,))
+
+
+def split_atom(conn: sqlite3.Connection, atom_id: str, now: float, *, commit: bool = True) -> str:
+    """Split `atom_id` out of its current encounter into a fresh one of its
+    own, recording a `split` decision against the donor. The new encounter's
+    single member gets `link_reason='split'` -- never treated as a lone
+    founder (`founder_singleton` requires `link_reason == 'new'`), and never
+    re-homed by `upsert_atom` (see the `human_locked` guard there)."""
+    row = _member_row(conn, atom_id)
+    if row is None:
+        raise ValueError(f"no such atom: {atom_id}")
+    donor_id = str(row["encounter_id"])
+    add_decision(conn, atom_id, "split", donor_id, None, now)
+
+    new_encounter_id = uuid.uuid4().hex
+    conn.execute(
+        "INSERT INTO encounters (id, start_time, end_time, sealed_at, cameras_json, "
+        "labels_json, identities_json, zones_json, primary_event_id, peak_severity, "
+        "atom_count, updated_at) VALUES (?, ?, NULL, NULL, '[]', '[]', '[]', '[]', NULL, "
+        "'detection', 0, ?)",
+        (new_encounter_id, row["start_time"], now),
+    )
+    conn.execute(
+        "UPDATE encounter_members SET encounter_id = ?, link_reason = 'split', "
+        "confidence = 1.0, joined_at = ? WHERE atom_id = ?",
+        (new_encounter_id, now, atom_id),
+    )
+    _donor_after_move(conn, donor_id, now)
+    recompute(conn, new_encounter_id)
+    conn.execute("UPDATE encounters SET updated_at = ? WHERE id = ?", (now, new_encounter_id))
+    if commit:
+        conn.commit()
+    return new_encounter_id
+
+
+def pin_atom(
+    conn: sqlite3.Connection,
+    atom_id: str,
+    target_encounter_id: str,
+    now: float,
+    *,
+    commit: bool = True,
+) -> str:
+    """Pin `atom_id` into `target_encounter_id`, recording a `pin` decision
+    and clearing any `split` decision that named this same target (a pin
+    overrides an earlier split-away-from-here). The target may be sealed or
+    unsealed; a sealed target stays sealed."""
+    row = _member_row(conn, atom_id)
+    if row is None:
+        raise ValueError(f"no such atom: {atom_id}")
+    if (
+        conn.execute("SELECT 1 FROM encounters WHERE id = ?", (target_encounter_id,)).fetchone()
+        is None
+    ):
+        raise ValueError(f"no such encounter: {target_encounter_id}")
+
+    donor_id = str(row["encounter_id"])
+    add_decision(conn, atom_id, "pin", target_encounter_id, None, now)
+    conn.execute(
+        "DELETE FROM encounter_decisions WHERE atom_id = ? AND action = 'split' "
+        "AND encounter_id = ?",
+        (atom_id, target_encounter_id),
+    )
+
+    conn.execute(
+        "UPDATE encounter_members SET encounter_id = ?, link_reason = 'pinned', "
+        "confidence = 1.0, joined_at = ? WHERE atom_id = ?",
+        (target_encounter_id, now, atom_id),
+    )
+    if donor_id != target_encounter_id:
+        _donor_after_move(conn, donor_id, now)
+    recompute(conn, target_encounter_id)
+    conn.execute("UPDATE encounters SET updated_at = ? WHERE id = ?", (now, target_encounter_id))
+    if commit:
+        conn.commit()
+    return target_encounter_id
+
+
+def merge_encounters(
+    conn: sqlite3.Connection, source_id: str, target_id: str, now: float, *, commit: bool = True
+) -> int:
+    """Pin every member of `source_id` into `target_id` (recording a pin
+    decision per atom). `source_id` is deleted once empty. Returns the
+    number of atoms moved."""
+    if conn.execute("SELECT 1 FROM encounters WHERE id = ?", (target_id,)).fetchone() is None:
+        raise ValueError(f"no such encounter: {target_id}")
+    if source_id == target_id:
+        raise ValueError("source and target must differ")
+    member_rows = conn.execute(
+        "SELECT atom_id FROM encounter_members WHERE encounter_id = ?", (source_id,)
+    ).fetchall()
+    atom_ids = [str(r["atom_id"]) for r in member_rows]
+    for atom_id in atom_ids:
+        pin_atom(conn, atom_id, target_id, now, commit=False)
+    if commit:
+        conn.commit()
+    return len(atom_ids)
+
+
+def undo_decisions(
+    conn: sqlite3.Connection, atom_id: str, now: float, *, commit: bool = True
+) -> None:
+    """Clear every decision recorded for `atom_id`. Membership is left as-is
+    -- this only lifts the constraint on *future* re-links; a later
+    decide()/reconcile pass is free to move the atom again (unless its
+    membership row still says 'pinned'/'split', which `undo_decisions` does
+    not change -- see docs/encounters.md)."""
+    clear_decisions(conn, atom_id)
+    if commit:
+        conn.commit()
 
 
 def get_watermark(conn: sqlite3.Connection) -> float | None:

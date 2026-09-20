@@ -69,8 +69,26 @@ row for its atoms — each with camera, span, labels, zones, and the
 `link_reason`/confidence that put it there. The detail page adds links to
 each atom's underlying Frigate events.
 
-There's no pin/split UI yet — a human overriding the linker for one atom is
-a later slice.
+## Correcting encounters
+
+Each member row on the detail page has three actions, and the page itself
+has a fourth:
+
+- **Split out** — pulls one atom into a brand new encounter of its own. Use
+  this when the linker grouped something in that doesn't belong.
+- **Move to** — pins one atom into a specific encounter (by id, typed into
+  the field next to the button). Works even if the target is already
+  sealed.
+- **Undo decisions** — appears once an atom has any recorded decisions;
+  clears them so future automatic linking is no longer biased toward or
+  away from a particular encounter (it doesn't move the atom itself).
+- **Merge another encounter into this one** — a page-level form; folds
+  every atom from another encounter (by id) into the one you're viewing.
+
+A split or a pinned move is sticky: once you've made it, the linker never
+automatically moves that atom again, even across reconcile cycles or a
+sealed donor/target. The same actions are available as `/v1/encounters/...`
+JSON routes for scripting.
 
 ## Retention
 
