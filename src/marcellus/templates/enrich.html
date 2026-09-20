@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% set active_page = 'enrich' %}
+{% set _n = clusters|length %}
+{% set summary = _n ~ ' cluster' ~ ('s' if _n != 1 else '') %}
+{% block title %}Identities · Marcellus{% endblock %}
+
+{% block page_heading %}<h1 class="sr-only">Identities</h1>{% endblock %}
+{% block head %}
+<style>.id-excluded { opacity: 0.4; }</style>
+{% endblock %}
+{% block body %}
+<main id="main-content">
+  <div class="faces-bar">
+    <span class="mode">
+      {{ cameras|join(', ') or 'no cameras' }} · <b>{{ 'ON' if enabled else 'OFF' }}</b>
+    </span>
+    <span class="mode" title="events processed in the last 7 days, by pipeline outcome">
+      7d: <b>{{ stats.counts.get('enriched', 0) }}</b> enriched
+      · {{ stats.counts.get('no_faces', 0) }} no-face
+      · {{ stats.counts.get('no_frames', 0) }} no-frame
+      {% if stats.counts.get('error') %} · <b>{{ stats.counts['error'] }} err</b>{% endif %}
+    </span>
+    <span class="mode" title="seconds since the enrichment worker last completed a cycle">
+      worker:
+      {% if stats.cycle_age_s is not none %}<b>{{ stats.cycle_age_s }}s</b> ago
+      {% else %}<b>not running</b>{% endif %}
+    </span>
+    <a href="/enrich/clusters?show_excluded={{ 0 if show_excluded else 1 }}" class="page-link">
+      {{ 'Hide excluded' if show_excluded else 'Show excluded' }}</a>
+    <a href="/faces/captures" class="page-link">Face captures →</a>
+  </div>
+
+  <datalist id="cluster-names">
+    {% for n in known_names %}<option value="{{ n }}"></option>{% endfor %}
+  </datalist>
+
+  {% if not clusters %}
+    <p class="empty">
+      No identity clusters yet — they appear as people are seen on
+      {{ cameras|join(', ') or 'the enrolled cameras' }}.
+      {% if not enabled %}<br><b>face_enrich.enabled is false.</b>{% endif %}
+    </p>
+  {% endif %}
+
+  {% for c in clusters %}
+  <section class="capture-visit id-cluster" data-cluster="{{ c.cluster_id }}"
+           data-name="{{ c.name or '' }}"
+           data-thumb="{% if c.sample_event_id %}/enrich/thumb/{{ c.sample_event_id }}{% endif %}">
+    <header>
+      <span class="badge {{ 'recognized' if c.name else 'unknown' }}">
+        {{ 'known' if c.name else 'unknown' }}</span>
+      <b class="id-title">{% if c.name %}{{ c.name }}{% else %}unknown #{{ c.cluster_id }}{% endif %}</b>
+      <span class="mode">{{ c.observation_count }} sighting{{ 's' if c.observation_count != 1 else '' }}
+        · last {{ fmt_ts(c.last_seen_at) }}</span>
+      {% if similar.get(c.cluster_id) %}
+      {% set sim = similar[c.cluster_id] %}
+      <button type="button" class="id-similar" data-id="{{ c.cluster_id }}"
+              data-other="{{ sim.cluster_id }}"
+              title="centroid distance {{ sim.distance }}">
+        looks like {{ sim.name or 'unknown #' ~ sim.cluster_id }} — merge?
+      </button>
+      {% endif %}
+    </header>
+
+    <div class="capture-strip">
+      {% for e in c.sightings %}
+      <figure class="capture-card id-sighting{{ ' id-excluded' if e.excluded_at else '' }}"
+              data-event="{{ e.event_id }}">
+        <a href="/api/events/{{ e.event_id }}/snapshot.jpg" target="_blank" rel="noopener">
+          <img loading="lazy" src="/enrich/thumb/{{ e.event_id }}"
+               alt="sighting {{ loop.index }}">
+        </a>
+        {% if e.excluded_at %}
+        <button type="button" class="id-include" data-event="{{ e.event_id }}"
+                title="include this sighting again">&#8635;</button>
+        {% else %}
+        <button type="button" class="id-exclude" data-event="{{ e.event_id }}"
+                title="exclude this sighting from the cluster">&times;</button>
+        {% endif %}
+        <figcaption>
+          {{ fmt_ts(e.event_start_ts) }}
+          {%- if e.distance is not none %} · d {{ '%.2f'|format(e.distance) }}{% endif %}
+          {%- if e.excluded_at %} · excluded{% endif %}
+        </figcaption>
+      </figure>
+      {% endfor %}
+    </div>
+
+    <div class="id-actions">
+      <input type="text" class="cluster-name" list="cluster-names"
+             placeholder="who is this?" value="{{ c.name or '' }}"
+             data-id="{{ c.cluster_id }}">
+      <button type="button" class="btn btn-primary name-cluster" data-id="{{ c.cluster_id }}">
+        {{ 'rename' if c.name else 'name' }}</button>
+      <button type="button" class="btn btn-neutral merge-cluster" data-id="{{ c.cluster_id }}">
+        merge</button>
+      <button type="button" class="btn btn-danger delete-cluster" data-id="{{ c.cluster_id }}">
+        delete</button>
+    </div>
+  </section>
+  {% endfor %}
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/enrich.js?v={{ asset_v }}" defer></script>
+{% endblock %}

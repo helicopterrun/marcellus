@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% set active_page = 'score_histogram' %}
+{% block title %}Score Histogram · Marcellus{% endblock %}
+
+{% block page_heading %}<h1 class="sr-only">Score histogram</h1>{% endblock %}
+{% block body %}
+<main id="main-content">
+  <form class="filters" method="get" action="/score-histogram">
+    <label>days back
+      <input type="number" name="days" value="{{ filters.days }}" min="1" max="365" class="num-80">
+    </label>
+    <label>camera
+      <select name="camera">
+        <option value="">all</option>
+        {% for c in cameras %}
+          <option value="{{ c }}"{% if c == filters.camera %} selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>object
+      <select name="label">
+        <option value="">all</option>
+        {% for l in labels %}
+          <option value="{{ l }}"{% if l == filters.label %} selected{% endif %}>{{ l }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>min samples
+      <input type="number" name="min_samples" value="{{ filters.min_samples }}" min="1" max="500" class="num-80">
+    </label>
+    <button type="submit">apply</button>
+    <button type="button" class="secondary" onclick="window.location='/score-histogram'">reset</button>
+  </form>
+
+  {% if error %}
+    <div class="empty error">{{ error }}</div>
+  {% elif result.rows %}
+  <table class="motion-table">
+    <thead><tr>
+      <th>camera</th><th>label</th>
+      <th>Events</th><th>Real</th><th>False pos</th>
+      <th>Median</th>
+      <th>p10 top</th><th>p25 top</th><th>p50 top</th><th>p75 top</th>
+      <th class="answer-col">Suggested min</th><th class="answer-col">Suggested threshold</th>
+      <th>confidence</th>
+    </tr></thead>
+    <tbody>
+    {% for r in result.rows %}
+      <tr>
+        <td>{{ r.camera }}</td>
+        <td>{{ r.label }}</td>
+        <td>{{ r.n }}</td>
+        <td>{{ r.n_tp }}</td>
+        <td>{{ r.n_fp }}</td>
+        <td>{{ r.median_score if r.median_score is not none else '—' }}</td>
+        <td>{{ r.p10_top if r.p10_top is not none else '—' }}</td>
+        <td>{{ r.p25_top if r.p25_top is not none else '—' }}</td>
+        <td>{{ r.p50_top if r.p50_top is not none else '—' }}</td>
+        <td>{{ r.p75_top if r.p75_top is not none else '—' }}</td>
+        <td class="answer-col">{{ r.suggested_min_score if r.suggested_min_score is not none else '—' }}</td>
+        <td class="answer-col">{{ r.suggested_threshold if r.suggested_threshold is not none else '—' }}</td>
+        <td><span class="cell-class {{ r.css }}">{{ r.confidence }}</span></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  {% if result.buckets %}
+  <details class="bucket-block">
+    <summary>Top-score buckets ({{ result.buckets|length }} cells)</summary>
+    <table class="motion-table">
+      <thead><tr><th>camera / label</th><th>bucket</th><th>count</th></tr></thead>
+      <tbody>
+      {% for key, counts in result.buckets.items() %}
+        {% for b, n in counts.items() %}
+        <tr>
+          <td>{{ key.replace('|', ' / ') }}</td>
+          <td><code>{{ b }}</code></td>
+          <td>{{ n }}</td>
+        </tr>
+        {% endfor %}
+      {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
+
+  {% else %}
+    <div class="empty">No events in the last {{ filters.days }} days for these filters. Try widening the time window or clearing the camera/label filter.</div>
+  {% endif %}
+
+  <p class="help footnote">
+    <strong>min_score</strong> = per-frame floor (events below are dropped pre-tracking).
+    <strong>threshold</strong> = applied to the median of the tracked object's score history.
+    Suggestions are computed from triage-labeled <code>tp</code> events when available
+    (confidence = <span class="cell-class ok">high</span> /
+    <span class="cell-class warn">med</span>);
+    otherwise from the whole distribution (<span class="cell-class noise">low</span>).
+    <span class="cell-class muted">sparse</span> = under 10 samples; no suggestion.
+  </p>
+</main>
+{% endblock %}

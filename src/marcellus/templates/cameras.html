@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% set active_page = 'cameras' %}
+{% block title %}Cameras · Marcellus{% endblock %}
+
+{% block page_heading %}<h1 class="sr-only">Cameras</h1>{% endblock %}
+{% block body %}
+<main id="main-content">
+  <h2 class="section-h">Cameras <span class="help">— tap a camera for its live stream</span></h2>
+  {% if cameras %}
+  <div class="snap-grid">
+    {% for cam in cameras %}
+    <a class="snap-card" href="/live/{{ cam }}" title="Open {{ cam }} live stream">
+      <img data-cam-snap="{{ cam }}" src="/api/{{ cam }}/latest.jpg?h=270" alt="{{ cam }} latest frame" loading="lazy">
+      <span class="snap-name">{{ cam }}</span>
+      {% if scrub_enabled %}<span class="snap-lag" data-cam-lag="{{ cam }}"></span>{% endif %}
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty">No cameras found in the Frigate config. Check that
+    <code>frigate.config_path</code> in <code>sidecar.yml</code> points to Frigate's
+    config file.</div>
+  {% endif %}
+  {% if scrub_enabled %}
+  <p class="help">The corner badge is each camera's scrub live-edge lag —
+    how far the timeline cache trails real time. Snapshots refresh every 30s.</p>
+  {% endif %}
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/status.js?v={{ asset_v }}"></script>
+{% endblock %}

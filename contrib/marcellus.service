@@ -1,0 +1,45 @@
+[Unit]
+Description=Marcellus (triage UI + analysis)
+Documentation=https://github.com/helicopterrun/marcellus
+After=network.target
+
+[Service]
+Type=simple
+# Dedicated system user (install.sh creates it): the service proxies
+# authenticated traffic and shells out to ffmpeg -- it has no business as root.
+# It needs READ access to Frigate's recordings and frigate.db; grant it via
+# group membership (e.g. SupplementaryGroups=frigate) or ACLs.
+User=marcellus
+WorkingDirectory=/opt/marcellus
+Environment="MARCELLUS_CONFIG=/opt/marcellus/config/sidecar.yml"
+# Optional, 0600 root-owned file for secrets that shouldn't sit in this unit
+# file, e.g. MARCELLUS_PUSH__MQTT_PASSWORD. Leading "-" makes it fine if absent.
+EnvironmentFile=-/etc/marcellus-push.env
+ExecStart=/usr/bin/python3 -m marcellus serve
+Restart=on-failure
+RestartSec=5
+
+# Hardening: everything is read-only except the paths the sidecar actually
+# writes (its DB/config/session-secret under the install dir, and the scrub
+# cache). If scrub.cache_dir lives elsewhere, append it to ReadWritePaths.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/opt/marcellus
+#ReadWritePaths=/data/scrub
+
+# Signal only the main process on stop. The default (control-group) SIGTERMs
+# every process in the unit's cgroup, which kills in-flight ffmpeg children out
+# from under the scrub generator -- they exit 255 with no stderr, which reads as
+# a camera fault and lands on whichever cameras are slowest to extract. With
+# `mixed`, uvicorn shuts down, the generator's task is cancelled, and its
+# children exit on their own.
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

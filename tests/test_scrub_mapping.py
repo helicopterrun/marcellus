@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from frigate_sidecar.scrub.mapping import map_recording_path
+from marcellus.scrub.mapping import map_recording_path
 
 
 def test_strips_media_path_and_reattaches_recordings_path() -> None:

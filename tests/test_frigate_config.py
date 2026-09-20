@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from frigate_sidecar.frigate_config import load_frigate_config, recording_retention_days
+from marcellus.frigate_config import load_frigate_config, recording_retention_days
 
 MODERN = """
 record:

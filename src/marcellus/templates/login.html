@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Log in · Marcellus{% endblock %}
+{% block header %}{% endblock %}
+
+{% block page_heading %}<h1 class="sr-only">Login</h1>{% endblock %}
+{% block body %}
+<main id="main-content" style="max-width:22rem;margin:12vh auto 0">
+  <h2 class="section-title">Marcellus</h2>
+  <p class="help page-intro">
+    Log in with your <strong>Frigate</strong> account — the sidecar has no
+    users of its own. The form posts straight to Frigate through the
+    sidecar's proxy, so the session cookie lands here too.
+  </p>
+  <form id="login-form">
+    <label class="help" style="display:block;margin-top:0.8em">username
+      <input id="login-user" name="username" type="text" autocomplete="username" required
+             style="display:block;width:100%;margin-top:0.2em">
+    </label>
+    <label class="help" style="display:block;margin-top:0.8em">password
+      <input id="login-password" name="password" type="password" autocomplete="current-password" required
+             style="display:block;width:100%;margin-top:0.2em">
+    </label>
+    <label class="help" style="display:block;margin-top:0.8em">
+      <input id="login-remember" type="checkbox" checked> stay signed in on this device
+    </label>
+    <button type="submit" class="btn-primary" style="margin-top:1em">Log in</button>
+    <span id="login-state" class="help" style="margin-left:0.6em"></span>
+  </form>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var form = document.getElementById("login-form");
+  var state = document.getElementById("login-state");
+  form.addEventListener("submit", async function (ev) {
+    ev.preventDefault();
+    state.textContent = "logging in...";
+    try {
+      var resp = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          user: document.getElementById("login-user").value,
+          password: document.getElementById("login-password").value,
+        }),
+      });
+      if (!resp.ok) {
+        state.textContent = resp.status === 401
+          ? "wrong username or password"
+          : "login failed (HTTP " + resp.status + ")";
+        return;
+      }
+      if (document.getElementById("login-remember").checked) {
+        // Mint the sidecar's long-lived remember-me cookie with the fresh
+        // Frigate session; a failure here just means a normal-length session.
+        try {
+          await fetch("/login/remember", { method: "POST", credentials: "same-origin" });
+        } catch (e2) { /* non-fatal */ }
+      }
+      // Only ever bounce to a same-origin path — a full URL or
+      // protocol-relative value in ?next= must not become an open redirect.
+      var next = new URLSearchParams(window.location.search).get("next") || "/";
+      if (next.charAt(0) !== "/" || next.charAt(1) === "/") next = "/";
+      window.location.replace(next);
+    } catch (err) {
+      state.textContent = "error: " + err.message;
+    }
+  });
+})();
+</script>
+{% endblock %}

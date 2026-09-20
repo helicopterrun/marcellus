@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from frigate_sidecar.push import fusion, ground
+from marcellus.push import fusion, ground
 
 # Same synthetic rig as test_push_ground: 10ft mount, 12° down, 90° HFOV.
 FACTS = {

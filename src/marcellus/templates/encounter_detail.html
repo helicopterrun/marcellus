@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% set active_page = 'encounters' %}
+{% block title %}Encounter · Marcellus{% endblock %}
+
+{% block page_heading %}<h1 class="sr-only">Encounter</h1>{% endblock %}
+{% block body %}
+<main id="main-content">
+  <div class="faces-bar">
+    <a href="/encounters" class="page-link">&larr; Encounters</a>
+    <span class="badge {{ 'ok' if encounter.sealed else 'recognized' }}">{{ 'sealed' if encounter.sealed else 'open' }}</span>
+    <span class="mode">
+      {{ fmt_ts(encounter.start) }} &middot; {{ fmt_duration(encounter.start, encounter.end) if encounter.end else 'ongoing' }}
+      &middot; {{ encounter.atom_count }} atom{{ 's' if encounter.atom_count != 1 else '' }}
+    </span>
+  </div>
+
+  <section class="capture-visit">
+    <header>
+      <b class="id-title">{{ encounter.cameras|join(' → ') }}</b>
+    </header>
+    <div class="enc-chips">
+      {% for label in encounter.labels %}<span class="badge">{{ label }}</span>{% endfor %}
+      {% for identity in encounter.identities %}<span class="badge recognized">{{ identity }}</span>{% endfor %}
+      <span class="badge {{ 'noise' if encounter.peak_severity == 'detection' else 'ok' }}">{{ encounter.peak_severity }}</span>
+    </div>
+  </section>
+
+  <section class="capture-visit">
+    <header><b class="id-title">Members</b></header>
+    <table class="enc-member-table">
+      <thead><tr><th>Camera</th><th>Span</th><th>Labels</th><th>Zones</th><th>Reason</th><th>Conf.</th><th>Related events</th></tr></thead>
+      <tbody>
+      {% for m in members %}
+        <tr>
+          <td>{{ m.camera }}</td>
+          <td>{{ fmt_ts(m.start) }}{% if m.end %} &ndash; {{ fmt_duration(m.start, m.end) }}{% endif %}</td>
+          <td>{{ m.labels|join(', ') }}</td>
+          <td>{{ m.zones|join(', ') }}</td>
+          <td>{{ m.link_reason }}</td>
+          <td>{{ '%.2f'|format(m.confidence) }}</td>
+          <td>
+            {% for eid in m.event_ids %}<a href="/event/{{ eid }}">{{ eid }}</a>{% if not loop.last %}, {% endif %}{% endfor %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</main>
+{% endblock %}

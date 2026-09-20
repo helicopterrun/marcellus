@@ -1,0 +1,15 @@
+[Unit]
+Description=Marcellus — high-res cross-camera face capture (oneshot)
+Documentation=https://github.com/helicopterrun/marcellus
+After=network.target
+
+[Service]
+Type=oneshot
+# Same dedicated user as marcellus.service: this job shares that service's
+# SQLite DB and writes JPEGs into its data dir, so running it as root would leave
+# root-owned WAL files and unreadable captures behind.
+User=marcellus
+WorkingDirectory=/opt/marcellus
+Environment="MARCELLUS_CONFIG=/opt/marcellus/config/sidecar.yml"
+ExecStart=/usr/bin/python3 -m marcellus face-capture scan
+

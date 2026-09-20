@@ -26,7 +26,7 @@ jobs:
       - name: Lint
         run: ruff check .
       - name: Typecheck
-        run: mypy src/frigate_sidecar
+        run: mypy src/marcellus
       # Coverage (with the fail_under floor from pyproject.toml) runs on one
       # matrix leg only — 3.10/3.12 branch differences would make a shared
       # floor jitter for no signal.
@@ -35,4 +35,4 @@ jobs:
         run: pytest -ra
       - name: Test with coverage floor
         if: matrix.python-version == '3.12'
-        run: pytest -ra --cov=frigate_sidecar
+        run: pytest -ra --cov=marcellus

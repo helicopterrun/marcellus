@@ -11,7 +11,7 @@ consume it — only the one holding the phone's registration pushes):
         [--camera garden] [--speed 4] [--capture PATH] \
         --mqtt-host 192.168.50.111 --mqtt-username frigate
 
-MQTT password comes from FRIGATE_SIDECAR_PUSH__MQTT_PASSWORD. Timestamps are
+MQTT password comes from MARCELLUS_PUSH__MQTT_PASSWORD. Timestamps are
 local time ("YYYY-MM-DD HH:MM[:SS]") or raw epoch floats.
 
 Replayed review/event ids collide with their originals in card stores —
@@ -43,8 +43,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from frigate_sidecar.push import replay  # noqa: E402
-from frigate_sidecar.push.capture import _camera_of, read_window  # noqa: E402
+from marcellus.push import replay  # noqa: E402
+from marcellus.push.capture import _camera_of, read_window  # noqa: E402
 
 
 def parse_ts(value: str) -> float:
@@ -159,7 +159,7 @@ def main() -> None:
     import paho.mqtt.client as mqtt
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    password = os.environ.get("FRIGATE_SIDECAR_PUSH__MQTT_PASSWORD")
+    password = os.environ.get("MARCELLUS_PUSH__MQTT_PASSWORD")
     if args.mqtt_username:
         client.username_pw_set(args.mqtt_username, password)
     client.connect(args.mqtt_host, args.mqtt_port, 30)

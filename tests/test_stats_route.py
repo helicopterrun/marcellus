@@ -8,9 +8,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from frigate_sidecar.config import FrigateSection, Settings, SidecarSection
-from frigate_sidecar.push.stats import STATS
-from frigate_sidecar.server import create_app
+from marcellus.config import FrigateSection, Settings, SidecarSection
+from marcellus.push.stats import STATS
+from marcellus.server import create_app
 
 
 @pytest.fixture(autouse=True)
@@ -87,7 +87,7 @@ def test_status_page_renders_push_pipeline_block_when_enabled(
 ) -> None:
     cfg = tmp_path / "frigate-config.yml"
     cfg.write_text("cameras: {}\n")
-    from frigate_sidecar.config import PushSection
+    from marcellus.config import PushSection
 
     settings = Settings(
         frigate=FrigateSection(

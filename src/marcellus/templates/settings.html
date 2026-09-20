@@ -1,0 +1,258 @@
+{% extends "base.html" %}
+{% set active_page = 'settings' %}
+{% block title %}Settings · Marcellus{% endblock %}
+
+{% block page_heading %}<h1 class="sr-only">Settings</h1>{% endblock %}
+{% block body %}
+<main id="main-content">
+  <nav class="settings-nav" aria-label="Settings sections">
+    <a href="#zones" class="page-link">Zones</a>
+    <a href="#cameras" class="page-link">Cameras</a>
+    <a href="#alignment" class="page-link">Alignment</a>
+    <a href="#push" class="page-link">Push</a>
+    <a href="#services" class="page-link">Services</a>
+    <a href="#data" class="page-link">Data</a>
+    <a href="#about" class="page-link">About</a>
+  </nav>
+
+  <div id="zones-banner" class="help page-intro" style="display:none"></div> {# JS-toggled #}
+
+  {# ---- Zones & routing (element ids shared with zones.js) ---- #}
+  <h3 class="section-title first" id="zones">Zones &amp; routing</h3>
+  <p class="help page-intro">
+    Place classes and per-zone overrides drive push routing; camera neighbors
+    merge one walk seen by adjacent cameras into a single story. The Name
+    field sets how a zone reads in notifications ("Person in {name}") — it
+    wins over Frigate's <code>friendly_name</code>.
+  </p>
+  <div id="zones-list" class="stat-row zones-grid skeleton">
+    {# Skeletons: cleared when zones.js renders the real rows. #}
+    <div class="skeleton-row" style="flex:1 1 300px"></div>
+    <div class="skeleton-row" style="flex:1 1 300px"></div>
+    <div class="skeleton-row" style="flex:1 1 300px"></div>
+  </div>
+
+  <h3 class="section-title">Camera neighbors</h3>
+  <p class="help page-intro">
+    Tick the cameras that watch the same physical approach. Declaring one
+    direction is enough — adjacency is symmetric. Prefer dragging?
+    <a href="/map" class="page-link">Arrange cameras on the map</a> and use
+    “Suggest neighbors”.
+  </p>
+  <div id="neighbors-list" class="skeleton">
+    <div class="skeleton-row"></div>
+    <div class="skeleton-row"></div>
+  </div>
+
+  <div class="section-block">
+    <button id="save-btn" class="btn-primary">Save</button>
+    <span id="save-state" class="save-state"></span>
+  </div>
+
+  {# ---- Cameras ---- #}
+  <h3 class="section-title" id="cameras">Cameras</h3>
+  <p class="help page-intro">
+    Rig facts feed the ground projection: world trails, speed labels, heading.
+    Place, aim and draw the secure area in the
+    <a href="/map" class="page-link">map page</a>; landmark
+    calibration measures a camera's HFOV, azimuth and tilt from its snapshot.
+  </p>
+  {% if camera_rows %}
+  <table class="motion-table">
+    <thead><tr>
+      <th>camera</th><th>placed</th><th>azimuth</th><th>pie FOV</th>
+      <th>HFOV</th><th>mount</th><th>tilt</th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for c in camera_rows %}
+      <tr>
+        <td>{{ c.camera }}</td>
+        <td>{% if c.placed %}<span class="cell-class ok">yes</span>{% else %}<span class="cell-class warn">no</span>{% endif %}</td>
+        <td>{{ (c.azimuth ~ '°') if c.azimuth is not none else '—' }}</td>
+        <td>{{ (c.fov ~ '°') if c.fov is not none else '—' }}</td>
+        <td>{{ (c.hfov ~ '°') if c.hfov is not none else '—' }}</td>
+        <td>{{ (c.mount_ft ~ ' ft') if c.mount_ft is not none else '—' }}</td>
+        <td>{{ (c.tilt_deg ~ '°') if c.tilt_deg is not none else '—' }}</td>
+        <td><a class="btn-neutral" href="/map">Landmark calibrate</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <div class="empty">No cameras found in the Frigate config. Check that <code>frigate.config_path</code> in <code>sidecar.yml</code> points to Frigate's config file.</div>
+  {% endif %}
+
+  {# ---- Event clock alignment ---- #}
+  <h3 class="section-title" id="alignment">Event alignment</h3>
+  <p class="help page-intro">
+    Frigate stamps events from the detect stream and recordings from the record
+    stream &mdash; two separate camera connections that can sit a few seconds
+    apart, which makes event bars miss their pictures on the scrub timeline.
+    Measuring compares event thumbnails against the recordings (takes a few
+    minutes) and suggests a per-camera correction; Apply takes effect on the
+    next timeline refresh. Setting <code>detect.annotation_offset</code> in
+    Frigate's own config works too and wins over values applied here.
+  </p>
+  <div class="section-block">
+    <button id="align-measure" class="btn-primary">Measure cameras</button>
+    <select id="calib-camera" aria-label="camera to calibrate"></select>
+    <button id="calib-open" class="btn-neutral">Calibrate&hellip;</button>
+    <span id="align-state" class="help save-state"></span>
+  </div>
+  <div id="align-results"></div>
+
+  {# ---- Push & devices ---- #}
+  <h3 class="section-title" id="push">Push &amp; devices</h3>
+  <div class="stat-row">
+    <div class="stat-card">
+      <div class="stat-label">Push</div>
+      <div class="stat-value cell-class {{ 'ok' if push_enabled else 'muted' }}">{{ 'enabled' if push_enabled else 'disabled' }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Transport</div>
+      <div class="stat-value">{{ transport }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Registered devices</div>
+      <div class="stat-value">{{ devices|length }}</div>
+    </div>
+  </div>
+  {% if devices %}
+  <table class="motion-table">
+    <thead><tr>
+      <th>device</th><th>env</th><th>app</th><th>cameras</th><th>labels</th><th>min severity</th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for d in devices %}
+      <tr>
+        <td><code title="{{ d.apns_token }}">{{ d.device_id }}</code></td>
+        <td>{{ d.environment }}</td>
+        <td>{{ d.app_version or '—' }}</td>
+        <td>{{ d.cameras|join(', ') if d.cameras else 'all' }}</td>
+        <td>{{ d.labels|join(', ') if d.labels else 'all' }}</td>
+        <td>{{ d.min_severity }}</td>
+        <td><button class="btn-primary" data-token="{{ d.apns_token }}">Test</button></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="help">"Sent" means APNs accepted the request — there is no delivery receipt.
+    Per-device filters are set in the Elsinore app; recent routing decisions live on
+    <a href="/replay" class="page-link">Replay</a>.</p>
+  {% else %}
+    <div class="empty">no devices registered — pair the Elsinore app with this server to register one</div>
+  {% endif %}
+
+  <h4 class="sub-title">How notifications are decided</h4>
+  <p class="help page-intro">
+    Every detection is scored on the attention ladder — who was seen crossed
+    with the place class of the zone. Full explanation in the
+    <a href="/guide/push-notifications#the-attention-ladder" class="page-link">push notifications guide</a>.
+  </p>
+  <table class="motion-table ladder-table">
+    <thead><tr><th></th>{% for p in ladder.places %}<th>{{ p }}</th>{% endfor %}</tr></thead>
+    <tbody>
+    {% for row in ladder.rows %}
+      <tr>
+        <td>{{ row.subject }}</td>
+        {% for cell in row.cells %}
+        <td><span class="lvl lvl-{{ cell.level }}">{{ cell.label }}</span></td>
+        {% endfor %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if ladder.overrides %}
+  <p class="help">Zone overrides in effect:
+    {% for o in ladder.overrides %}
+      <span class="lvl-override">{{ o.zone }}: {{ o.subject }} → {{ o.label }}</span>{% if not loop.last %} · {% endif %}
+    {% endfor %}
+  </p>
+  {% endif %}
+
+  <h4 class="sub-title">What they look like</h4>
+  <p class="help page-intro">
+    Rendered by the same code that writes the real notifications — titles and
+    bodies here are exactly what the phone shows for these situations.
+  </p>
+  <div class="notif-examples">
+    {% for ex in notif_examples %}
+    <div class="notif-example">
+      <span class="notif-icon">{{ ex.emoji }}</span>
+      <span class="notif-text">
+        <span class="notif-title">{{ ex.primary }}</span>
+        {% if ex.secondary %}<span class="notif-body">{{ ex.secondary }}</span>{% endif %}
+        <span class="notif-meta">{{ ex.situation }}</span>
+      </span>
+      <span class="lvl lvl-{{ ex.level }}">{{ ex.level_label }}</span>
+    </div>
+    {% endfor %}
+  </div>
+
+  {# ---- Services (read-only YAML config surface) ---- #}
+  <h3 class="section-title" id="services">Services</h3>
+  <p class="help page-intro">
+    Feature switches from the sidecar's YAML config — read-only here; edit
+    <code>sidecar.yml</code> and restart to change them. Each link opens the
+    guide topic that explains the section.
+  </p>
+  <table class="motion-table services-table">
+    <tbody>
+    {% for row in service_rows %}
+      <tr>
+        <td>{{ row.name }}</td>
+        <td>{% if row.value in ('on', 'off') %}<span class="cell-class {{ 'ok' if row.value == 'on' else 'muted' }}">{{ row.value }}</span>{% else %}{{ row.value }}{% endif %}</td>
+        <td><a href="{{ row.guide }}" class="page-link">guide</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  {# ---- Data ---- #}
+  <h3 class="section-title" id="data">Data</h3>
+  <p class="help page-intro">
+    Export downloads this instance's full policy (routing, zones, camera
+    calibration, secure area, floorplan image — no device registrations).
+    Import applies an exported file to <em>this</em> instance immediately.
+    To copy dev → production: export here, open production's Settings,
+    import there.
+  </p>
+  <button id="export-btn" class="btn-primary">Export settings</button>
+  <label class="btn-primary inline-label">
+    Import settings…
+    <input id="import-file" type="file" accept=".json,application/json" class="hidden">
+  </label>
+  <span id="sync-state" class="help save-state"></span>
+
+  {# ---- Help ---- #}
+  <h3 class="section-title" id="help">Help</h3>
+  <ul class="rec-list">
+    <li><a href="/guide">User guide</a> — every page and setting, with walkthroughs</li>
+  </ul>
+
+  {# ---- About ---- #}
+  <h3 class="section-title" id="about">About</h3>
+  <div class="stat-row">
+    <div class="stat-card">
+      <div class="stat-label">Marcellus version</div>
+      <div class="stat-value">{{ version }}</div>
+    </div>
+  </div>
+  <ul class="rec-list">
+    <li><a href="/docs">API docs</a> — interactive OpenAPI browser</li>
+    <li><a href="/version">/version</a> · <a href="/healthz">/healthz</a> · <a href="/v1/capabilities">/v1/capabilities</a></li>
+    <li><a href="/toybox">Toybox</a> — the 50-states couch game (with leaderboard)</li>
+  </ul>
+  <details class="advanced">
+    <summary>Capabilities (what the app sees)</summary>
+    <div class="panel">{% include "_capabilities.html" %}</div>
+  </details>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/zones.js?v={{ asset_v }}"></script>
+<script src="/static/js/devices.js?v={{ asset_v }}"></script>
+<script src="/static/js/eventcalib.js?v={{ asset_v }}"></script>
+<script src="/static/js/eventalign.js?v={{ asset_v }}"></script>
+{% endblock %}

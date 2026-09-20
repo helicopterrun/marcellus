@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% set active_page = 'placement' %}
+{% block title %}Placement Planner · Marcellus{% endblock %}
+
+{% block page_heading %}<h1 class="sr-only">Placement</h1>{% endblock %}
+{% block body %}
+<main id="main-content">
+  <div class="ctrls">
+    <div class="ctrl-row">
+      <label>Camera / lens<select id="sel-lens"></select></label>
+      <label>Deployed<select id="sel-camera"><option value="">— none —</option></select></label>
+      <label>Resolution<select id="sel-res"></select></label>
+      <label>Object<select id="sel-object"></select></label>
+      <label id="wrap-hfov-custom" style="display:none" {# JS-toggled #}>HFOV°<input id="in-hfov" type="number" min="5" max="170" step="1" value="90" class="num-80"></label>
+    </div>
+    <div class="ctrl-row sliders">
+      <label id="wrap-focal">Zoom <span id="focal-val">2.7</span> mm<input id="in-focal" type="range" min="2.7" max="12" step="0.1" value="2.7"></label>
+      <label>Distance <span id="dist-val">20</span> ft<input id="in-dist" type="range" min="1" max="120" step="0.5" value="20"></label>
+      <label>Mount ht <span id="height-val">10</span> ft<input id="in-height" type="range" min="1" max="60" step="0.5" value="10"></label>
+      <label>Down-angle <span id="tilt-val">12</span>°<input id="in-tilt" type="range" min="0" max="80" step="1" value="12"></label>
+      <label>Face ht <span id="faceht-val">5.4</span> ft<input id="in-faceht" type="range" min="1" max="7" step="0.1" value="5.4"></label>
+    </div>
+  </div>
+
+  <div class="metrics">
+    <span class="metric"><b>HFOV</b><span id="out-hfov">—</span>°</span>
+    <span class="metric"><b>VFOV</b><span id="out-vfov">—</span>°</span>
+    <span class="metric"><b>px/ft@d</b><span id="out-pxft">—</span></span>
+    <span class="metric"><b>good</b><span id="out-maxdist">—</span> ft</span>
+    <span class="metric"><b>marginal</b><span id="out-maxdist-marg">—</span> ft</span>
+    <span class="metric"><b>bbox</b><span id="out-w">—</span>×<span id="out-h">—</span> px</span>
+    <span class="metric"><b>area</b><span class="cell-class muted" id="out-area">—</span></span>
+    <span class="metric"><b>width</b><span class="cell-class muted" id="out-verdict">—</span></span>
+    <span class="metric"><b>in-frame</b><span class="cell-class muted" id="out-inframe">—</span></span>
+    <span class="metric"><b>face</b><span class="cell-class muted" id="out-faceang">—</span></span>
+    <span class="metric"><b>ground</b><span id="out-ground">—</span></span>
+  </div>
+
+  <div class="viewseg" role="radiogroup">
+    <button class="vbtn active" type="button" data-view="top">Top-down</button>
+    <button class="vbtn" type="button" data-view="side">Side</button>
+    <button class="vbtn" type="button" data-view="chart">Px/dist</button>
+    <button class="vbtn" type="button" data-view="all">All</button>
+  </div>
+
+  <div class="views">
+    <div class="view view-top">
+      <svg id="plan-wedge" class="plan-svg" viewBox="0 0 360 360" role="img"
+           aria-label="Top-down field-of-view wedge with object range rings"></svg>
+    </div>
+    <div class="view view-side">
+      <svg id="plan-elev" class="plan-svg" viewBox="0 0 560 300" role="img"
+           aria-label="Side elevation: vertical FOV cone, ground coverage, and a to-scale subject"></svg>
+    </div>
+    <div class="view view-chart">
+      <svg id="plan-chart" class="plan-svg" viewBox="0 0 520 300" role="img"
+           aria-label="Object on-screen pixel width as a function of distance"></svg>
+      <p class="help" id="dori-legend"></p>
+    </div>
+  </div>
+
+  <details class="advanced">
+    <summary>Object target (editable) &amp; reference notes</summary>
+    <div class="filters subsection">
+      <label>width (ft)<input id="in-owidth" type="number" step="0.1" class="num-80"></label>
+      <label>aspect H/W<input id="in-oaspect" type="number" step="0.05" class="num-80"></label>
+      <label>target px (width)<input id="in-otarget" type="number" step="1" class="num-80"></label>
+      <span class="help self-end">
+        target_area = target_px² × aspect — compare to <code>objects.filters.&lt;obj&gt;.min_area</code>.
+      </span>
+    </div>
+    <p class="help footnote">
+      Width: <code>max_ft = width_ft · det_w / (2 · target_px · tan(HFOV/2))</code>.
+      Varifocal HFOV from a two-point datasheet fit (114° @ 2.7mm → 47° @ 12mm).
+      bbox <em>height</em> is geometric (mount height + down-angle), so a high steep
+      camera reads "top of head" even when pixels look fine. Face area tiers:
+      <b>&lt; 1000 px²</b> below this deployment's <code>min_area</code> (won't attempt),
+      <b>≥ 1000</b> attempts, <b>≥ 3000</b> empirically recognises (from 163 captured
+      faces). References: detector input <code>320×320</code>; DORI px/m thresholds
+      25 / 63 / 125 / 250 (detect / observe / recognise / identify).
+    </p>
+  </details>
+</main>
+
+<script type="application/json" id="plan-presets">{{ presets_json|safe }}</script>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/placement.js?v={{ asset_v }}"></script>
+{% endblock %}

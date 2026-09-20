@@ -10,12 +10,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CSS_PATH = (
-    REPO_ROOT / "src" / "frigate_sidecar" / "static" / "css" / "triage.css"
+    REPO_ROOT / "src" / "marcellus" / "static" / "css" / "triage.css"
 )
 BASE_HTML_PATH = (
-    REPO_ROOT / "src" / "frigate_sidecar" / "templates" / "base.html"
+    REPO_ROOT / "src" / "marcellus" / "templates" / "base.html"
 )
-JS_DIR = REPO_ROOT / "src" / "frigate_sidecar" / "static" / "js"
+JS_DIR = REPO_ROOT / "src" / "marcellus" / "static" / "js"
 
 # Expected values, mirroring ElsinoreBrandTokens.swift.
 EXPECTED_TOKENS = {

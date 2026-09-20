@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% set active_page = 'triage' %}
+{% set summary = events|length ~ ' matching event' ~ ('s' if events|length != 1 else '') %}
+{% block title %}Triage · Marcellus{% endblock %}
+
+{% block page_heading %}<h1 class="sr-only">Triage</h1>{% endblock %}
+{% block body %}
+<main id="main-content">
+  {% set untriaged = events | selectattr('triage_label', 'none') | list %}
+  <div class="triage-intro">
+    <p class="page-intro">Label detections as <b>real</b> or a
+      <b>false alarm</b> — labels feed Frigate+ training and
+      <a href="/guide/tuning-scores">threshold tuning</a>.</p>
+    <div class="triage-progress">
+      <span class="badge tp">{{ counts.get('tp', 0) }} real</span>
+      <span class="badge fp">{{ counts.get('fp', 0) }} false alarm</span>
+      <span class="badge skip">{{ counts.get('skip', 0) }} skip</span>
+      <span class="help">· {{ events|length }} matching, {{ untriaged|length }} untriaged</span>
+      {% if untriaged %}
+      <a class="btn-primary triage-start"
+         href="/event/{{ untriaged[0].id }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
+        Start review ({{ untriaged|length }}) &rarr;
+        <small>Review one at a time</small></a>
+      {% endif %}
+    </div>
+    {% if filters.q %}
+    <div class="triage-progress">
+      <span class="nb-chip on">
+        “{{ filters.q }}”
+        <a href="/triage?{{ {'camera': filters.camera, 'label': filters.label, 'triage': filters.triage, 'days': filters.days, 'limit': filters.limit, 'order': filters.order} | urlencode }}"
+           aria-label="Clear search" title="Clear search">&times;</a>
+      </span>
+    </div>
+    {% endif %}
+  </div>
+
+  <details class="filters-wrap" open>
+    <summary class="page-link">Filters</summary>
+  <form class="filters" method="get" action="/triage">
+    <label>camera
+      <select name="camera">
+        <option value="">all</option>
+        {% for c in cameras %}
+          <option value="{{ c }}"{% if c == filters.camera %} selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>object
+      <select name="label">
+        <option value="">all</option>
+        {% for l in labels %}
+          <option value="{{ l }}"{% if l == filters.label %} selected{% endif %}>{{ l }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>triage
+      <select name="triage">
+        {% for v in ['any', 'untriaged', 'triaged', 'tp', 'fp', 'skip'] %}
+          <option value="{{ v }}"{% if v == filters.triage %} selected{% endif %}>{{ triage_name(v) or v }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>days back <input type="number" name="days" value="{{ filters.days }}" min="1" max="365" class="num-70"></label>
+    <label>limit <input type="number" name="limit" value="{{ filters.limit }}" min="1" max="500" class="num-70"></label>
+    <label>order
+      <select name="order">
+        {% for v in ['newest', 'oldest'] %}
+          <option value="{{ v }}"{% if v == filters.order %} selected{% endif %}>{{ v }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>session <input id="session" type="text" placeholder="2026-05-09a" size="12"></label>
+    {# Carries the header search box's q= through a filter-form submit so
+       changing camera/label/etc. doesn't silently drop an active search. #}
+    <input type="hidden" name="q" value="{{ filters.q }}">
+    <button type="submit">apply</button>
+    <button type="button" class="secondary" onclick="window.location='/triage'">reset</button>
+  </form>
+  </details>
+
+  {% if events %}
+  <div class="grid">
+    {% for ev in events %}
+    <a class="card" href="/event/{{ ev.id }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
+      {% if ev.has_snapshot %}
+      <img class="thumb" src="{{ frigate_base }}/api/events/{{ ev.id }}/thumbnail.jpg" alt="" loading="lazy">
+      {% else %}
+      <div class="thumb thumb-missing">no snapshot</div>
+      {% endif %}
+      <div class="meta">
+        <div class="row">
+          <span class="cam">{{ ev.camera }}</span>
+          {% if ev.triage_label %}
+            <span class="badge {{ ev.triage_label }}">{{ triage_name(ev.triage_label) }}</span>
+          {% else %}
+            <span class="badge untriaged">untriaged</span>
+          {% endif %}
+        </div>
+        <div class="row">
+          <span class="lbl">{{ ev.label }}{% if ev.zones %} · {{ ev.zones|join(', ') }}{% endif %}</span>
+          <span class="score">{{ fmt_score(ev.top_score) }}</span>
+        </div>
+        <div class="row">
+          <span class="ts">{{ fmt_ts(ev.start_time) }}</span>
+          <span class="ts">{{ fmt_duration(ev.start_time, ev.end_time) }}</span>
+        </div>
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty">No events match these filters. Try widening the time window or clearing a filter.</div>
+  {% endif %}
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/list.js?v={{ asset_v }}"></script>
+{% endblock %}

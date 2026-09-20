@@ -7,7 +7,7 @@ pages, face pipeline. Server-rendered Jinja + vanilla JS, SQLite sidecar DB.
 ## Dev & verification (run all before any PR)
 
 - `.venv/bin/ruff check src tests`
-- `.venv/bin/python -m mypy src/frigate_sidecar`  (CI runs mypy — don't skip)
+- `.venv/bin/python -m mypy src/marcellus`  (CI runs mypy — don't skip)
 - `.venv/bin/pytest tests/ -q`
 - `node --check` on any touched JS
 - Prod is Python 3.10; CI tests 3.10 + 3.12. Don't use 3.11+ syntax.
@@ -17,9 +17,9 @@ pages, face pipeline. Server-rendered Jinja + vanilla JS, SQLite sidecar DB.
 
 ## Deploy (LXC "nvr", deploy-only — dev happens on this Mac)
 
-`ssh nvr "cd /opt/frigate-sidecar && git fetch && git reset --hard
+`ssh nvr "cd /opt/marcellus && git fetch && git reset --hard
 origin/main && pip install -q '.[http2,annotation,enrich]' && systemctl
-restart frigate-sidecar && curl -s localhost:5000/healthz"`
+restart marcellus && curl -s localhost:5000/healthz"`
 The pip-install step is mandatory (deps/extras drift otherwise).
 Ship flow: branch → PR → CI green → squash-merge → deploy → live-verify.
 
@@ -42,7 +42,7 @@ Ship flow: branch → PR → CI green → squash-merge → deploy → live-verif
 Global `~/.claude/CLAUDE.md` policy applies. Repo-specific:
 - sonnet: route/template/CSS edits against a spec, pytest additions, running
   the verification bar and reporting only failures.
-- haiku: grep sweeps across `src/frigate_sidecar`, guide-coverage checks,
+- haiku: grep sweeps across `src/marcellus`, guide-coverage checks,
   triaging pytest/CI output.
 - Main thread only: push-pipeline/APNs payload design, scrub-cache and proxy
   behavior, anything touching prod (deploys, systemd, DB schema).

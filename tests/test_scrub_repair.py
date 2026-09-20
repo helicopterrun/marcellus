@@ -15,9 +15,9 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from frigate_sidecar import db
-from frigate_sidecar.config import FrigateSection, ScrubSection, Settings, SidecarSection
-from frigate_sidecar.scrub import generator, grid, repair, tiling
+from marcellus import db
+from marcellus.config import FrigateSection, ScrubSection, Settings, SidecarSection
+from marcellus.scrub import generator, grid, repair, tiling
 
 COLS, ROWS = 4, 3
 CELL_W, CELL_H = 32, 18

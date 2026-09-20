@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% set active_page = 'face_captures' %}
+{% set _n = visits|length %}
+{% set summary = _n ~ ' visit' ~ ('s' if _n != 1 else '') %}
+{% block title %}Face captures · Marcellus{% endblock %}
+
+{% block page_heading %}<h1 class="sr-only">Face captures</h1>{% endblock %}
+{% block body %}
+<main id="main-content">
+  <div class="faces-bar">
+    <button type="button" id="rescan-captures">Run capture now</button>
+    <span class="mode">
+      {{ capture_camera or '—' }} ← {{ trigger_cameras|join(', ') or 'no triggers' }}
+      · <b>{{ 'ON' if enabled else 'OFF' }}</b>
+    </span>
+    <span class="mode">
+      {% for r in ['pending', 'kept', 'discarded', 'all'] %}
+        <a href="?days={{ days }}&amp;review={{ r }}"
+           class="page-link{% if review == r %} active{% endif %}">{{ r }}</a>{% if not loop.last %} · {% endif %}
+      {% endfor %}
+    </span>
+    {% if last_run %}
+    <span class="mode" title="heartbeat from the systemd oneshot (it runs in another process)">
+      last run: {{ last_run.captured }} captured · {{ last_run.no_recording }} no-rec
+      · {{ last_run.error }} err · {{ last_run.deduped }} dedup
+    </span>
+    {% else %}
+    <span class="mode">last run: <b>never</b></span>
+    {% endif %}
+  </div>
+
+  {% if not visits %}
+    <p class="empty">
+      No captures in the last {{ days }} day(s) with review = {{ review }}.
+      {% if not enabled %}<br><b>face_capture.enabled is false.</b>{% endif %}
+    </p>
+  {% endif %}
+
+  {% for v in visits %}
+  <section class="capture-visit" data-visit="{{ v.visit_key }}">
+    <header>
+      <b>{{ v.trigger_camera }}</b> saw a {{ v.trigger_label }}
+      {% if v.trigger_score %}({{ '%.2f'|format(v.trigger_score) }}){% endif %}
+      · <time>{{ v.when }}</time>
+      · {{ v.captures|length }} frame{{ 's' if v.captures|length != 1 else '' }}
+      <button type="button" class="discard-visit" data-id="{{ v.captures[0].id }}">discard visit</button>
+    </header>
+    <div class="capture-strip">
+      {% for c in v.captures %}
+      <figure class="capture-card" data-id="{{ c.id }}">
+        <a href="/faces/captures/{{ c.id }}/full.jpg" target="_blank" rel="noopener">
+          <img loading="lazy"
+               src="/faces/captures/{{ c.id }}/{{ 'thumb' if c.has_thumb else 'full' }}.jpg"
+               alt="capture {{ c.offset_ms }}ms">
+        </a>
+        <figcaption>
+          {{ '%+.1f'|format(c.offset_ms / 1000) }}s
+          {%- if c.cropped %} · <span title="cropped to the capture camera's own person box">head</span>{% endif %}
+          {%- if c.width %} · {{ c.width }}×{{ c.height }}{% endif %}
+          <span class="actions">
+            <button type="button" class="keep" data-id="{{ c.id }}">keep</button>
+            <button type="button" class="discard" data-id="{{ c.id }}">discard</button>
+          </span>
+        </figcaption>
+      </figure>
+      {% endfor %}
+    </div>
+  </section>
+  {% endfor %}
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/face_captures.js?v={{ asset_v }}" defer></script>
+{% endblock %}

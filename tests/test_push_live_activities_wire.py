@@ -11,12 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar import db
-from frigate_sidecar.config import PushSection
-from frigate_sidecar.push import store
-from frigate_sidecar.push.delivery_wire import handle_delivery_event, handle_delivery_resolve
-from frigate_sidecar.push.models import Device, ReviewEvent
-from frigate_sidecar.push.transport import LogTransport
+from marcellus import db
+from marcellus.config import PushSection
+from marcellus.push import store
+from marcellus.push.delivery_wire import handle_delivery_event, handle_delivery_resolve
+from marcellus.push.models import Device, ReviewEvent
+from marcellus.push.transport import LogTransport
 
 
 @pytest.fixture(autouse=True)
@@ -25,7 +25,7 @@ def _reset_ladder_table():
     `ladder_policy.set_table` — restore the default afterwards so table
     state never leaks into later tests (it did: the routing-gated family
     change surfaced a create-at-quiet leak that failed an unrelated test)."""
-    from frigate_sidecar.push import ladder_policy
+    from marcellus.push import ladder_policy
     yield
     ladder_policy.set_table({k: dict(v) for k, v in ladder_policy.TABLE.items()})
 
@@ -148,7 +148,7 @@ async def test_full_la_lifecycle_create_enrich_escalate_resolve(sidecar_db_path:
 async def test_decision_trace_carries_la_side_of_the_decision(sidecar_db_path: Path):
     """One alerts stack: the decisions feed records what the LA did, not
     just the banner routing."""
-    from frigate_sidecar.push import decision_trace
+    from marcellus.push import decision_trace
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -306,7 +306,7 @@ async def test_log_routed_cell_suppresses_just_that_family(sidecar_db_path: Path
     is done by the outcome ladder -- a package row routed to log mints no
     package activity, one layer below `delivery_la_enabled`'s whole-feature
     kill switch above."""
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -332,7 +332,7 @@ async def test_log_routed_cell_suppresses_just_that_family(sidecar_db_path: Path
 async def test_settings_opening_picks_restrict_which_openings_get_an_activity(
     sidecar_db_path: Path,
 ):
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -419,7 +419,7 @@ async def test_card_push_not_demoted_when_la_unconfirmed(sidecar_db_path: Path):
     materializes must not eat the banner. A device with no push-to-start
     token gets a full-fat card push; so does an escalate whose LA row has
     no per-activity token yet."""
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
     policy_settings.apply_settings(policy_settings.default_settings() | {"mute_sounds": False})
 
     conn = db.open_sidecar(sidecar_db_path)
@@ -462,7 +462,7 @@ async def test_card_push_not_demoted_when_la_unconfirmed(sidecar_db_path: Path):
 async def test_la_start_sound_omitted_when_sounds_muted(sidecar_db_path: Path):
     """The LA start keeps its required alert dict but honors the card path's
     sound accounting: with mute_sounds on, the start push carries no sound."""
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -488,7 +488,7 @@ async def test_deferred_end_when_token_arrives_after_resolve(sidecar_db_path: Pa
     """Fast create→resolve: no per-activity token at resolve time leaves the
     row open (pending_end); the token-upload path then ends the activity via
     end_activity_if_card_closed instead of stranding it."""
-    from frigate_sidecar.push.delivery_wire import end_activity_if_card_closed
+    from marcellus.push.delivery_wire import end_activity_if_card_closed
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -540,7 +540,7 @@ async def test_la_only_mode_no_banner_ever_and_catch_all_family(sidecar_db_path:
     catch-all family covers events outside the curated four) and every card
     push is passive/silent — no banner, no sound, even before the LA is
     confirmed and even on escalation."""
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -583,7 +583,7 @@ async def test_la_only_mode_no_banner_ever_and_catch_all_family(sidecar_db_path:
 @pytest.mark.asyncio
 async def test_la_only_mode_skips_log_level_cards(sidecar_db_path: Path):
     """Catch-all must not mint activities for log-level noise."""
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -608,7 +608,7 @@ async def test_la_only_ineligible_family_falls_back_to_catch_all(sidecar_db_path
     not leave the device with neither surface -- the card push is always
     passive/silent in la_only mode, so a skipped LA meant nothing alerted at
     all. The card must ride the catch-all activity instead of nothing."""
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -671,7 +671,7 @@ async def test_la_only_off_disabled_family_skips_without_fallback(sidecar_db_pat
     sound) is visibly different from a normal one (active, sound present);
     the picks mismatch is the one family-skip left since the per-family
     booleans dissolved into the outcome ladder."""
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -703,7 +703,7 @@ async def test_la_only_eligible_family_uses_native_family_not_catch_all(sidecar_
     """Regression guard: la_only must not blanket every card onto the
     catch-all -- an eligible curated family (person/doors) still gets its
     own family, keeping its glyph/copy."""
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -728,7 +728,7 @@ async def test_multi_device_demotion_is_per_device(sidecar_db_path: Path):
     """Coverage is per-device: device A's confirmed LA demotes only A's card
     push; device B (no push-to-start token, so no LA) keeps the full
     alerting card. A single OR-ed coverage bool would silence B entirely."""
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
     policy_settings.apply_settings(policy_settings.default_settings() | {"mute_sounds": False})
 
     conn = db.open_sidecar(sidecar_db_path)
@@ -762,7 +762,7 @@ async def test_urgent_escalation_late_starts_la_with_sound(sidecar_db_path: Path
     families). When the story escalates to urgent, the LA *late-starts* —
     and its mandatory start alert carries the sound, doubling as the
     escalation alert. The card push is demoted; the LA is the surface."""
-    from frigate_sidecar.push import ladder_policy, policy_settings
+    from marcellus.push import ladder_policy, policy_settings
 
     settings = policy_settings.default_settings()
     settings["mute_sounds"] = False
@@ -807,7 +807,7 @@ async def test_notify_escalation_la_update_alert_no_sound(sidecar_db_path: Path)
     only urgent escalation gets sound on the LA update. Verified via the
     person-at-doors create: the LA start (required by iOS) has the start
     sound, but any subsequent update at notify level carries no sound."""
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
     policy_settings.apply_settings(policy_settings.default_settings() | {"mute_sounds": False})
 
     conn = db.open_sidecar(sidecar_db_path)
@@ -843,7 +843,7 @@ async def test_la_update_sound_suppressed_by_exhausted_budget(sidecar_db_path: P
     first sounded escalation (quiet→urgent), a re-escalation gets an alert
     but no sound. Uses custom routing (person+doors=quiet) so the create
     doesn't spend the budget while still qualifying for the person LA."""
-    from frigate_sidecar.push import ladder_policy, policy_settings
+    from marcellus.push import ladder_policy, policy_settings
 
     settings = policy_settings.default_settings()
     settings["mute_sounds"] = False
@@ -901,7 +901,7 @@ async def test_mute_sounds_strips_la_update_sound(sidecar_db_path: Path):
     """Global mute_sounds strips the sound key from urgent LA updates but
     still carries the alert dict (title/body) for haptic pop — muted is a
     sound-only control, not a suppression gate."""
-    from frigate_sidecar.push import ladder_policy, policy_settings
+    from marcellus.push import ladder_policy, policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -947,7 +947,7 @@ async def test_mute_sounds_strips_la_update_sound(sidecar_db_path: Path):
 async def test_uncovered_urgent_card_keeps_card_push_sound(sidecar_db_path: Path):
     """When no LA covers the device (no push-to-start token), the card push
     retains its sound — the demotion only fires for LA-covered devices."""
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
     policy_settings.apply_settings(policy_settings.default_settings() | {"mute_sounds": False})
 
     conn = db.open_sidecar(sidecar_db_path)
@@ -970,7 +970,7 @@ async def test_uncovered_urgent_card_keeps_card_push_sound(sidecar_db_path: Path
 async def test_muted_urgent_escalation_la_carries_alert_without_sound(sidecar_db_path: Path):
     """Change 1: muted urgent escalation LA update carries alert dict
     (title/body) for haptic pop but no sound key."""
-    from frigate_sidecar.push import ladder_policy, policy_settings
+    from marcellus.push import ladder_policy, policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -1012,7 +1012,7 @@ async def test_muted_urgent_escalation_la_carries_alert_without_sound(sidecar_db
 async def test_muted_urgent_uncovered_card_keeps_time_sensitive_no_sound(sidecar_db_path: Path):
     """Change 1: muted urgent card push (no LA) keeps interruption-level
     time-sensitive but drops sound."""
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -1038,7 +1038,7 @@ async def test_muted_urgent_uncovered_card_keeps_time_sensitive_no_sound(sidecar
 @pytest.mark.asyncio
 async def test_muted_notify_stays_non_alerting(sidecar_db_path: Path):
     """Muted notify: card pushes without sound, no escalation to alerting."""
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -1176,7 +1176,7 @@ async def test_dismissal_tombstone_suppresses_create_and_undemotes_card_push(
     card push is NOT demoted (this is also the guarantee behind
     test_la_first_delivery's demoted/covered story: a suppressed LA path must
     behave like no LA at all)."""
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
     policy_settings.apply_settings(policy_settings.default_settings() | {"mute_sounds": False})
 
     conn = db.open_sidecar(sidecar_db_path)
@@ -1223,7 +1223,7 @@ async def test_dismissal_tombstone_suppresses_create_and_undemotes_card_push(
 async def test_escalate_clears_tombstone_and_starts_a_new_activity(sidecar_db_path: Path):
     """An ESCALATE mutation breaks through a dismissal tombstone: the
     tombstone is deleted and a fresh Live Activity starts."""
-    from frigate_sidecar.push import ladder_policy, policy_settings
+    from marcellus.push import ladder_policy, policy_settings
 
     settings = policy_settings.default_settings()
     settings["mute_sounds"] = False
@@ -1279,7 +1279,7 @@ async def test_escalation_bypasses_min_interval_throttle(sidecar_db_path: Path):
     card push be demoted (§1 of the ephemeral/escalation spec). Without the
     bypass, `min_interval` would swallow this update since it lands 1s after
     the create, far under the 3s fast-cadence floor."""
-    from frigate_sidecar.push import ladder_policy, policy_settings
+    from marcellus.push import ladder_policy, policy_settings
 
     settings = policy_settings.default_settings()
     settings["mute_sounds"] = False

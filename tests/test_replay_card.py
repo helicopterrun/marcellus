@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar.push import replay as replay_core
+from marcellus.push import replay as replay_core
 
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
 
@@ -170,7 +170,7 @@ async def test_dry_run_scenario_notify_resolve():
 
 @pytest.mark.asyncio
 async def test_dry_run_scenario_escalate_urgent():
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
     policy_settings.apply_settings(policy_settings.default_settings() | {"mute_sounds": False})
 
     path = replay_card.resolve_scenario_path("card-escalate-urgent")
@@ -244,7 +244,7 @@ def test_cli_unknown_scenario_errors(capsys):
 def test_scenarios_ship_inside_the_package_not_the_repo():
     """Regression: a repo-relative SCENARIOS_DIR is invisible to an installed sidecar.
 
-    The wheel packages only `src/frigate_sidecar`, so a path resolved out of the
+    The wheel packages only `src/marcellus`, so a path resolved out of the
     repo's `tools/` lands beside site-packages and globs nothing -- /replay renders
     an empty picker and every run 400s, with no error logged anywhere. Assert
     containment rather than a literal path, so a future rename stays free.

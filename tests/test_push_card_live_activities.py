@@ -4,8 +4,8 @@ Phase 3)."""
 
 from __future__ import annotations
 
-from frigate_sidecar.push import live_activities as la
-from frigate_sidecar.push.cards import CREATE, ENRICH, RESOLVE
+from marcellus.push import live_activities as la
+from marcellus.push.cards import CREATE, ENRICH, RESOLVE
 
 
 def test_package_family():

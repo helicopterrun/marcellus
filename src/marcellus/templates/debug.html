@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% set active_page = 'debug' %}
+{% block title %}debug — Marcellus{% endblock %}
+{% block page_heading %}<h1 class="sr-only">Debug</h1>{% endblock %}
+{% block body %}
+<main id="main-content">
+  <div class="stat-row">
+    <div class="stat-card">
+      <div class="stat-label">Marcellus version</div>
+      <div class="stat-value">{{ version }}</div>
+    </div>
+  </div>
+
+  <h2 class="section-h">Utilities</h2>
+  <p class="help">See <a href="/settings#about">Settings › About</a>.</p>
+
+  <h2 class="section-h">Capabilities (what the app sees)</h2>
+  <div class="panel">{% include "_capabilities.html" %}</div>
+</main>
+{% endblock %}

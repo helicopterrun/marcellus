@@ -70,7 +70,7 @@ def frigate_db_path(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def sidecar_db_path(tmp_path: Path) -> Iterator[Path]:
-    yield tmp_path / "frigate-sidecar.db"
+    yield tmp_path / "marcellus.db"
 
 
 @pytest.fixture(autouse=True)
@@ -88,7 +88,7 @@ def _reset_ladder_policy() -> Iterator[None]:
     works regardless of what any given test starts from or which other
     tests already mutated it this session.
     """
-    from frigate_sidecar.push import ladder_policy, policy_settings
+    from marcellus.push import ladder_policy, policy_settings
 
     original_table = {subject: dict(row) for subject, row in ladder_policy.TABLE.items()}
     original_overrides = {
@@ -122,7 +122,7 @@ def _default_frigate_reachable(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
     custom fake/real `app.state.stream_http_client` and expect
     `get_stream_client` to return it should instead monkeypatch this same
     name, or set `app.state.stream_http_client` *and* monkeypatch
-    `frigate_sidecar.routes.health.get_stream_client` to read it -- see
+    `marcellus.routes.health.get_stream_client` to read it -- see
     test_api.py / test_health.py for the pattern.
     """
 
@@ -140,6 +140,6 @@ def _default_frigate_reachable(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
         return stream_client if stream_client is not None else _fake_client
 
     monkeypatch.setattr(
-        "frigate_sidecar.routes.health.get_stream_client", _fake_get_stream_client
+        "marcellus.routes.health.get_stream_client", _fake_get_stream_client
     )
     yield

@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% set active_page = 'encounters' %}
+{% set _n = encounters|length %}
+{% set summary = _n ~ ' encounter' ~ ('s' if _n != 1 else '') %}
+{% block title %}Encounters · Marcellus{% endblock %}
+
+{% block page_heading %}<h1 class="sr-only">Encounters</h1>{% endblock %}
+{% block body %}
+<main id="main-content">
+  <div class="faces-bar">
+    <span class="mode"><b>{{ 'ON' if enabled else 'OFF' }}</b></span>
+    <form class="enc-filter" method="get" action="/encounters">
+      <input type="text" name="camera" placeholder="camera" value="{{ camera }}">
+      <button type="submit" class="btn btn-neutral">Filter</button>
+      {% if camera %}<a href="/encounters" class="page-link">Clear</a>{% endif %}
+    </form>
+  </div>
+
+  {% if not enabled %}
+  <p class="empty"><b>encounters.enabled is false.</b> Encounters still lists
+    whatever was linked while it was on.</p>
+  {% endif %}
+
+  {% if not encounters %}
+    <p class="empty">No encounters in this window yet.</p>
+  {% endif %}
+
+  {% for e in encounters %}
+  <section class="capture-visit enc-row">
+    <header>
+      <span class="badge {{ 'ok' if e.sealed else 'recognized' }}">{{ 'sealed' if e.sealed else 'open' }}</span>
+      <b class="id-title"><a href="/encounters/{{ e.id }}">{{ e.cameras|join(' → ') }}</a></b>
+      <span class="mode">
+        {{ fmt_ts(e.start) }} &middot; {{ fmt_duration(e.start, e.end) if e.end else 'ongoing' }}
+        &middot; {{ e.atom_count }} atom{{ 's' if e.atom_count != 1 else '' }}
+      </span>
+    </header>
+    <div class="enc-chips">
+      {% for label in e.labels %}<span class="badge">{{ label }}</span>{% endfor %}
+      {% for identity in e.identities %}<span class="badge recognized">{{ identity }}</span>{% endfor %}
+      <span class="badge {{ 'noise' if e.peak_severity == 'detection' else 'ok' }}">{{ e.peak_severity }}</span>
+    </div>
+    <details class="enc-members">
+      <summary>{{ e.members|length }} atom{{ 's' if e.members|length != 1 else '' }}</summary>
+      <table class="enc-member-table">
+        <thead><tr><th>Camera</th><th>Span</th><th>Labels</th><th>Zones</th><th>Reason</th><th>Conf.</th></tr></thead>
+        <tbody>
+        {% for m in e.members %}
+          <tr>
+            <td>{{ m.camera }}</td>
+            <td>{{ fmt_ts(m.start) }}{% if m.end %} &ndash; {{ fmt_duration(m.start, m.end) }}{% endif %}</td>
+            <td>{{ m.labels|join(', ') }}</td>
+            <td>{{ m.zones|join(', ') }}</td>
+            <td>{{ m.link_reason }}</td>
+            <td>{{ '%.2f'|format(m.confidence) }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </details>
+  </section>
+  {% endfor %}
+</main>
+{% endblock %}

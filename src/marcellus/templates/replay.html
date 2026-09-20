@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% set active_page = 'replay' %}
+{% block title %}Push replay · Marcellus{% endblock %}
+
+{% block page_heading %}<h1 class="sr-only">Replay</h1>{% endblock %}
+{% block body %}
+<main id="main-content">
+  <p class="help page-intro warn-note">
+    This publishes real events to all registered devices (unless dry-run is on).
+  </p>
+
+  <div class="stat-row">
+    <div class="stat-card">
+      <div class="stat-label">Scenario</div>
+      <div class="stat-value">
+        <select id="scenario">
+          {% for s in scenarios %}
+          <option value="{{ s.name }}">{% if s.kind == 'capture' %}[recorded] {% endif %}{{ s.name }}{% if s.description %} — {{ s.description[:60] }}{% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Speed</div>
+      <div class="stat-value">
+        <label><input type="radio" name="speed" value="1" checked> 1&times;</label>
+        <label><input type="radio" name="speed" value="5"> 5&times;</label>
+        <label><input type="radio" name="speed" value="10"> 10&times;</label>
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Options</div>
+      <div class="stat-value">
+        <label><input type="checkbox" id="dry-run"> Dry run</label>
+      </div>
+    </div>
+  </div>
+
+  <details class="replay-advanced">
+    <summary>Stacked preset</summary>
+    <div class="replay-advanced-body">
+      <label><input type="checkbox" id="stacked"> Enable stacked run</label><br>
+      <label>Second scenario:
+        <select id="scenario2">
+          {% for s in scenarios %}
+          <option value="{{ s.name }}">{% if s.kind == 'capture' %}[recorded] {% endif %}{{ s.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="inline-label-lg">Stagger:
+        <input type="number" id="stagger" value="8" min="0" max="120" class="num-4e"> s
+      </label>
+    </div>
+  </details>
+
+  <button id="run-btn" class="btn-primary">Run</button>
+  <span id="run-state" class="save-state"></span>
+
+  <h3 class="section-title">Output</h3>
+  <pre id="output" class="replay-output"></pre>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/replay.js?v={{ asset_v }}"></script>
+{% endblock %}

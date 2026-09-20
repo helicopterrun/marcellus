@@ -7,7 +7,7 @@ from pathlib import Path
 
 CSS_PATH = (
     Path(__file__).resolve().parent.parent
-    / "src" / "frigate_sidecar" / "static" / "css" / "triage.css"
+    / "src" / "marcellus" / "static" / "css" / "triage.css"
 )
 
 # WCAG 2.1 relative-luminance helpers

@@ -21,9 +21,9 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar.push.cards import SUPPRESSED, urgent_resound_due
-from frigate_sidecar.push.delivery import advance_card, apply_urgent_resound, should_push
-from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
+from marcellus.push.cards import SUPPRESSED, urgent_resound_due
+from marcellus.push.delivery import advance_card, apply_urgent_resound, should_push
+from marcellus.push.ladder import Snapshot, evaluate_ladder
 
 CASES_PATH = (
     Path(__file__).resolve().parent.parent / "fixtures" / "ladder" / "delivery_cases.json"

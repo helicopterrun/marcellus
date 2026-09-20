@@ -24,7 +24,7 @@ and a dog walked past the gate". It is an *overlay*: Frigate's `event` and
 Push, reel, related and highlights are untouched in slice 1 (later slices
 add `encounter_id` to those and encounter-aware push titles).
 
-## Package layout `src/frigate_sidecar/encounters/`
+## Package layout `src/marcellus/encounters/`
 
 ```
 __init__.py

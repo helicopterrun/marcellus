@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% set active_page = 'fps_budget' %}
+{% block title %}FPS Budget · Marcellus{% endblock %}
+
+{% block page_heading %}<h1 class="sr-only">FPS budget</h1>{% endblock %}
+{% block body %}
+<main id="main-content">
+  {% if error %}
+    <div class="empty error">{{ error }}</div>
+  {% else %}
+    <div class="stat-row">
+      <div class="stat-card">
+        <div class="stat-label">Utilization</div>
+        <div class="stat-value cell-class {{ util_css }}">{{ result.utilization_pct }}%</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total budget</div>
+        <div class="stat-value">{{ result.total_budget_fps }} fps</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total demand</div>
+        <div class="stat-value">{{ result.total_demand_fps }} fps</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Headroom</div>
+        <div class="stat-value">{{ '%+d'|format(result.headroom_fps|int) }} fps</div>
+      </div>
+    </div>
+
+    <h2 class="section-h">Detectors</h2>
+    <table class="motion-table">
+      <thead><tr>
+        <th>name</th><th>inference (ms)</th><th>implied fps/detector</th><th>thermal?</th>
+      </tr></thead>
+      <tbody>
+      {% for d in result.detectors %}
+        <tr>
+          <td>{{ d.name }}</td>
+          <td>{{ d.inference_ms }}</td>
+          <td>{{ d.implied_fps_per_detector }}</td>
+          <td>{% if d.thermal_flag %}<span class="cell-class warn">hot</span>{% else %}—{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+
+    <h2 class="section-h">Per-camera demand</h2>
+    <table class="motion-table">
+      <thead><tr>
+        <th>camera</th><th>configured detect.fps</th><th>observed detection_fps</th>
+        <th>observed skipped_fps</th><th>gap %</th>
+      </tr></thead>
+      <tbody>
+      {% for c in result.cameras %}
+        <tr>
+          <td>{{ c.camera }}</td>
+          <td>{{ c.configured_detect_fps }}</td>
+          <td>{{ c.observed_detection_fps }}</td>
+          <td>
+            {% if c.observed_skipped_fps > 1 %}
+              <span class="cell-class warn">{{ c.observed_skipped_fps }}</span>
+            {% else %}
+              {{ c.observed_skipped_fps }}
+            {% endif %}
+          </td>
+          <td>{{ '%+d'|format(c.gap_pct|int) }}%</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+
+    <h2 class="section-h">Recommendations</h2>
+    <ul class="rec-list">
+      {% for rec in result.recommendations %}
+        <li>{{ rec }}</li>
+      {% endfor %}
+    </ul>
+
+    <p class="help footnote">
+      Snapshot at request time. Refresh the page to re-query Frigate.
+      Hard guardrail: never propose <code>detect.fps &gt; 10</code> per upstream.
+    </p>
+  {% endif %}
+</main>
+{% endblock %}

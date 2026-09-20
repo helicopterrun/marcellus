@@ -10,7 +10,7 @@ and interleaves their stdout with a `[scenario-name] HH:MM:SS.mmm` prefix
 so the timeline can be correlated against device logs.
 
 Usage:
-    FRIGATE_SIDECAR_PUSH__MQTT_PASSWORD=... python3 tools/replay_stack.py \\
+    MARCELLUS_PUSH__MQTT_PASSWORD=... python3 tools/replay_stack.py \\
         --scenarios card-la-person-doors card-la-package \\
         --stagger 8 --config config/sidecar.yml
 """
@@ -146,7 +146,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
         epilog=(
             "Canonical stacking test:\n"
-            "  FRIGATE_SIDECAR_PUSH__MQTT_PASSWORD=... python3 tools/replay_stack.py "
+            "  MARCELLUS_PUSH__MQTT_PASSWORD=... python3 tools/replay_stack.py "
             "--scenarios card-la-person-doors card-la-package --stagger 8 "
             "--config config/sidecar.yml"
         ),

@@ -2,7 +2,7 @@
 
 How the sidecar turns Frigate detections into APNs pushes and Live
 Activities. This is the current-state design doc for everything under
-`frigate_sidecar/push/`; the wire contract for card payloads lives in
+`marcellus/push/`; the wire contract for card payloads lives in
 `docs/apns-payload-spec.md`.
 
 ## The routing model: the merged outcome ladder

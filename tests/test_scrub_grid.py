@@ -6,7 +6,7 @@ is silent until two series collide on one cell.
 
 from __future__ import annotations
 
-from frigate_sidecar.scrub import grid
+from marcellus.scrub import grid
 
 
 def test_achieved_timestamp_within_bound_all_accepted() -> None:

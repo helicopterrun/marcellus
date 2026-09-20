@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from frigate_sidecar.push import policy_settings
-from frigate_sidecar.push.delivery_wire import (
+from marcellus.push import policy_settings
+from marcellus.push.delivery_wire import (
     _build_motion,
     _heading_label,
     _movement_vector,
@@ -141,8 +141,8 @@ def test_heading_label_falls_back_to_derived_when_no_manual_arrow():
 
 
 def test_ladder_reasons_include_direction_and_speed():
-    from frigate_sidecar.push import ladder_policy
-    from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
+    from marcellus.push import ladder_policy
+    from marcellus.push.ladder import Snapshot, evaluate_ladder
 
     assert "approaching_secure" in ladder_policy.WORRY_REASONS
     assert "moving_fast" in ladder_policy.WORRY_REASONS
@@ -162,7 +162,7 @@ def test_ladder_reasons_include_direction_and_speed():
 
 
 def test_heading_streak_counts_and_resets():
-    from frigate_sidecar.push.delivery_wire import (
+    from marcellus.push.delivery_wire import (
         _heading_streaks,
         _update_heading_streak,
         last_heading,
@@ -183,14 +183,14 @@ def test_heading_streak_counts_and_resets():
 
 
 def test_round_distance_ft():
-    from frigate_sidecar.push.delivery_wire import _round_distance_ft
+    from marcellus.push.delivery_wire import _round_distance_ft
     assert _round_distance_ft(31.0) == 30
     assert _round_distance_ft(33.0) == 35
     assert _round_distance_ft(1.0) == 5  # floor: never announce below 5
 
 
 def test_stabilize_distance_hysteresis():
-    from frigate_sidecar.push import delivery_wire as dw
+    from marcellus.push import delivery_wire as dw
     dw._announced_distance.clear()
     assert dw._stabilize_distance("cam", "t1", 31.0) == 30
     # Small wobble (< 10 ft from the announced 30) keeps saying 30.
@@ -206,7 +206,7 @@ def test_stabilize_distance_hysteresis():
 
 
 def test_approach_story_copy():
-    from frigate_sidecar.push.delivery_wire import _approach_story
+    from marcellus.push.delivery_wire import _approach_story
     assert _approach_story(30, {"walking"}) == "approaching — 30 ft out, walking"
     assert _approach_story(30, {"walking", "running"}) == "approaching — 30 ft out, running"
     assert _approach_story(30, set()) == "approaching — 30 ft out"

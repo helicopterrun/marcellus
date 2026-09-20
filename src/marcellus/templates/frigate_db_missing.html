@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% set active_page = page|default('') %}
+{% block title %}Frigate DB unavailable · Marcellus{% endblock %}
+
+{% block body %}
+<main id="main-content">
+  <div class="empty">
+    Frigate's database isn't available on this instance — triage and analysis
+    run on the deployment host, next to Frigate's SQLite file.
+    <p class="help">Looked for: <code>{{ db_path }}</code></p>
+  </div>
+</main>
+{% endblock %}

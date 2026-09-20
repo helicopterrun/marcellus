@@ -1,0 +1,123 @@
+{# Shared header with cross-page nav, included by base.html's header block.
+   Templates set `active_page` to one of: 'status', 'scrub', 'triage',
+   'encounters', 'map', 'settings', 'replay', 'guide', 'debug', 'toybox',
+   'cameras', or one of the People/Tuning pages listed in `_people_pages` /
+   `_tuning_pages` below. #}
+{% set _active = active_page|default('') %}
+{% set _people_pages = ('face_captures', 'enrich') %}
+{% set _tuning_pages = ('score_histogram', 'motion', 'fps_budget', 'placement', 'zone_hits') %}
+{# Inline icon sprite: line icons on currentColor, echoing the app's SF
+   Symbols vocabulary (server.rack, film.stack, checklist, video, map). #}
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+  <symbol id="i-status" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="3" y="13" width="18" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="7" cy="7.5" r="1.1" fill="currentColor"/><circle cx="7" cy="16.5" r="1.1" fill="currentColor"/></symbol>
+  <symbol id="i-scrub" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M3 9h18M3 15h18M7 5v4M12 5v4M17 5v4M7 15v4M12 15v4M17 15v4" stroke="currentColor" stroke-width="1.2" fill="none"/></symbol>
+  <symbol id="i-triage" viewBox="0 0 24 24"><path d="M4 6h2v2H4zM4 11h2v2H4zM4 16h2v2H4z" fill="currentColor"/><path d="M9 7h11M9 12h11M9 17h11" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/></symbol>
+  <symbol id="i-map" viewBox="0 0 24 24"><path d="M3.5 5.5 9 4l6 2 5.5-1.5v14L15 20l-6-2-5.5 1.5z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M9 4v14M15 6v14" stroke="currentColor" stroke-width="1.2" fill="none"/></symbol>
+  <symbol id="i-zones" viewBox="0 0 24 24"><path d="M4 5.5 9.5 4l5 1.5L20 4v14.5L14.5 20l-5-1.5L4 20z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M9.5 4v14.5M14.5 5.5V20" stroke="currentColor" stroke-width="1.2" fill="none"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 2.8v3M12 18.2v3M2.8 12h3M18.2 12h3M5.5 5.5l2.1 2.1M16.4 16.4l2.1 2.1M18.5 5.5l-2.1 2.1M7.6 16.4l-2.1 2.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M15 15l5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="19" r="1.8" fill="currentColor"/></symbol>
+</svg>
+<header>
+  <div class="brand"><a href="/">Marcellus</a></div>
+  <nav class="pages" aria-label="Main">
+    <a href="/" class="page-link{% if _active == 'status' %} active{% endif %}"{% if _active == 'status' %} aria-current="page"{% endif %}>Status</a>
+    <a href="/scrub" class="page-link{% if _active == 'scrub' %} active{% endif %}"{% if _active == 'scrub' %} aria-current="page"{% endif %}>Scrub</a>
+    <a href="/triage" class="page-link{% if _active == 'triage' %} active{% endif %}"{% if _active == 'triage' %} aria-current="page"{% endif %}>Triage</a>
+    <a href="/encounters" class="page-link{% if _active == 'encounters' %} active{% endif %}"{% if _active == 'encounters' %} aria-current="page"{% endif %}>Encounters</a>
+    <a href="/map" class="page-link{% if _active == 'map' %} active{% endif %}"{% if _active == 'map' %} aria-current="page"{% endif %}>Map</a>
+    <details class="nav-group">
+      <summary class="page-link{% if _active in _people_pages %} active{% endif %}"{% if _active in _people_pages %} aria-current="page"{% endif %}>People</summary>
+      <div class="nav-drop">
+        <a href="/faces/captures" class="page-link{% if _active == 'face_captures' %} active{% endif %}"{% if _active == 'face_captures' %} aria-current="page"{% endif %}>Face captures</a>
+        <a href="/enrich/clusters" class="page-link{% if _active == 'enrich' %} active{% endif %}"{% if _active == 'enrich' %} aria-current="page"{% endif %}>Identities</a>
+      </div>
+    </details>
+    <details class="nav-group">
+      <summary class="page-link{% if _active in _tuning_pages %} active{% endif %}"{% if _active in _tuning_pages %} aria-current="page"{% endif %}>Tuning</summary>
+      <div class="nav-drop">
+        <a href="/score-histogram" class="page-link{% if _active == 'score_histogram' %} active{% endif %}"{% if _active == 'score_histogram' %} aria-current="page"{% endif %}>Scores</a>
+        <a href="/motion" class="page-link{% if _active == 'motion' %} active{% endif %}"{% if _active == 'motion' %} aria-current="page"{% endif %}>Motion</a>
+        <a href="/fps-budget" class="page-link{% if _active == 'fps_budget' %} active{% endif %}"{% if _active == 'fps_budget' %} aria-current="page"{% endif %}>FPS budget</a>
+        <a href="/zone-hits" class="page-link{% if _active == 'zone_hits' %} active{% endif %}"{% if _active == 'zone_hits' %} aria-current="page"{% endif %}>Zone hits</a>
+        <a href="/placement" class="page-link{% if _active == 'placement' %} active{% endif %}"{% if _active == 'placement' %} aria-current="page"{% endif %}>Placement</a>
+      </div>
+    </details>
+    <a href="/settings" class="page-link{% if _active == 'settings' %} active{% endif %}"{% if _active == 'settings' %} aria-current="page"{% endif %}>Settings</a>
+  </nav>
+  <span class="stats">{{ summary or '' }}
+    {% if counts and (counts.get('tp') or counts.get('fp') or counts.get('skip')) %}
+      &nbsp;·&nbsp; labeled:
+      <span class="badge tp">{{ counts.get('tp', 0) }} real</span>
+      <span class="badge fp">{{ counts.get('fp', 0) }} false alarm</span>
+      <span class="badge skip">{{ counts.get('skip', 0) }} skip</span>
+    {% endif %}
+  </span>
+  <form class="search-form" role="search" action="/triage" method="get">
+    <input type="search" name="q" class="search-input" placeholder="Search events…" autocomplete="off" aria-label="Search events" value="{{ request.query_params.get('q', '') if _active == 'triage' else '' }}">
+    <div class="search-drop" hidden></div>
+  </form>
+  <span class="header-right">
+    <a href="/replay" class="page-link util{% if _active == 'replay' %} active{% endif %}">Replay</a>
+    <a href="/guide" class="page-link util{% if _active == 'guide' %} active{% endif %}">Guide</a>
+    <a href="/debug" class="page-link util{% if _active in ('debug', 'toybox') %} active{% endif %}">Debug</a>
+  </span>
+</header>
+{# Phone navigation: fixed bottom tab bar, like the app's. Desktop hides it. #}
+<nav class="tabbar" aria-label="Primary">
+  <a href="/" class="tab{% if _active in ('status', 'cameras') %} active{% endif %}"{% if _active in ('status', 'cameras') %} aria-current="page"{% endif %}><svg><use href="#i-status"/></svg><span>Status</span></a>
+  <a href="/scrub" class="tab{% if _active == 'scrub' %} active{% endif %}"{% if _active == 'scrub' %} aria-current="page"{% endif %}><svg><use href="#i-scrub"/></svg><span>Scrub</span></a>
+  <a href="/triage" class="tab{% if _active == 'triage' %} active{% endif %}"{% if _active == 'triage' %} aria-current="page"{% endif %}><svg><use href="#i-triage"/></svg><span>Triage</span></a>
+  <a href="/map" class="tab{% if _active == 'map' %} active{% endif %}"{% if _active == 'map' %} aria-current="page"{% endif %}><svg><use href="#i-map"/></svg><span>Map</span></a>
+  <button type="button" class="tab" id="search-btn" aria-label="Search events"><svg><use href="#i-search"/></svg><span>Search</span></button>
+  <button type="button" class="tab" id="more-btn" aria-label="More pages" aria-expanded="false"><svg><use href="#i-more"/></svg><span>More</span></button>
+</nav>
+<div class="more-backdrop" id="more-backdrop"></div>
+<nav class="more-sheet" id="more-sheet" aria-label="All pages">
+  <div class="more-group">
+    <div class="more-heading">Watch</div>
+    <a href="/" class="page-link">Status</a>
+    <a href="/cameras" class="page-link">Cameras</a>
+  </div>
+  <div class="more-group">
+    <div class="more-heading">Review</div>
+    <a href="/scrub" class="page-link">Scrub</a>
+    <a href="/triage" class="page-link">Triage</a>
+    <a href="/encounters" class="page-link">Encounters</a>
+  </div>
+  <div class="more-group">
+    <div class="more-heading">Space</div>
+    <a href="/map" class="page-link">Map</a>
+  </div>
+  <div class="more-group">
+    <div class="more-heading">People</div>
+    <a href="/faces/captures" class="page-link">Face captures</a>
+    <a href="/enrich/clusters" class="page-link">Identities</a>
+  </div>
+  <div class="more-group">
+    <div class="more-heading">Tuning</div>
+    <a href="/score-histogram" class="page-link">Scores</a>
+    <a href="/motion" class="page-link">Motion</a>
+    <a href="/fps-budget" class="page-link">FPS budget</a>
+    <a href="/zone-hits" class="page-link">Zone hits</a>
+    <a href="/placement" class="page-link">Placement</a>
+  </div>
+  <div class="more-group">
+    <div class="more-heading">Phone</div>
+    <a href="/settings" class="page-link">Settings</a>
+    <a href="/replay" class="page-link">Replay</a>
+  </div>
+  <div class="more-group">
+    <div class="more-heading">Meta</div>
+    <a href="/guide" class="page-link">Guide</a>
+    <a href="/debug" class="page-link">Debug</a>
+  </div>
+</nav>
+<div class="search-backdrop" id="search-backdrop"></div>
+<div class="search-sheet" id="search-sheet">
+  <form class="search-form" role="search" action="/triage" method="get">
+    <input type="search" name="q" class="search-input" placeholder="Search events…"
+           autocomplete="off" aria-label="Search events" value="{{ request.query_params.get('q', '') if _active == 'triage' else '' }}">
+    <div class="search-drop" hidden></div>
+  </form>
+</div>

@@ -17,8 +17,8 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from frigate_sidecar.config import FrigateSection, ProxySection, Settings, SidecarSection
-from frigate_sidecar.server import create_app
+from marcellus.config import FrigateSection, ProxySection, Settings, SidecarSection
+from marcellus.server import create_app
 
 
 class _FakeStreamClient:
@@ -65,7 +65,7 @@ def _fake_pool_stats(monkeypatch: pytest.MonkeyPatch) -> None:
     `upstream_pool`/`api_pool` checks would never appear. Stub it to a fixed
     non-empty dict so those checks are exercised."""
     monkeypatch.setattr(
-        "frigate_sidecar.routes.health.pool_stats",
+        "marcellus.routes.health.pool_stats",
         lambda c: {"connections": 1, "active": 0, "idle": 1},
     )
 
@@ -161,14 +161,14 @@ def test_healthz_recycles_stream_client_after_pool_wedged_30s(
     probe backdates the real first-seen timestamp `/healthz` itself
     recorded, the same way `test_healthz_probe_result_is_cached` above
     backdates the frigate-probe cache."""
-    from frigate_sidecar import frigate_api
+    from marcellus import frigate_api
 
     saturated = {
         "connections": frigate_api._STREAM_LIMITS.max_connections,
         "active": frigate_api._STREAM_LIMITS.max_connections,
         "idle": 0,
     }
-    monkeypatch.setattr("frigate_sidecar.routes.health.pool_stats", lambda c: saturated)
+    monkeypatch.setattr("marcellus.routes.health.pool_stats", lambda c: saturated)
 
     old_client = client.app.state.stream_http_client
 
@@ -187,7 +187,7 @@ def test_healthz_recycles_stream_client_after_pool_wedged_30s(
 def test_healthz_resets_stall_timer_on_recovery(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frigate_sidecar import frigate_api
+    from marcellus import frigate_api
 
     saturated = {
         "connections": frigate_api._STREAM_LIMITS.max_connections,
@@ -198,7 +198,7 @@ def test_healthz_resets_stall_timer_on_recovery(
     # `pool_stats` is called twice per /healthz (upstream_pool, api_pool), so
     # each request below needs two matching entries in this sequence.
     stats_sequence = iter([saturated, saturated, recovered, recovered, saturated, saturated])
-    monkeypatch.setattr("frigate_sidecar.routes.health.pool_stats", lambda c: next(stats_sequence))
+    monkeypatch.setattr("marcellus.routes.health.pool_stats", lambda c: next(stats_sequence))
 
     old_client = client.app.state.stream_http_client
     client.get("/healthz")  # saturated -- stall timer starts
@@ -221,7 +221,7 @@ def test_pool_stats_is_called_for_both_pools(
         calls.append(c)
         return {"connections": 1, "active": 0, "idle": 1}
 
-    monkeypatch.setattr("frigate_sidecar.routes.health.pool_stats", _spy)
+    monkeypatch.setattr("marcellus.routes.health.pool_stats", _spy)
     r = client.get("/healthz")
     assert r.status_code == 200
     assert len(calls) == 2

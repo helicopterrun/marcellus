@@ -13,15 +13,15 @@ from __future__ import annotations
 
 import pytest
 
-from frigate_sidecar.push import ladder_policy
-from frigate_sidecar.push.delivery_wire import (
+from marcellus.push import ladder_policy
+from marcellus.push.delivery_wire import (
     classify_place,
     most_severe_zone,
     snapshot_from_review,
     zone_place,
 )
-from frigate_sidecar.push.ladder import SUPPRESSED, Snapshot, base_level, evaluate_ladder
-from frigate_sidecar.push.models import ReviewEvent
+from marcellus.push.ladder import SUPPRESSED, Snapshot, base_level, evaluate_ladder
+from marcellus.push.models import ReviewEvent
 
 #: This property's live map, as of push_settings rev 7.
 ZONE_CLASSES = {

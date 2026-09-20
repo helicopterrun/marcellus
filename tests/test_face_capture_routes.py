@@ -8,14 +8,14 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from frigate_sidecar import db
-from frigate_sidecar.config import (
+from marcellus import db
+from marcellus.config import (
     FaceCaptureSection,
     FrigateSection,
     Settings,
     SidecarSection,
 )
-from frigate_sidecar.server import create_app
+from marcellus.server import create_app
 
 
 def _jpeg(w: int = 64, h: int = 36) -> bytes:

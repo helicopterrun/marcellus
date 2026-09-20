@@ -13,9 +13,9 @@ import logging
 import httpx
 import pytest
 
-from frigate_sidecar.push.models import Device
-from frigate_sidecar.push.stats import STATS
-from frigate_sidecar.push.transport import RelayTransport, compute_retry_delay
+from marcellus.push.models import Device
+from marcellus.push.stats import STATS
+from marcellus.push.transport import RelayTransport, compute_retry_delay
 
 
 def _device(**kwargs: object) -> Device:
@@ -91,7 +91,7 @@ async def test_push_exhausts_retries_on_timeout(
     # Construction itself warns once ("relay_key not set") -- only the send
     # below is under test.
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="frigate_sidecar.push.transport"):
+    with caplog.at_level(logging.WARNING, logger="marcellus.push.transport"):
         result = await relay.send(
             _device(), handle="h1", server_id="s1", severity="alert", collapse_id="c1",
         )

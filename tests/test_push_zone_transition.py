@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar import db
-from frigate_sidecar.config import PushSection
-from frigate_sidecar.push import policy_settings, store
-from frigate_sidecar.push.delivery_wire import handle_delivery_event, handle_zone_transition
-from frigate_sidecar.push.models import Device, ReviewEvent
-from frigate_sidecar.push.transport import LogTransport
+from marcellus import db
+from marcellus.config import PushSection
+from marcellus.push import policy_settings, store
+from marcellus.push.delivery_wire import handle_delivery_event, handle_zone_transition
+from marcellus.push.models import Device, ReviewEvent
+from marcellus.push.transport import LogTransport
 
 FIXTURE = Path(__file__).parent / "fixtures" / "capture-charger-loiter.jsonl"
 
@@ -123,7 +123,7 @@ async def test_captured_charger_loiter_escalates(tmp_path, sidecar_db_path: Path
     at driveway, events carry the charger drift. Before the hook this
     produced zero escalation; now it must produce an urgent
     person_restricted story."""
-    from frigate_sidecar.push.engine import PushEngine
+    from marcellus.push.engine import PushEngine
 
     conn = db.open_sidecar(sidecar_db_path)
     device = make_device()

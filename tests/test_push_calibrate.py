@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from frigate_sidecar.push import calibrate, ground
+from marcellus.push import calibrate, ground
 
 HFOV = 90.0
 MOUNT = 9.0
@@ -222,13 +222,13 @@ def _autotune_client(tmp_path, frigate_db_path, sidecar_db_path, capture_rows):
 
     from fastapi.testclient import TestClient
 
-    from frigate_sidecar.config import (
+    from marcellus.config import (
         FrigateSection,
         PushSection,
         Settings,
         SidecarSection,
     )
-    from frigate_sidecar.server import create_app
+    from marcellus.server import create_app
 
     capture_file = tmp_path / "mqtt-capture.jsonl"
     capture_file.write_text("\n".join(json.dumps(r) for r in capture_rows))
@@ -270,7 +270,7 @@ def test_autotune_endpoint_reports(
 ):
     import time
 
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     policy_settings.reset_for_tests()
     try:
@@ -294,7 +294,7 @@ def test_autotune_endpoint_reports(
 def test_autotune_endpoint_400_on_empty_capture(
     tmp_path, frigate_db_path, sidecar_db_path,
 ):
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     policy_settings.reset_for_tests()
     try:
@@ -369,7 +369,7 @@ def test_solve_landmarks_requires_two_matches():
 
 
 def test_landmark_solve_endpoint(tmp_path, frigate_db_path, sidecar_db_path):
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     policy_settings.reset_for_tests()
     try:

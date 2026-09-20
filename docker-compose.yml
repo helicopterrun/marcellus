@@ -1,18 +1,18 @@
 # Quickstart:
 #   cp .env.example .env && $EDITOR .env   # point the paths at YOUR Frigate
-#   docker compose run --rm frigate-sidecar init -o /config/sidecar.yml
+#   docker compose run --rm marcellus init -o /config/sidecar.yml
 #   docker compose up -d
 #
 # Every host-specific path is an env var (read from .env) with a default
 # matching a stock /opt/frigate install. To build locally instead of pulling
 # from ghcr.io: docker compose build (the build context is kept below).
 services:
-  frigate-sidecar:
+  marcellus:
     # Pinned to the release train, not :latest — `docker compose pull` on two
     # days should not silently move you across a minor version.
-    image: ${SIDECAR_IMAGE:-ghcr.io/helicopterrun/frigate-sidecar:0.3}
+    image: ${SIDECAR_IMAGE:-ghcr.io/helicopterrun/marcellus:0.3}
     build: .
-    container_name: frigate-sidecar
+    container_name: marcellus
     restart: unless-stopped
     # host networking is the simplest way to reach Frigate's API on the LAN.
     # If you prefer bridge networking, drop this, publish 5001, and set
@@ -42,8 +42,8 @@ services:
       # Configuration
       - ${SIDECAR_CONFIG_DIR:-./config}:/config
     environment:
-      FRIGATE_SIDECAR_CONFIG: /config/sidecar.yml
-    # .env is also passed into the container so FRIGATE_SIDECAR_* overrides
+      MARCELLUS_CONFIG: /config/sidecar.yml
+    # .env is also passed into the container so MARCELLUS_* overrides
     # (e.g. the MQTT password) take effect without editing this file.
     env_file:
       - path: .env

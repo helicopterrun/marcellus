@@ -1,6 +1,8 @@
-# frigate-sidecar
+# Marcellus
 
-A small companion server for [Frigate NVR](https://github.com/blakeblackshear/frigate).
+A companion sidecar for [Frigate NVR](https://github.com/blakeblackshear/frigate): scrub
+cache, push notifications, triage and analysis pages, face pipeline.
+
 It adds:
 
 - **Triage UI** for labeling tracked-object events as true-positive / false-positive
@@ -42,10 +44,10 @@ for push notifications.
 ### Quick install (recommended)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/helicopterrun/frigate-sidecar/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/helicopterrun/marcellus/main/install.sh | sudo bash
 ```
 
-Uses Docker (image from `ghcr.io/helicopterrun/frigate-sidecar`) when
+Uses Docker (image from `ghcr.io/helicopterrun/marcellus`) when
 available, otherwise falls back to a venv + systemd unit. Prompts for the
 handful of deployment-specific values (Frigate URLs and paths) and writes
 `sidecar.yml` for you. Re-run the same command to upgrade.
@@ -53,12 +55,12 @@ handful of deployment-specific values (Frigate URLs and paths) and writes
 ### Manual — Docker compose
 
 ```sh
-sudo mkdir -p /opt/frigate-sidecar && cd /opt/frigate-sidecar
-curl -fsSLO https://raw.githubusercontent.com/helicopterrun/frigate-sidecar/main/docker-compose.yml
-curl -fsSL  https://raw.githubusercontent.com/helicopterrun/frigate-sidecar/main/.env.example -o .env
+sudo mkdir -p /opt/marcellus && cd /opt/marcellus
+curl -fsSLO https://raw.githubusercontent.com/helicopterrun/marcellus/main/docker-compose.yml
+curl -fsSL  https://raw.githubusercontent.com/helicopterrun/marcellus/main/.env.example -o .env
 $EDITOR .env                                            # point the paths at YOUR Frigate
 mkdir -p data config && sudo chown -R 10001:10001 data  # container's non-root uid
-docker compose run --rm frigate-sidecar init -o /config/sidecar.yml
+docker compose run --rm marcellus init -o /config/sidecar.yml
 docker compose up -d
 ```
 
@@ -71,14 +73,14 @@ For environments where Docker isn't an option (e.g. unprivileged LXCs) — see
 [`docs/deployment.md`](docs/deployment.md) for details:
 
 ```sh
-python3 -m venv /opt/frigate-sidecar/venv
-/opt/frigate-sidecar/venv/bin/pip install "frigate-sidecar @ git+https://github.com/helicopterrun/frigate-sidecar"
-sudo mkdir -p /opt/frigate-sidecar/data /etc/frigate-sidecar
-sudo /opt/frigate-sidecar/venv/bin/fsc init -o /etc/frigate-sidecar/sidecar.yml \
-  --sidecar-db /opt/frigate-sidecar/data/frigate-sidecar.db
-sudo cp contrib/frigate-sidecar.service /etc/systemd/system/   # adjust ExecStart to the venv python
+python3 -m venv /opt/marcellus/venv
+/opt/marcellus/venv/bin/pip install "marcellus @ git+https://github.com/helicopterrun/marcellus"
+sudo mkdir -p /opt/marcellus/data /etc/marcellus
+sudo /opt/marcellus/venv/bin/fsc init -o /etc/marcellus/sidecar.yml \
+  --sidecar-db /opt/marcellus/data/marcellus.db
+sudo cp contrib/marcellus.service /etc/systemd/system/   # adjust ExecStart to the venv python
 sudo systemctl daemon-reload
-sudo systemctl enable --now frigate-sidecar.service
+sudo systemctl enable --now marcellus.service
 ```
 
 ### Upgrading
@@ -86,7 +88,12 @@ sudo systemctl enable --now frigate-sidecar.service
 - **Docker:** `docker compose pull && docker compose up -d` (or re-run the
   install script).
 - **Systemd:** `pip install --upgrade ...` in the venv, then
-  `systemctl restart frigate-sidecar`.
+  `systemctl restart marcellus`.
+
+Upgrading an existing `frigate-sidecar` deployment? See ["Upgrading from
+frigate-sidecar"](docs/deployment.md#upgrading-from-frigate-sidecar) in the
+deployment docs — env vars, config path, systemd units, and the DB filename
+all have backward-compatible fallbacks.
 
 Releases are tagged `vX.Y.Z`; the image is published multi-arch (amd64 +
 arm64) with `latest`, `X.Y`, and `vX.Y.Z` tags. `/v1/capabilities` reports the
@@ -211,9 +218,9 @@ the column alone reports null for every event.
 The same code is available as a CLI inside the container:
 
 ```sh
-docker exec frigate-sidecar fsc --help
-docker exec frigate-sidecar fsc triage sample --days 7 --n 30
-docker exec frigate-sidecar fsc analysis score-histogram --days 7
+docker exec marcellus fsc --help
+docker exec marcellus fsc triage sample --days 7 --n 30
+docker exec marcellus fsc analysis score-histogram --days 7
 ```
 
 Scrub-cache generation is also driven from the CLI (`fsc scrub ...`), run
@@ -222,22 +229,25 @@ which also sweeps retention every `scrub.prune_interval_s`. The CLI stays
 useful for backfill/maintenance:
 
 ```sh
-docker exec frigate-sidecar fsc scrub generate            # one generation cycle, all configured cameras
-docker exec frigate-sidecar fsc scrub generate --camera doorbell
-docker exec frigate-sidecar fsc scrub backfill --camera doorbell --days 4
-docker exec frigate-sidecar fsc scrub prune                # drop sheets/buckets past scrub.retention_days
-docker exec frigate-sidecar fsc scrub coverage --camera doorbell
+docker exec marcellus fsc scrub generate            # one generation cycle, all configured cameras
+docker exec marcellus fsc scrub generate --camera doorbell
+docker exec marcellus fsc scrub backfill --camera doorbell --days 4
+docker exec marcellus fsc scrub prune                # drop sheets/buckets past scrub.retention_days
+docker exec marcellus fsc scrub coverage --camera doorbell
 ```
 
 ## Configuration
 
 All values are settable in `config/sidecar.yml` or via environment variables.
-Env vars use the prefix `FRIGATE_SIDECAR_` and nest with `__`:
+Env vars use the prefix `MARCELLUS_` and nest with `__`:
 
 ```sh
-FRIGATE_SIDECAR_FRIGATE__BASE_URL=http://frigate.lan:5000
-FRIGATE_SIDECAR_SIDECAR__BIND_PORT=5001
+MARCELLUS_FRIGATE__BASE_URL=http://frigate.lan:5000
+MARCELLUS_SIDECAR__BIND_PORT=5001
 ```
+
+(The older `FRIGATE_SIDECAR_` prefix from before the project was renamed
+still works as a deprecated fallback.)
 
 Two settings sections back the new features:
 

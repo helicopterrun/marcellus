@@ -1,4 +1,4 @@
-# frigate-sidecar configuration
+# marcellus configuration
 #
 # Copy this file to config/sidecar.yml and edit. The non-example form is
 # gitignored so your real values stay out of the repo.
@@ -33,7 +33,7 @@ frigate:
 
 sidecar:
   # Path to the sidecar's own SQLite database (triage labels, etc.).
-  db_path: /data/frigate-sidecar.db
+  db_path: /data/marcellus.db
   # Bind address. 0.0.0.0 + host networking exposes the service on the LAN.
   bind_host: 0.0.0.0
   bind_port: 5001
@@ -73,7 +73,7 @@ watchdog:
 # One HTTP GET does it: /api/{camera}/recordings/{ts}/snapshot.jpg returns the
 # full main-stream frame -- no ffmpeg, no seek, no recordings-table lookup.
 #
-# Runs as a systemd oneshot (contrib/frigate-sidecar-face-capture.{service,timer}),
+# Runs as a systemd oneshot (contrib/marcellus-face-capture.{service,timer}),
 # NOT in-process: that endpoint 404s until the segment covering the timestamp is
 # committed, and segments commit at their END, so the work is inherently
 # deferred by tens of seconds and an MQTT "grab it now" hook would 404 always.
@@ -95,13 +95,13 @@ face_capture:
   crop_pad: 0.25
   thumb_max_edge: 480
   # MUST be writable by the unit: ProtectSystem=strict with
-  # ReadWritePaths=/opt/frigate-sidecar means anything outside fails EROFS at
+  # ReadWritePaths=/opt/marcellus means anything outside fails EROFS at
   # WRITE time, not config load -- a silent no-op.
-  output_dir: /opt/frigate-sidecar/data/face-captures
+  output_dir: /opt/marcellus/data/face-captures
   retention_days: 30
 
 # Face enrichment (B3): embeddings + temporal aggregation + identity clusters.
-# Needs `pip install "frigate-sidecar[enrich]"` (insightface/onnxruntime, CPU
+# Needs `pip install "marcellus[enrich]"` (insightface/onnxruntime, CPU
 # only). For each ended person event on an enrolled camera, samples full-res
 # recording frames, embeds the best faces, and matches identity clusters at
 # /enrich/clusters — naming a cluster makes later matches write the event's
@@ -121,7 +121,7 @@ face_enrich:
   match_threshold: 0.45       # cosine distance to a NAMED cluster -> sub_label
   cluster_threshold: 0.55     # cosine distance to join an unnamed cluster
   cluster_ttl_days: 60        # unnamed clusters expire; named ones never do
-  model_dir: /opt/frigate-sidecar/data/models   # buffalo_l cache, ~300 MB
+  model_dir: /opt/marcellus/data/models   # buffalo_l cache, ~300 MB
   max_events_per_cycle: 10
   max_attempts: 3
 

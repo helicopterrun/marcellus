@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% set active_page = 'status' %}
+{% block title %}{{ camera }} · live · Marcellus{% endblock %}
+
+{% block page_heading %}<h1 class="sr-only">Live view</h1>{% endblock %}
+{% block body %}
+<main id="main-content">
+  <h2 class="section-h" style="margin-top:0">Live — {{ camera }}</h2>
+  <div class="live-cam-switch">
+    {% for c in cameras %}
+    <a class="vis-chip {{ 'on' if c == camera else '' }}" href="/live/{{ c }}">{{ c }}</a>
+    {% endfor %}
+  </div>
+  <div class="live-stage">
+    {# go2rtc web component (vendored, v1.9.10 to match the NVR): WebRTC with
+       automatic MSE/MJPEG fallback, signaled over the sidecar proxy →
+       Frigate → go2rtc websocket. #}
+    <video-stream id="live-stream" mode="webrtc,mse,mjpeg"></video-stream>
+  </div>
+  <p class="help" id="live-stream-hint" style="display:none">
+    If the stream doesn't start, check go2rtc.</p>
+  <p class="help">go2rtc stream (WebRTC, falls back to MSE/MJPEG) via the
+    sidecar proxy. <a href="/cameras">Back to cameras</a>.</p>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script type="module">
+  import "/static/js/video-stream.js?v={{ asset_v }}";
+  var el = document.getElementById("live-stream");
+  var proto = location.protocol === "https:" ? "wss:" : "ws:";
+  el.src = proto + "//" + location.host +
+    "/live/webrtc/api/ws?src={{ camera | urlencode }}";
+
+  // video-stream (video-rtc.js, vendored) exposes no load/connected event of
+  // its own -- the <video> it creates internally is the only signal
+  // available, and even that fires a non-bubbling "error" straight to
+  // console.warn rather than out to us. So: watch that inner element
+  // directly, and failing that, fall back to a flat timeout.
+  var hint = document.getElementById("live-stream-hint");
+  if (hint) {
+    var innerVideo = el.querySelector("video");
+    if (innerVideo) {
+      innerVideo.addEventListener("playing", function () { hint.style.display = "none"; });
+      innerVideo.addEventListener("error", function () { hint.style.display = ""; });
+    }
+    setTimeout(function () {
+      var v = el.querySelector("video");
+      if (!v || v.paused || v.readyState < 2) hint.style.display = "";
+    }, 5000);
+  }
+</script>
+{% endblock %}

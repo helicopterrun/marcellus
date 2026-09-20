@@ -9,11 +9,11 @@ from types import SimpleNamespace
 
 import httpx
 
-from frigate_sidecar.config import PushSection
-from frigate_sidecar.push.engine import PushEngine
-from frigate_sidecar.push.mqtt import MqttReviewSubscriber, backfill_since, compute_backoff
-from frigate_sidecar.push.stats import STATS
-from frigate_sidecar.push.transport import LogTransport
+from marcellus.config import PushSection
+from marcellus.push.engine import PushEngine
+from marcellus.push.mqtt import MqttReviewSubscriber, backfill_since, compute_backoff
+from marcellus.push.stats import STATS
+from marcellus.push.transport import LogTransport
 
 
 class _RecordingHandler(logging.Handler):
@@ -90,7 +90,7 @@ async def test_reviews_dispatch_exception_is_logged_not_swallowed(tmp_path: Path
     sub._loop = asyncio.get_running_loop()
     sub.start_consumer()
     handler = _RecordingHandler()
-    mqtt_logger = logging.getLogger("frigate_sidecar.push.mqtt")
+    mqtt_logger = logging.getLogger("marcellus.push.mqtt")
     mqtt_logger.addHandler(handler)
     mqtt_logger.setLevel(logging.ERROR)
     try:
@@ -126,7 +126,7 @@ async def test_events_dispatch_exception_is_logged_not_swallowed(tmp_path: Path)
     sub._loop = asyncio.get_running_loop()
     sub.start_consumer()
     handler = _RecordingHandler()
-    mqtt_logger = logging.getLogger("frigate_sidecar.push.mqtt")
+    mqtt_logger = logging.getLogger("marcellus.push.mqtt")
     mqtt_logger.addHandler(handler)
     mqtt_logger.setLevel(logging.ERROR)
     try:
@@ -168,8 +168,8 @@ def test_is_stale(tmp_path: Path) -> None:
 
 
 async def test_backfill_since_dispatches_matching_events(tmp_path: Path) -> None:
-    from frigate_sidecar import db
-    from frigate_sidecar.push import store
+    from marcellus import db
+    from marcellus.push import store
 
     db_path = tmp_path / "sidecar.db"
     conn = db.open_sidecar(db_path)
@@ -180,7 +180,7 @@ async def test_backfill_since_dispatches_matching_events(tmp_path: Path) -> None
 
     transport = LogTransport()
     engine = PushEngine(db_path=str(db_path), transport=transport, server_id="s1")
-    from frigate_sidecar.config import PushSection
+    from marcellus.config import PushSection
     engine.push_config = PushSection(delivery_enabled=True)
 
     def handler(request: httpx.Request) -> httpx.Response:

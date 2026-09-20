@@ -6,9 +6,9 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from frigate_sidecar import db
-from frigate_sidecar.encounters import store
-from frigate_sidecar.encounters.linker import Atom, LinkDecision, LinkerConfig
+from marcellus import db
+from marcellus.encounters import store
+from marcellus.encounters.linker import Atom, LinkDecision, LinkerConfig
 
 CFG = LinkerConfig(
     gap_s={"animal": 180.0, "person": 90.0, "vehicle": 45.0, "default": 60.0},

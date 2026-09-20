@@ -8,9 +8,9 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from frigate_sidecar.config import FrigateSection, PushSection, Settings, SidecarSection
-from frigate_sidecar.push import policy_settings
-from frigate_sidecar.server import create_app
+from marcellus.config import FrigateSection, PushSection, Settings, SidecarSection
+from marcellus.push import policy_settings
+from marcellus.server import create_app
 
 OPTICS = {"hfov": 90.0, "mount_ft": 10.0, "tilt_deg": 12.0}
 LAYOUT = {"x": 0.5, "y": 0.5, "azimuth": 0.0, "fov": 90.0}
@@ -102,7 +102,7 @@ def test_map_live_serves_fused_tracks(
     client = _make_client(tmp_path, frigate_db_path, sidecar_db_path)
     _apply_map_policy()
 
-    from frigate_sidecar.push.situations import TrackStore
+    from marcellus.push.situations import TrackStore
 
     class _Engine:
         tracks = TrackStore()
@@ -181,7 +181,7 @@ def test_map_footprints_without_scale_is_empty(
 def _live_engine(points):
     import time
 
-    from frigate_sidecar.push.situations import TrackStore
+    from marcellus.push.situations import TrackStore
 
     class _Engine:
         tracks = TrackStore()

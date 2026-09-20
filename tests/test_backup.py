@@ -1,4 +1,4 @@
-"""Round-trip and safety tests for `frigate_sidecar.backup`."""
+"""Round-trip and safety tests for `marcellus.backup`."""
 
 from __future__ import annotations
 
@@ -6,9 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar import db
-from frigate_sidecar.backup import (
+from marcellus import db
+from marcellus.backup import (
     DB_NAME,
+    LEGACY_DB_NAMES,
     MANIFEST_NAME,
     SECRET_NAME,
     BackupError,
@@ -16,7 +17,7 @@ from frigate_sidecar.backup import (
     create_backup,
     restore_backup,
 )
-from frigate_sidecar.config import FrigateSection, Settings, SidecarSection
+from marcellus.config import FrigateSection, Settings, SidecarSection
 
 
 def _settings(frigate_db_path: Path, sidecar_db_path: Path) -> Settings:
@@ -125,7 +126,7 @@ def test_restore_refuses_without_force(
     dest = tmp_path / "backup"
     create_backup(settings, dest)
 
-    with pytest.raises(BackupError, match="stop frigate-sidecar"):
+    with pytest.raises(BackupError, match="stop marcellus"):
         restore_backup(settings, dest)
 
 
@@ -160,6 +161,31 @@ def test_create_backup_refuses_missing_db(
     assert not sidecar_db_path.exists()
     with pytest.raises(BackupError, match="not found"):
         create_backup(settings, tmp_path / "backup")
+
+
+def test_restore_accepts_legacy_db_filename(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
+) -> None:
+    """A backup made before the rename still has its DB stored under the old
+    `frigate-sidecar.db` name; restore must fall back to it."""
+    settings = _settings(frigate_db_path, sidecar_db_path)
+    _seed(sidecar_db_path, "legacy-original")
+
+    dest = tmp_path / "backup"
+    manifest = create_backup(settings, dest)
+
+    legacy_name = LEGACY_DB_NAMES[0]
+    (dest / DB_NAME).rename(dest / legacy_name)
+    manifest.files[legacy_name] = manifest.files.pop(DB_NAME)
+    (dest / MANIFEST_NAME).write_text(manifest.to_json())
+
+    conn = db.open_sidecar(sidecar_db_path)
+    conn.execute("UPDATE triage_labels SET note = 'mutated' WHERE event_id = 'e1'")
+    conn.commit()
+    conn.close()
+
+    restore_backup(settings, dest, force=True)
+    assert _label_note(sidecar_db_path) == "legacy-original"
 
 
 def test_manifest_json_round_trip() -> None:

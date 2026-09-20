@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from frigate_sidecar.push import ladder_policy, policy_settings
+from marcellus.push import ladder_policy, policy_settings
 
 
 def test_default_routing_table_matches_the_brief_exactly():
@@ -248,7 +248,7 @@ def test_normalize_settings_removes_zone_left_empty_after_filtering():
 
 
 def test_apply_settings_changes_what_the_ladder_evaluates_against():
-    from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
+    from marcellus.push.ladder import Snapshot, evaluate_ladder
 
     custom = policy_settings.default_settings()
     table_key = "routing_table_v2" if "routing_table_v2" in custom else "routing_table"
@@ -278,7 +278,7 @@ def test_get_active_lazily_defaults():
 
 
 def test_zone_override_present_bypasses_the_base_table():
-    from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
+    from marcellus.push.ladder import Snapshot, evaluate_ladder
 
     settings = policy_settings.default_settings()
     settings["routing_table"]["thing"]["doors"] = "log"  # base table says log
@@ -292,7 +292,7 @@ def test_zone_override_present_bypasses_the_base_table():
 
 
 def test_zone_override_absent_falls_through_to_the_base_table():
-    from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
+    from marcellus.push.ladder import Snapshot, evaluate_ladder
 
     settings = policy_settings.default_settings()
     settings["zone_overrides"] = {"front_entry_person": {"thing": "notify"}}
@@ -313,7 +313,7 @@ def test_zone_override_absent_falls_through_to_the_base_table():
 
 
 def test_zone_override_does_not_affect_other_zones_in_the_same_place_class():
-    from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
+    from marcellus.push.ladder import Snapshot, evaluate_ladder
 
     settings = policy_settings.default_settings()
     settings["zone_overrides"] = {"driveway": {"animal": "log"}}

@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from frigate_sidecar.config import FrigateSection, PushSection, Settings, SidecarSection
-from frigate_sidecar.push import replay
-from frigate_sidecar.server import create_app
+from marcellus.config import FrigateSection, PushSection, Settings, SidecarSection
+from marcellus.push import replay
+from marcellus.server import create_app
 
 
 def _settings(

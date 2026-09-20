@@ -16,8 +16,8 @@ from typing import Any
 
 import pytest
 
-from frigate_sidecar import db
-from frigate_sidecar.faces import enrich
+from marcellus import db
+from marcellus.faces import enrich
 from tests.conftest import FRIGATE_EVENT_SCHEMA
 
 

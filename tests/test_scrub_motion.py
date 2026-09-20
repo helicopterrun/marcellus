@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from frigate_sidecar.scrub.motion import MAX_SAFE_SCALE, aggregate_motion, safe_fetch_scale
+from marcellus.scrub.motion import MAX_SAFE_SCALE, aggregate_motion, safe_fetch_scale
 
 
 def test_safe_fetch_scale_caps_at_ceiling() -> None:

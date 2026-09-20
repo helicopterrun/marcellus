@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% set active_page = 'guide' %}
+{% set summary = number ~ ' ' ~ section_title %}
+{% block title %}{{ topic.meta.title }} · Guide · Marcellus{% endblock %}
+
+{% block body %}
+<div class="guide-shell">
+  {% include "_guide_nav.html" %}
+  <main id="main-content" class="guide-main guide-page" data-slug="{{ topic.slug }}">
+    <nav class="guide-crumbs" aria-label="Breadcrumb">
+      <a href="/guide">User Guide</a> <span class="sep">›</span>
+      {{ section_title }} <span class="sep">›</span>
+      <b>{{ topic.meta.title }}</b>
+      {% if topic.meta.routes %}
+      <a href="{{ topic.meta.routes[0] }}" class="page-link guide-open">
+        Open {{ topic.meta.routes[0] }} &rarr;</a>
+      {% endif %}
+    </nav>
+
+    <article class="guide-body">
+      <h1><span class="num">{{ number }}</span> {{ topic.meta.title }}</h1>
+
+      {% if topic.headings|length >= 2 %}
+      <nav class="guide-onpage" aria-label="On this page">
+        <b>On this page</b>
+        <ul>
+          {% for anchor, text in topic.headings %}
+          <li><a href="#{{ anchor }}">{{ text }}</a></li>
+          {% endfor %}
+        </ul>
+      </nav>
+      {% endif %}
+
+      {{ topic.html|safe }}
+    </article>
+
+    <nav class="guide-pager">
+      {% if prev_topic %}
+      <a href="/guide/{{ prev_topic.slug }}" class="page-link">
+        &larr; {{ numbers[prev_topic.slug] }} {{ prev_topic.meta.title }}</a>
+      {% else %}<span></span>{% endif %}
+      {% if next_topic %}
+      <a href="/guide/{{ next_topic.slug }}" class="page-link">
+        {{ numbers[next_topic.slug] }} {{ next_topic.meta.title }} &rarr;</a>
+      {% endif %}
+    </nav>
+  </main>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/guide.js?v={{ asset_v }}" defer></script>
+{% endblock %}
