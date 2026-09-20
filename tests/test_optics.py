@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from frigate_sidecar.analysis import optics
+from marcellus.analysis import optics
 
 
 def test_fit_varifocal_passes_through_both_anchors() -> None:

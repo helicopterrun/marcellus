@@ -10,11 +10,11 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from frigate_sidecar import db
-from frigate_sidecar.config import FrigateSection, Settings, SidecarSection
-from frigate_sidecar.push import card_store
-from frigate_sidecar.push.cards import Card
-from frigate_sidecar.server import create_app
+from marcellus import db
+from marcellus.config import FrigateSection, Settings, SidecarSection
+from marcellus.push import card_store
+from marcellus.push.cards import Card
+from marcellus.server import create_app
 
 
 def _add_event(

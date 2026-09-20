@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from frigate_sidecar.push.decision import devices_for_event, matches, parse_review_message
-from frigate_sidecar.push.models import Device, ReviewEvent
+from marcellus.push.decision import devices_for_event, matches, parse_review_message
+from marcellus.push.models import Device, ReviewEvent
 
 
 def _review_payload(

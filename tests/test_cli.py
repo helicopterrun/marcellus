@@ -12,9 +12,9 @@ import httpx
 import yaml
 from typer.testing import CliRunner
 
-from frigate_sidecar import __version__
-from frigate_sidecar.cli import app
-from frigate_sidecar.config import Settings
+from marcellus import __version__
+from marcellus.cli import app
+from marcellus.config import Settings
 
 runner = CliRunner()
 
@@ -130,7 +130,7 @@ def _write_config(tmp_path: Path) -> Path:
         yaml.safe_dump(
             {
                 "frigate": {"db_path": str(frigate_db)},
-                "sidecar": {"db_path": str(tmp_path / "frigate-sidecar.db")},
+                "sidecar": {"db_path": str(tmp_path / "marcellus.db")},
             }
         )
     )
@@ -139,11 +139,11 @@ def _write_config(tmp_path: Path) -> Path:
 
 def test_backup_and_restore_round_trip(tmp_path: Path, monkeypatch) -> None:
     cfg = _write_config(tmp_path)
-    monkeypatch.setenv("FRIGATE_SIDECAR_CONFIG", str(cfg))
+    monkeypatch.setenv("MARCELLUS_CONFIG", str(cfg))
 
-    from frigate_sidecar import db
+    from marcellus import db
 
-    sidecar_db = tmp_path / "frigate-sidecar.db"
+    sidecar_db = tmp_path / "marcellus.db"
     db.open_sidecar(sidecar_db).close()
 
     dest = tmp_path / "backup"
@@ -159,23 +159,23 @@ def test_backup_and_restore_round_trip(tmp_path: Path, monkeypatch) -> None:
 
 def test_restore_without_force_exits_1(tmp_path: Path, monkeypatch) -> None:
     cfg = _write_config(tmp_path)
-    monkeypatch.setenv("FRIGATE_SIDECAR_CONFIG", str(cfg))
+    monkeypatch.setenv("MARCELLUS_CONFIG", str(cfg))
 
-    from frigate_sidecar import db
+    from marcellus import db
 
-    sidecar_db = tmp_path / "frigate-sidecar.db"
+    sidecar_db = tmp_path / "marcellus.db"
     db.open_sidecar(sidecar_db).close()
 
     dest = tmp_path / "backup"
     runner.invoke(app, ["backup", str(dest)])
     result = runner.invoke(app, ["restore", str(dest)])
     assert result.exit_code == 1
-    assert "stop frigate-sidecar" in result.output
+    assert "stop marcellus" in result.output
 
 
 def test_backup_missing_db_exits_1(tmp_path: Path, monkeypatch) -> None:
     cfg = _write_config(tmp_path)
-    monkeypatch.setenv("FRIGATE_SIDECAR_CONFIG", str(cfg))
+    monkeypatch.setenv("MARCELLUS_CONFIG", str(cfg))
 
     result = runner.invoke(app, ["backup", str(tmp_path / "backup")])
     assert result.exit_code == 1

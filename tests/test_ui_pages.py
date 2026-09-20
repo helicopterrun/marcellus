@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from frigate_sidecar import db
-from frigate_sidecar.config import FrigateSection, Settings, SidecarSection
-from frigate_sidecar.push import store
-from frigate_sidecar.server import create_app
+from marcellus import db
+from marcellus.config import FrigateSection, Settings, SidecarSection
+from marcellus.push import store
+from marcellus.server import create_app
 
 # Resolved off the imported package, so this checks whichever tree the suite is
 # running against -- source under `pythonpath = ["src"]`, the wheel otherwise.

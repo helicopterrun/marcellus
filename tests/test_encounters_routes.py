@@ -9,12 +9,12 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from frigate_sidecar import db
-from frigate_sidecar.config import FrigateSection, Settings, SidecarSection
-from frigate_sidecar.encounters.linker import Atom, LinkDecision
-from frigate_sidecar.encounters.store import upsert_atom
-from frigate_sidecar.models.wire import EncounterResponse, EncountersResponse
-from frigate_sidecar.server import create_app
+from marcellus import db
+from marcellus.config import FrigateSection, Settings, SidecarSection
+from marcellus.encounters.linker import Atom, LinkDecision
+from marcellus.encounters.store import upsert_atom
+from marcellus.models.wire import EncounterResponse, EncountersResponse
+from marcellus.server import create_app
 
 
 @pytest.fixture

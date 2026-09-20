@@ -21,7 +21,7 @@ COPY src/ ./src/
 # HTTP/1.1 keep-alive fallback (push/transport.py logs a warning without it).
 RUN pip install '.[http2]'
 
-ENV FRIGATE_SIDECAR_CONFIG=/etc/frigate-sidecar/sidecar.yml
+ENV MARCELLUS_CONFIG=/etc/marcellus/sidecar.yml
 
 # Drop root: nothing here needs it. The inputs are bind-mounted read-only and
 # /data is the only thing written, so the compose file's data dir must be owned
@@ -36,5 +36,5 @@ EXPOSE 5001
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/healthz', timeout=5)"
 
-ENTRYPOINT ["python", "-m", "frigate_sidecar"]
+ENTRYPOINT ["python", "-m", "marcellus"]
 CMD ["serve"]

@@ -8,9 +8,9 @@ annoying, and the situation model exists to make the silent cases silent.
 
 from __future__ import annotations
 
-from frigate_sidecar.push.decision import parse_object_message, parse_review_message
-from frigate_sidecar.push.models import Device, ReviewEvent
-from frigate_sidecar.push.situations import (
+from marcellus.push.decision import parse_object_message, parse_review_message
+from marcellus.push.models import Device, ReviewEvent
+from marcellus.push.situations import (
     COLLAPSE_ID_MAX_BYTES,
     Match,
     Situation,

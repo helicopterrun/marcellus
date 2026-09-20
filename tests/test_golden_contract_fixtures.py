@@ -33,18 +33,18 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from frigate_sidecar.config import (
+from marcellus.config import (
     FrigateSection,
     PushSection,
     ScrubSection,
     Settings,
     SidecarSection,
 )
-from frigate_sidecar.push import decision_trace, live_activities, policy_settings
-from frigate_sidecar.push.cards import CREATE, ESCALATE, RESOLVE, Card
-from frigate_sidecar.push.delivery import build_card_payload
-from frigate_sidecar.push.library import sound_file
-from frigate_sidecar.server import create_app
+from marcellus.push import decision_trace, live_activities, policy_settings
+from marcellus.push.cards import CREATE, ESCALATE, RESOLVE, Card
+from marcellus.push.delivery import build_card_payload
+from marcellus.push.library import sound_file
+from marcellus.server import create_app
 from tests.conftest import FRIGATE_EVENT_SCHEMA
 from tests.test_scrub import FULL_EVENT_SCHEMA, RECORDINGS_SCHEMA, REVIEWSEGMENT_SCHEMA
 
@@ -118,7 +118,7 @@ def _make_client(tmp: Path) -> TestClient:
             db_path=frigate_db,
         ),
         sidecar=SidecarSection(
-            db_path=tmp / "frigate-sidecar.db",
+            db_path=tmp / "marcellus.db",
             bind_port=5001,
             require_frigate_auth=False,
         ),
@@ -281,12 +281,12 @@ SECOND_EVENT_ID = "1755550002.654321-def456"
 
 
 def _build_push_decisions() -> dict[str, Any]:
-    from frigate_sidecar import db as db_mod
+    from marcellus import db as db_mod
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         client = _make_client(tmp)
-        conn = db_mod.open_sidecar(tmp / "frigate-sidecar.db")
+        conn = db_mod.open_sidecar(tmp / "marcellus.db")
         try:
             decision_trace.reset_for_tests(conn)
             decision_trace.append(
@@ -376,12 +376,12 @@ def _build_push_decisions() -> dict[str, Any]:
 
 
 def _build_push_status() -> dict[str, Any]:
-    from frigate_sidecar import db as db_mod
+    from marcellus import db as db_mod
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         client = _make_client(tmp)
-        conn = db_mod.open_sidecar(tmp / "frigate-sidecar.db")
+        conn = db_mod.open_sidecar(tmp / "marcellus.db")
         try:
             decision_trace.reset_for_tests(conn)
             decision_trace.append(
@@ -421,7 +421,7 @@ def _build_push_status() -> dict[str, Any]:
             def now(cls, tz: Any = None) -> _dt.datetime:  # type: ignore[override]
                 return fixed_utc if tz is not None else fixed_local
 
-        from frigate_sidecar.push.transport import RELAY_HEALTH, reset_relay_health_for_tests
+        from marcellus.push.transport import RELAY_HEALTH, reset_relay_health_for_tests
 
         reset_relay_health_for_tests()
         RELAY_HEALTH.last_ok_at = SENT_AT - 12.0
@@ -429,7 +429,7 @@ def _build_push_status() -> dict[str, Any]:
         RELAY_HEALTH.last_error_at = None
         RELAY_HEALTH.last_status_code = 200
         try:
-            with mock.patch("frigate_sidecar.routes.push._datetime.datetime", _FixedDatetime):
+            with mock.patch("marcellus.routes.push._datetime.datetime", _FixedDatetime):
                 resp = client.get("/v1/push/status")
         finally:
             reset_relay_health_for_tests()
@@ -446,13 +446,13 @@ def _build_push_status() -> dict[str, Any]:
 def _build_push_receipts() -> dict[str, Any]:
     """`POST /v1/push/receipts` (alerts-slice2 §A): request + response, so
     the app can vendor both the shape it sends and what it gets back."""
-    from frigate_sidecar import db as db_mod
-    from frigate_sidecar.push import store as push_store
+    from marcellus import db as db_mod
+    from marcellus.push import store as push_store
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         client = _make_client(tmp)
-        conn = db_mod.open_sidecar(tmp / "frigate-sidecar.db")
+        conn = db_mod.open_sidecar(tmp / "marcellus.db")
         try:
             push_store.record_card_send(
                 conn, apns_token="apnstoken1234567890", card_key=CARD_KEY,
@@ -481,14 +481,14 @@ def _build_push_receipts() -> dict[str, Any]:
 
 def _build_push_device_detail() -> dict[str, Any]:
     """`GET /v1/push/devices/{token}` (alerts-slice2 §B)."""
-    from frigate_sidecar import db as db_mod
-    from frigate_sidecar.push import store as push_store
+    from marcellus import db as db_mod
+    from marcellus.push import store as push_store
 
     token = "apnstoken1234567890"
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         client = _make_client(tmp)
-        conn = db_mod.open_sidecar(tmp / "frigate-sidecar.db")
+        conn = db_mod.open_sidecar(tmp / "marcellus.db")
         try:
             push_store.upsert_device(
                 conn, apns_token=token, bundle_id="com.pondhouse.Elsinore",
@@ -504,7 +504,7 @@ def _build_push_device_detail() -> dict[str, Any]:
                     conn, apns_token=token, card_key=CARD_KEY, mutation="create",
                     sent_at=SENT_AT - 3600.0 * i,
                 )
-            from frigate_sidecar.push import receipts as receipts_store
+            from marcellus.push import receipts as receipts_store
 
             receipts_store.record(
                 conn,
@@ -524,7 +524,7 @@ def _build_push_device_detail() -> dict[str, Any]:
         # historical epoch -- pin the clock so the golden file stays
         # deterministic regardless of how long it goes unregenerated.
         with mock.patch(
-            "frigate_sidecar.push.store.time.time", return_value=SENT_AT + 100.0
+            "marcellus.push.store.time.time", return_value=SENT_AT + 100.0
         ):
             resp = client.get(f"/v1/push/devices/{token}")
         assert resp.status_code == 200, resp.text
@@ -560,14 +560,14 @@ def _build_card_push_test() -> dict[str, Any]:
 
 
 def _build_push_silence() -> dict[str, Any]:
-    from frigate_sidecar import db as db_mod
-    from frigate_sidecar.push.card_store import upsert_card
-    from frigate_sidecar.push.cards import Card
+    from marcellus import db as db_mod
+    from marcellus.push.card_store import upsert_card
+    from marcellus.push.cards import Card
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         client = _make_client(tmp)
-        conn = db_mod.open_sidecar(tmp / "frigate-sidecar.db")
+        conn = db_mod.open_sidecar(tmp / "marcellus.db")
         try:
             # No `zone_name` -- this card routed through the outcomes table,
             # not a zone override, so the silence scope is `outcome_cell`
@@ -652,7 +652,7 @@ def _v1_client(tmp: Path, *, frigate_db: Path, sidecar_db: Path | None = None) -
             db_path=frigate_db,
         ),
         sidecar=SidecarSection(
-            db_path=sidecar_db or (tmp / "frigate-sidecar.db"),
+            db_path=sidecar_db or (tmp / "marcellus.db"),
             bind_port=5001,
             require_frigate_auth=False,
         ),
@@ -692,7 +692,7 @@ def _build_v1_coverage() -> dict[str, Any]:
 
 
 def _build_v1_scrub_sheets() -> dict[str, Any]:
-    from frigate_sidecar import db as db_mod
+    from marcellus import db as db_mod
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -707,7 +707,7 @@ def _build_v1_scrub_sheets() -> dict[str, Any]:
         conn.commit()
         conn.close()
 
-        sidecar_db = tmp / "frigate-sidecar.db"
+        sidecar_db = tmp / "marcellus.db"
         sconn = db_mod.open_sidecar(sidecar_db)
         try:
             start = 1_785_380_400.0
@@ -783,7 +783,7 @@ def _build_v1_reel() -> dict[str, Any]:
             n = int((end - start) / scale)
             return [0.0] * n, False
 
-        from frigate_sidecar.routes import scrub as scrub_routes
+        from marcellus.routes import scrub as scrub_routes
 
         with (
             mock.patch("time.time", return_value=SENT_AT),
@@ -889,7 +889,7 @@ def _build_v1_events_related() -> dict[str, Any]:
 
 
 def _build_v1_push_map_live() -> dict[str, Any]:
-    from frigate_sidecar.push.situations import TrackStore
+    from marcellus.push.situations import TrackStore
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -933,7 +933,7 @@ def _build_v1_push_map_live() -> dict[str, Any]:
 
 
 def _build_v1_push_map_track() -> dict[str, Any]:
-    from frigate_sidecar.push.situations import TrackStore
+    from marcellus.push.situations import TrackStore
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)

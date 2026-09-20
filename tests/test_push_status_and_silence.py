@@ -10,11 +10,11 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from frigate_sidecar import db
-from frigate_sidecar.config import FrigateSection, PushSection, Settings, SidecarSection
-from frigate_sidecar.push import card_store, decision_trace, policy_settings
-from frigate_sidecar.push.cards import Card
-from frigate_sidecar.server import create_app
+from marcellus import db
+from marcellus.config import FrigateSection, PushSection, Settings, SidecarSection
+from marcellus.push import card_store, decision_trace, policy_settings
+from marcellus.push.cards import Card
+from marcellus.server import create_app
 
 CARD_KEY_ZONE = "doorbell:person:t-zone-1"
 CARD_KEY_CELL = "backyard:animal:t-cell-1"
@@ -301,8 +301,8 @@ def test_full_round_trip_silence_then_restore(client: TestClient, sidecar_conn):
     `PUT /overrides` back to the previous level and confirm normal routing
     resumes."""
     _make_zone_card(sidecar_conn)
-    from frigate_sidecar.push import ladder_policy
-    from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
+    from marcellus.push import ladder_policy
+    from marcellus.push.ladder import Snapshot, evaluate_ladder
 
     previous_level = evaluate_ladder(Snapshot(subject="person", place="doors", zone="front_door"))
 

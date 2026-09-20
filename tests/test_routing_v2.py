@@ -12,18 +12,18 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar import db
-from frigate_sidecar.config import PushSection
-from frigate_sidecar.push import policy_settings, store
-from frigate_sidecar.push.delivery_wire import (
+from marcellus import db
+from marcellus.config import PushSection
+from marcellus.push import policy_settings, store
+from marcellus.push.delivery_wire import (
     _relaxed_level,
     classify_subject,
     handle_delivery_event,
     handle_recognition_event,
 )
-from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
-from frigate_sidecar.push.models import Device, ReviewEvent
-from frigate_sidecar.push.transport import LogTransport
+from marcellus.push.ladder import Snapshot, evaluate_ladder
+from marcellus.push.models import Device, ReviewEvent
+from marcellus.push.transport import LogTransport
 
 
 def _device(

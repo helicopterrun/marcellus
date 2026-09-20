@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar.triage import recorder
+from marcellus.triage import recorder
 
 
 def test_record_inserts_label(frigate_db_path: Path, sidecar_db_path: Path) -> None:

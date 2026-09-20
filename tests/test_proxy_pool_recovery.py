@@ -29,10 +29,10 @@ from typing import Any
 import httpx
 from fastapi.testclient import TestClient
 
-from frigate_sidecar import frigate_api
-from frigate_sidecar.config import FrigateSection, ProxySection, Settings, SidecarSection
-from frigate_sidecar.routes import proxy as proxy_module
-from frigate_sidecar.server import create_app
+from marcellus import frigate_api
+from marcellus.config import FrigateSection, ProxySection, Settings, SidecarSection
+from marcellus.routes import proxy as proxy_module
+from marcellus.server import create_app
 
 
 class FakeUpstream:

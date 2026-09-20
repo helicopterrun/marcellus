@@ -1,0 +1,15 @@
+[Unit]
+Description=Run the high-res cross-camera face capture every 5 minutes
+Documentation=https://github.com/helicopterrun/marcellus
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+# The face-crop scan timer runs on the same cadence and shares the sidecar's
+# SQLite DB; jitter keeps the two off the same second so they don't contend for
+# its WAL.
+RandomizedDelaySec=30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

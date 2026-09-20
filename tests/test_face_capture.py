@@ -11,9 +11,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from frigate_sidecar import db
-from frigate_sidecar.config import Settings
-from frigate_sidecar.faces import crosscam
+from marcellus import db
+from marcellus.config import Settings
+from marcellus.faces import crosscam
 
 # --------------------------------------------------------------------------
 # Pure helpers
@@ -224,7 +224,7 @@ class _Recorder:
 
 def _patch_client(monkeypatch: pytest.MonkeyPatch, handler: object) -> _Recorder:
     rec = _Recorder(handler)
-    import frigate_sidecar.frigate_api as fa
+    import marcellus.frigate_api as fa
 
     real_init = fa.FrigateClient.__init__
 

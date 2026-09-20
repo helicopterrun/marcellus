@@ -19,28 +19,28 @@ from pathlib import Path
 import httpx
 import pytest
 
-from frigate_sidecar import db
-from frigate_sidecar.config import PushSection
-from frigate_sidecar.push import card_store, policy_settings, store
-from frigate_sidecar.push.cards import Card, urgent_resound_due
-from frigate_sidecar.push.delivery import (
+from marcellus import db
+from marcellus.config import PushSection
+from marcellus.push import card_store, policy_settings, store
+from marcellus.push.cards import Card, urgent_resound_due
+from marcellus.push.delivery import (
     _device_eligible,
     apply_urgent_resound,
     build_card_payload,
     sound_name_for_card,
 )
-from frigate_sidecar.push.delivery_wire import (
+from marcellus.push.delivery_wire import (
     handle_delivery_event,
     handle_delivery_resolve,
 )
-from frigate_sidecar.push.live_activities import (
+from marcellus.push.live_activities import (
     build_content_state,
     build_la_end_payload,
     build_la_start_payload,
     build_la_update_payload,
 )
-from frigate_sidecar.push.models import Device, ReviewEvent
-from frigate_sidecar.push.transport import LogTransport, RelayTransport
+from marcellus.push.models import Device, ReviewEvent
+from marcellus.push.transport import LogTransport, RelayTransport
 
 
 def _device(
@@ -581,18 +581,18 @@ def test_relay_without_key_logs_critical_at_startup(caplog):
     """`transport = "relay"` with an empty relay_key is a live misconfiguration
     (every push goes out unauthenticated) -- startup must say so at CRITICAL,
     without refusing to start (a deploy mid-upgrade shouldn't hard-fail)."""
-    from frigate_sidecar.config import PushSection, Settings
-    from frigate_sidecar.server import _build_push_transport
+    from marcellus.config import PushSection, Settings
+    from marcellus.server import _build_push_transport
 
     settings = Settings(push=PushSection(transport="relay", relay_key=""))
-    with caplog.at_level(logging.CRITICAL, logger="frigate_sidecar.server"):
+    with caplog.at_level(logging.CRITICAL, logger="marcellus.server"):
         transport = _build_push_transport(settings)
     assert isinstance(transport, RelayTransport)
     critical = [r for r in caplog.records if r.levelno == logging.CRITICAL]
     assert critical and "relay_key" in critical[0].getMessage()
 
     caplog.clear()
-    with caplog.at_level(logging.CRITICAL, logger="frigate_sidecar.server"):
+    with caplog.at_level(logging.CRITICAL, logger="marcellus.server"):
         _build_push_transport(Settings(push=PushSection(transport="relay", relay_key="k1")))
     assert not [r for r in caplog.records if r.levelno == logging.CRITICAL]
 
@@ -708,7 +708,7 @@ async def test_la_push_to_start_persists_across_mutations(tmp_path):
         labels=("person",), track_ids=event_create.track_ids, zones=("front_door",),
     )
 
-    from frigate_sidecar.push.engine import PushEngine
+    from marcellus.push.engine import PushEngine
     engine = PushEngine(db_path=str(db_path), transport=transport, server_id="test")
     engine.push_config = config
 

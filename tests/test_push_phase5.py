@@ -20,21 +20,21 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar import db
-from frigate_sidecar.config import PushSection
-from frigate_sidecar.push import card_store, policy_settings, store
-from frigate_sidecar.push.delivery import (
+from marcellus import db
+from marcellus.config import PushSection
+from marcellus.push import card_store, policy_settings, store
+from marcellus.push.delivery import (
     _device_eligible,
     build_card_payload,
     send_card_mutation,
     sound_name_for_card,
 )
-from frigate_sidecar.push.delivery_wire import (
+from marcellus.push.delivery_wire import (
     handle_delivery_event,
     handle_delivery_resolve,
 )
-from frigate_sidecar.push.models import Device, ReviewEvent
-from frigate_sidecar.push.transport import LogTransport
+from marcellus.push.models import Device, ReviewEvent
+from marcellus.push.transport import LogTransport
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -300,7 +300,7 @@ async def test_mute_sounds_strips_sound_not_suppresses(sidecar_db_path: Path):
 
 class TestPayloadFields:
     def _make_card(self):
-        from frigate_sidecar.push.cards import Card
+        from marcellus.push.cards import Card
         return Card(
             card_key="doorbell:person:trk1", level="notify",
             created_at=0.0, updated_at=10.0, state_since_at=0.0,
@@ -366,7 +366,7 @@ async def test_la_start_has_priority_10_and_expiration(sidecar_db_path: Path):
 
 
 def test_routing_table_defaults_agree():
-    from frigate_sidecar.push import ladder_policy
+    from marcellus.push import ladder_policy
     ladder_table = ladder_policy.TABLE
     settings_table = policy_settings.DEFAULT_ROUTING_TABLE
     for subject in settings_table:
@@ -389,8 +389,8 @@ async def test_backfill_staleness_filters_old_events():
 
     import httpx
 
-    from frigate_sidecar.push.engine import PushEngine
-    from frigate_sidecar.push.mqtt import backfill_since
+    from marcellus.push.engine import PushEngine
+    from marcellus.push.mqtt import backfill_since
 
     with tempfile.TemporaryDirectory() as tmp:
         db_path = Path(tmp) / "sidecar.db"
@@ -447,8 +447,8 @@ async def test_la_covered_resolve_row_is_deferred(
     its history row must arrive after that window, not alongside it."""
     import asyncio
 
-    from frigate_sidecar.push import delivery
-    from frigate_sidecar.push.cards import RESOLVE, Card
+    from marcellus.push import delivery
+    from marcellus.push.cards import RESOLVE, Card
 
     monkeypatch.setattr(delivery, "RESOLVE_DEFER_S", 0.0)
     conn = db.open_sidecar(sidecar_db_path)
@@ -481,7 +481,7 @@ async def test_la_covered_resolve_row_is_deferred(
 
 @pytest.mark.asyncio
 async def test_non_covered_device_resolve_row_is_immediate(sidecar_db_path: Path):
-    from frigate_sidecar.push.cards import RESOLVE, Card
+    from marcellus.push.cards import RESOLVE, Card
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -510,8 +510,8 @@ async def test_deferred_resolve_exception_is_logged_not_lost(
     import asyncio
     import logging
 
-    from frigate_sidecar.push import delivery
-    from frigate_sidecar.push.cards import RESOLVE, Card
+    from marcellus.push import delivery
+    from marcellus.push.cards import RESOLVE, Card
 
     monkeypatch.setattr(delivery, "RESOLVE_DEFER_S", 0.0)
 
@@ -529,7 +529,7 @@ async def test_deferred_resolve_exception_is_logged_not_lost(
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
 
-    with caplog.at_level(logging.ERROR, logger="frigate_sidecar.push.delivery"):
+    with caplog.at_level(logging.ERROR, logger="marcellus.push.delivery"):
         await send_card_mutation(
             conn, transport, [device], card, RESOLVE, payload,
             subject_kind="person", camera="doorbell", now=10.0,
@@ -552,8 +552,8 @@ async def test_cancel_deferred_cancels_pending_tasks(sidecar_db_path: Path, monk
     a deferred resolve running past process teardown."""
     import asyncio
 
-    from frigate_sidecar.push import delivery
-    from frigate_sidecar.push.cards import RESOLVE, Card
+    from marcellus.push import delivery
+    from marcellus.push.cards import RESOLVE, Card
 
     monkeypatch.setattr(delivery, "RESOLVE_DEFER_S", 10.0)
     conn = db.open_sidecar(sidecar_db_path)
@@ -593,7 +593,7 @@ async def test_resolve_push_not_ephemeral_for_notify_peak_story(sidecar_db_path:
     -- `ephemeral: false`, same collapse-id, quiet/passive -- so the banner
     is replaced in place rather than removed. Only a peak that never
     exceeded `quiet` (and never tripped a zone override) is ephemeral."""
-    from frigate_sidecar.push.cards import RESOLVE, Card
+    from marcellus.push.cards import RESOLVE, Card
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -619,7 +619,7 @@ async def test_resolve_push_is_ephemeral_for_quiet_peak_story(sidecar_db_path: P
     """Alerts-slice2 §E: a story that never exceeded `quiet` and never
     tripped a zone override gets an *ephemeral* resolve (removes the
     delivered row) -- this used to get no resolve push at all."""
-    from frigate_sidecar.push.cards import RESOLVE, Card
+    from marcellus.push.cards import RESOLVE, Card
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -645,7 +645,7 @@ async def test_resolve_push_not_ephemeral_for_urgent_peak_story(sidecar_db_path:
     """A story that ever peaked urgent (alarm outcome) keeps its resolve
     push around -- explicit `ephemeral: false` (absent would read as
     old-sidecar to the app and get the 24 h sweep instead of keep)."""
-    from frigate_sidecar.push.cards import RESOLVE, Card
+    from marcellus.push.cards import RESOLVE, Card
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -670,7 +670,7 @@ async def test_resolve_push_not_ephemeral_for_urgent_peak_story(sidecar_db_path:
 async def test_resolve_push_not_ephemeral_for_zone_override_story(sidecar_db_path: Path):
     """A story that tripped a zone override at any point keeps its resolve
     push around -- explicit `ephemeral: false`, even at notify peak."""
-    from frigate_sidecar.push.cards import RESOLVE, Card
+    from marcellus.push.cards import RESOLVE, Card
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -725,8 +725,8 @@ async def test_card_send_prunes_unregistered_device(sidecar_db_path: Path):
     / 400 BadDeviceToken) must drop that device row immediately, without
     touching a second device whose send succeeded -- and the failed send is
     still recorded in `push_card_sends` for receipt pairing."""
-    from frigate_sidecar.push.cards import CREATE, Card
-    from frigate_sidecar.push.transport import TransportResult
+    from marcellus.push.cards import CREATE, Card
+    from marcellus.push.transport import TransportResult
 
     class MixedTransport(LogTransport):
         async def send_situation(self, device, **kwargs):

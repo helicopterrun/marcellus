@@ -5,7 +5,7 @@ Tests the delta detection function directly — no real-time waits needed.
 
 from __future__ import annotations
 
-from frigate_sidecar.push.delivery_wire import _copy, _la_has_visible_delta
+from marcellus.push.delivery_wire import _copy, _la_has_visible_delta
 
 
 def _delta(**kw):
@@ -126,7 +126,7 @@ def test_enrich_secondary_includes_elapsed():
 def test_copy_prefers_frigate_friendly_name():
     # "front_entry_person" is a rule name, not a place — Frigate's
     # friendly_name wins when configured (loaded at startup from config.yml).
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
     policy_settings._zone_display_names = {"front_entry_person": "Front Walk"}
     try:
         primary, _ = _copy("stranger", "person", "garden", "front_entry_person", 0.0)
@@ -138,7 +138,7 @@ def test_copy_prefers_frigate_friendly_name():
 def test_copy_prefers_sidecar_zone_name_over_friendly_name():
     # The /zones-page display name (settings zone_names) outranks Frigate's
     # friendly_name — it's the user's own phrasing for notification copy.
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
     policy_settings._zone_display_names = {"front_entry_person": "Front Walk"}
     saved = policy_settings._active
     try:

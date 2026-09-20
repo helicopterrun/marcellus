@@ -10,11 +10,11 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from frigate_sidecar import db
-from frigate_sidecar.config import FrigateSection, Settings, SidecarSection
-from frigate_sidecar.faces import enrich
-from frigate_sidecar.push.stats import STATS
-from frigate_sidecar.server import create_app
+from marcellus import db
+from marcellus.config import FrigateSection, Settings, SidecarSection
+from marcellus.faces import enrich
+from marcellus.push.stats import STATS
+from marcellus.server import create_app
 
 
 @pytest.fixture(autouse=True)

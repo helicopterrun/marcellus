@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import io
 
-from frigate_sidecar.push.library import FALLBACK_SOUND, sound_catalog, sound_file
-from frigate_sidecar.push.payload import (
+from marcellus.push.library import FALLBACK_SOUND, sound_catalog, sound_file
+from marcellus.push.payload import (
     APNS_MAX_PAYLOAD_BYTES,
     body_text,
     build_payload,
     payload_size,
 )
-from frigate_sidecar.push.situations import Match, Situation
-from frigate_sidecar.push.thumbnails import resize_jpeg
+from marcellus.push.situations import Match, Situation
+from marcellus.push.thumbnails import resize_jpeg
 
 AT_THE_DOOR = Situation(
     id="at-the-door", name="At the door", labels=("person",), zones=("porch",),

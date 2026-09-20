@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar.push import replay
+from marcellus.push import replay
 
 
 def _review(ts: float, rid: str, *, detections: list[str], zones: list[str],

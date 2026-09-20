@@ -11,15 +11,15 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar import db
-from frigate_sidecar.config import PushSection, Settings
-from frigate_sidecar.encounters import store
-from frigate_sidecar.encounters.adjacency import Adjacency
-from frigate_sidecar.encounters.service import EncounterService
-from frigate_sidecar.push.decision import parse_review_message
-from frigate_sidecar.push.engine import PushEngine
-from frigate_sidecar.push.models import ReviewEvent
-from frigate_sidecar.push.transport import LogTransport
+from marcellus import db
+from marcellus.config import PushSection, Settings
+from marcellus.encounters import store
+from marcellus.encounters.adjacency import Adjacency
+from marcellus.encounters.service import EncounterService
+from marcellus.push.decision import parse_review_message
+from marcellus.push.engine import PushEngine
+from marcellus.push.models import ReviewEvent
+from marcellus.push.transport import LogTransport
 from tests.test_scrub import REVIEWSEGMENT_SCHEMA
 
 FIXTURES = Path(__file__).parent / "fixtures"

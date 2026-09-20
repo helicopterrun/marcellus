@@ -19,16 +19,16 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from frigate_sidecar.config import FrigateSection, Settings, SidecarSection
-from frigate_sidecar.guide import (
+from marcellus.config import FrigateSection, Settings, SidecarSection
+from marcellus.guide import (
     GUIDE_DIR,
     SECTION_TITLES,
     GuideError,
     GuideRegistry,
     load_guide,
 )
-from frigate_sidecar.routes.guide import STAT_KEYS
-from frigate_sidecar.server import create_app
+from marcellus.routes.guide import STAT_KEYS
+from marcellus.server import create_app
 
 # Pages that legitimately need no guide topic: the guide's own pages.
 UNDOCUMENTED_OK = {

@@ -30,8 +30,8 @@ import re
 import sqlite3
 from pathlib import Path
 
-from frigate_sidecar import db
-from frigate_sidecar.push import store
+from marcellus import db
+from marcellus.push import store
 
 _SQL_WRITE = re.compile(r"\b(INSERT|UPDATE|DELETE)\b")
 

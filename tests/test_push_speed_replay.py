@@ -11,10 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar import db
-from frigate_sidecar.config import PushSection
-from frigate_sidecar.push import policy_settings, store
-from frigate_sidecar.push.models import Device
+from marcellus import db
+from marcellus.config import PushSection
+from marcellus.push import policy_settings, store
+from marcellus.push.models import Device
 
 FIXTURE = Path(__file__).parent / "fixtures" / "capture-front-walk-speed.jsonl"
 
@@ -53,8 +53,8 @@ def make_device(token: str = "tok1") -> Device:
 async def test_captured_front_walk_gets_speed_heading_and_one_card(
     sidecar_db_path: Path,
 ):
-    from frigate_sidecar.push.engine import PushEngine
-    from frigate_sidecar.push.transport import LogTransport
+    from marcellus.push.engine import PushEngine
+    from marcellus.push.transport import LogTransport
 
     conn = db.open_sidecar(sidecar_db_path)
     device = make_device()
@@ -103,7 +103,7 @@ def test_captured_trails_produce_speed_labels():
     the ground layer, on the same real data.)"""
     from collections import defaultdict
 
-    from frigate_sidecar.push import ground
+    from marcellus.push import ground
 
     trails: dict[tuple[str, str], list] = defaultdict(list)
     for line in FIXTURE.read_text().splitlines():

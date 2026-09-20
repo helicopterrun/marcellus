@@ -14,13 +14,13 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from frigate_sidecar.config import FrigateSection, PushSection, Settings, SidecarSection
-from frigate_sidecar.push import store
-from frigate_sidecar.push.engine import PushEngine
-from frigate_sidecar.push.models import Device
-from frigate_sidecar.push.transport import LogTransport, TransportResult
-from frigate_sidecar.routes.push import reset_test_rate_limit_for_tests
-from frigate_sidecar.server import create_app
+from marcellus.config import FrigateSection, PushSection, Settings, SidecarSection
+from marcellus.push import store
+from marcellus.push.engine import PushEngine
+from marcellus.push.models import Device
+from marcellus.push.transport import LogTransport, TransportResult
+from marcellus.routes.push import reset_test_rate_limit_for_tests
+from marcellus.server import create_app
 
 TOKEN = "tok-abc123"
 
@@ -132,7 +132,7 @@ def test_test_push_to_a_registered_device(client: tuple[TestClient, LogTransport
 
 
 def test_test_push_is_recorded_for_receipt_pairing(client: tuple[TestClient, LogTransport]) -> None:
-    from frigate_sidecar import db
+    from marcellus import db
 
     c, transport = client
     _register(c)
@@ -220,7 +220,7 @@ def test_a_transient_failure_keeps_the_device(
     _register(c)
     assert c.post(f"/v1/push/devices/{TOKEN}/test").status_code == 502
 
-    from frigate_sidecar import db
+    from marcellus import db
 
     conn = db.open_sidecar(settings.sidecar.db_path)
     try:

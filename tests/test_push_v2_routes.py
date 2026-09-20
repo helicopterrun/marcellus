@@ -13,12 +13,12 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from frigate_sidecar import db
-from frigate_sidecar.config import FrigateSection, PushSection, Settings, SidecarSection
-from frigate_sidecar.push import store
-from frigate_sidecar.push.engine import PushEngine
-from frigate_sidecar.push.transport import LogTransport
-from frigate_sidecar.server import create_app
+from marcellus import db
+from marcellus.config import FrigateSection, PushSection, Settings, SidecarSection
+from marcellus.push import store
+from marcellus.push.engine import PushEngine
+from marcellus.push.transport import LogTransport
+from marcellus.server import create_app
 
 TOKEN = "tok-abc123"
 
@@ -349,7 +349,7 @@ def test_unknown_registration_fields_are_logged_not_swallowed(
     `push_to_start_token` looks like an app-side bug for a day."""
     import logging
 
-    with caplog.at_level(logging.INFO, logger="frigate_sidecar.routes.push"):
+    with caplog.at_level(logging.INFO, logger="marcellus.routes.push"):
         r = _register(client, some_future_field={"a": 1}, another_one="x")
     assert r.status_code == 200
     assert "another_one, some_future_field" in caplog.text
@@ -365,7 +365,7 @@ def test_registration_with_empty_situations_logs_v1_mode(
     level, not as a warning."""
     import logging
 
-    with caplog.at_level(logging.INFO, logger="frigate_sidecar.routes.push"):
+    with caplog.at_level(logging.INFO, logger="marcellus.routes.push"):
         r = _register(client, schema_version=2, cameras=["doorbell"])
     assert r.status_code == 200
     assert f"apns_token={TOKEN[:8]}" in caplog.text
@@ -381,7 +381,7 @@ def test_registration_with_situations_logs_situation_mode(
 ) -> None:
     import logging
 
-    with caplog.at_level(logging.INFO, logger="frigate_sidecar.routes.push"):
+    with caplog.at_level(logging.INFO, logger="marcellus.routes.push"):
         r = _register(client, schema_version=2, situations=[AT_THE_DOOR])
     assert r.status_code == 200
     assert f"apns_token={TOKEN[:8]}" in caplog.text
@@ -398,7 +398,7 @@ def test_reregistration_flipping_situations_logs_the_transition(
     import logging
 
     _register(client, schema_version=2, situations=[AT_THE_DOOR])
-    with caplog.at_level(logging.INFO, logger="frigate_sidecar.routes.push"):
+    with caplog.at_level(logging.INFO, logger="marcellus.routes.push"):
         r = _register(client, schema_version=2, situations=[])
     assert r.status_code == 200
     assert "transitioned uses_situations True -> False" in caplog.text

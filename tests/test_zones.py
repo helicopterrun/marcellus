@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from frigate_sidecar.zones import (
+from marcellus.zones import (
     configured_camera_names,
     load_camera_zones,
     zones_containing_box,

@@ -5,15 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar import db
-from frigate_sidecar.analysis import (
+from marcellus import db
+from marcellus.analysis import (
     motion_active,
     motion_rate,
     pull_events,
     score_histogram,
     zone_hits,
 )
-from frigate_sidecar.triage import recorder
+from marcellus.triage import recorder
 
 
 def test_motion_active_aggregate_bounds_both_ends() -> None:

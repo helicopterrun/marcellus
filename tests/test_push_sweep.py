@@ -13,12 +13,12 @@ import asyncio
 import time
 from pathlib import Path
 
-from frigate_sidecar import db
-from frigate_sidecar.config import PushSection
-from frigate_sidecar.push import store
-from frigate_sidecar.push.engine import PushEngine
-from frigate_sidecar.push.stats import STATS
-from frigate_sidecar.push.transport import TransportResult
+from marcellus import db
+from marcellus.config import PushSection
+from marcellus.push import store
+from marcellus.push.engine import PushEngine
+from marcellus.push.stats import STATS
+from marcellus.push.transport import TransportResult
 
 
 class BlockingLiveActivityTransport:

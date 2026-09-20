@@ -11,13 +11,13 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from frigate_sidecar import db
-from frigate_sidecar.config import FrigateSection, PushSection, Settings, SidecarSection
-from frigate_sidecar.push import receipts as receipts_store
-from frigate_sidecar.push import store
-from frigate_sidecar.push.store import epoch_to_iso
-from frigate_sidecar.push.transport import RELAY_HEALTH, reset_relay_health_for_tests
-from frigate_sidecar.server import create_app
+from marcellus import db
+from marcellus.config import FrigateSection, PushSection, Settings, SidecarSection
+from marcellus.push import receipts as receipts_store
+from marcellus.push import store
+from marcellus.push.store import epoch_to_iso
+from marcellus.push.transport import RELAY_HEALTH, reset_relay_health_for_tests
+from marcellus.server import create_app
 
 TOKEN = "tok-abc123"
 
@@ -278,8 +278,8 @@ def test_status_carries_relay_health(client: TestClient) -> None:
 async def test_relay_transport_updates_health_on_success_and_failure() -> None:
     import httpx
 
-    from frigate_sidecar.push.models import Device
-    from frigate_sidecar.push.transport import RelayTransport
+    from marcellus.push.models import Device
+    from marcellus.push.transport import RelayTransport
 
     device = Device(
         apns_token="tok", device_id="d_1", bundle_id="com.x", environment="prod",

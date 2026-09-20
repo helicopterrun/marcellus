@@ -1,4 +1,4 @@
-"""Tests for the central Frigate-session gate (frigate_sidecar.auth).
+"""Tests for the central Frigate-session gate (marcellus.auth).
 
 The sidecar's own surface -- triage UI, /faces/captures, /analysis, /toybox, /v1 --
 exposes event history, face crops and writes with side effects on Frigate, so
@@ -24,9 +24,9 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from frigate_sidecar import auth
-from frigate_sidecar.config import FrigateSection, ProxySection, Settings, SidecarSection
-from frigate_sidecar.server import create_app
+from marcellus import auth
+from marcellus.config import FrigateSection, ProxySection, Settings, SidecarSection
+from marcellus.server import create_app
 
 
 def _build(
@@ -198,7 +198,7 @@ def test_websocket_scopes_reach_the_gate(
     the first owned WS route isn't unauthenticated by default."""
     from starlette.routing import Match, WebSocketRoute
 
-    from frigate_sidecar.auth import FrigateAuthMiddleware
+    from marcellus.auth import FrigateAuthMiddleware
 
     async def _noop(websocket: object) -> None:  # pragma: no cover - never called
         return None

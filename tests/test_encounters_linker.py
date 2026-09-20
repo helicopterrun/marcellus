@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from frigate_sidecar.encounters.adjacency import Adjacency
-from frigate_sidecar.encounters.linker import (
+from marcellus.encounters.adjacency import Adjacency
+from marcellus.encounters.linker import (
     Atom,
     LinkerConfig,
     OpenEncounter,

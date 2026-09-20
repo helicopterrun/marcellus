@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# frigate-sidecar installer.
+# marcellus installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/helicopterrun/frigate-sidecar/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/helicopterrun/marcellus/main/install.sh | bash
 #
 # Docker present  -> compose deployment in $INSTALL_DIR (image from ghcr.io)
 # No Docker       -> bare-metal venv + systemd unit
@@ -10,9 +10,9 @@
 # restarts, leaving your .env / sidecar.yml untouched.
 set -euo pipefail
 
-REPO="helicopterrun/frigate-sidecar"
+REPO="helicopterrun/marcellus"
 RAW="https://raw.githubusercontent.com/$REPO/main"
-INSTALL_DIR="${INSTALL_DIR:-/opt/frigate-sidecar}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/marcellus}"
 # Release train, not :latest — reruns of this script should not silently
 # cross a minor version.
 IMAGE="ghcr.io/$REPO:0.3"
@@ -50,16 +50,16 @@ if command -v docker >/dev/null 2>&1; then
   if [ ! -f "$INSTALL_DIR/config/sidecar.yml" ]; then
     if [ -t 0 ]; then
       say "generating config (answer the prompts; defaults suit a stock Frigate install)"
-      docker compose run --rm frigate-sidecar init -o /config/sidecar.yml
+      docker compose run --rm marcellus init -o /config/sidecar.yml
     else
       warn "stdin is not a tty (curl|bash) -- writing a default config; edit $INSTALL_DIR/config/sidecar.yml"
-      docker compose run --rm frigate-sidecar init --non-interactive -o /config/sidecar.yml
+      docker compose run --rm marcellus init --non-interactive -o /config/sidecar.yml
     fi
   fi
 
   say "starting"
   docker compose up -d
-  say "done. Check: curl http://localhost:5001/healthz  |  logs: docker logs -f frigate-sidecar"
+  say "done. Check: curl http://localhost:5001/healthz  |  logs: docker logs -f marcellus"
   say "Edit $INSTALL_DIR/.env (host paths) and $INSTALL_DIR/config/sidecar.yml, then: docker compose up -d"
 else
   say "Docker not found -- installing bare-metal (venv + systemd) in $INSTALL_DIR"
@@ -77,49 +77,49 @@ EOF
   "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
   # [http2]: long-lived HTTP/2 relay connection instead of the HTTP/1.1
   # keep-alive fallback (push/transport.py warns at startup without it).
-  "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade "frigate-sidecar[http2]" 2>/dev/null || \
-    "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade "frigate-sidecar[http2] @ git+https://github.com/$REPO"
+  "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade "marcellus[http2]" 2>/dev/null || \
+    "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade "marcellus[http2] @ git+https://github.com/$REPO"
 
-  mkdir -p /etc/frigate-sidecar
-  if [ ! -f /etc/frigate-sidecar/sidecar.yml ]; then
+  mkdir -p /etc/marcellus
+  if [ ! -f /etc/marcellus/sidecar.yml ]; then
     if [ -t 0 ]; then
       say "generating config (answer the prompts; defaults suit a stock Frigate install)"
-      "$INSTALL_DIR/venv/bin/fsc" init -o /etc/frigate-sidecar/sidecar.yml \
-        --sidecar-db "$INSTALL_DIR/data/frigate-sidecar.db"
+      "$INSTALL_DIR/venv/bin/fsc" init -o /etc/marcellus/sidecar.yml \
+        --sidecar-db "$INSTALL_DIR/data/marcellus.db"
     else
-      warn "stdin is not a tty (curl|bash) -- writing a default config; edit /etc/frigate-sidecar/sidecar.yml"
-      "$INSTALL_DIR/venv/bin/fsc" init --non-interactive -o /etc/frigate-sidecar/sidecar.yml \
-        --sidecar-db "$INSTALL_DIR/data/frigate-sidecar.db"
+      warn "stdin is not a tty (curl|bash) -- writing a default config; edit /etc/marcellus/sidecar.yml"
+      "$INSTALL_DIR/venv/bin/fsc" init --non-interactive -o /etc/marcellus/sidecar.yml \
+        --sidecar-db "$INSTALL_DIR/data/marcellus.db"
     fi
   else
-    say "keeping existing /etc/frigate-sidecar/sidecar.yml"
+    say "keeping existing /etc/marcellus/sidecar.yml"
   fi
 
   say "creating service user"
-  id -u frigate-sidecar >/dev/null 2>&1 || \
-    useradd --system --no-create-home --shell /usr/sbin/nologin frigate-sidecar
+  id -u marcellus >/dev/null 2>&1 || \
+    useradd --system --no-create-home --shell /usr/sbin/nologin marcellus
   mkdir -p "$INSTALL_DIR/data"
-  chown -R frigate-sidecar: "$INSTALL_DIR" /etc/frigate-sidecar
+  chown -R marcellus: "$INSTALL_DIR" /etc/marcellus
 
   # The scrub cache lives outside the install dir; the unit's ProtectSystem=strict
   # blocks writes everywhere else, so grant it explicitly if configured.
   SCRUB_CACHE_DIR="$("$INSTALL_DIR/venv/bin/python" - <<'EOF' 2>/dev/null || true
 import os
-os.environ.setdefault("FRIGATE_SIDECAR_CONFIG", "/etc/frigate-sidecar/sidecar.yml")
-from frigate_sidecar.config import load_settings
+os.environ.setdefault("MARCELLUS_CONFIG", "/etc/marcellus/sidecar.yml")
+from marcellus.config import load_settings
 print(load_settings().scrub.cache_dir)
 EOF
 )"
   EXTRA_RW=""
   if [ -n "$SCRUB_CACHE_DIR" ]; then
-    mkdir -p "$SCRUB_CACHE_DIR" && chown frigate-sidecar: "$SCRUB_CACHE_DIR"
+    mkdir -p "$SCRUB_CACHE_DIR" && chown marcellus: "$SCRUB_CACHE_DIR"
     EXTRA_RW="ReadWritePaths=$SCRUB_CACHE_DIR"
   fi
 
   say "installing systemd unit"
-  cat > /etc/systemd/system/frigate-sidecar.service <<EOF
+  cat > /etc/systemd/system/marcellus.service <<EOF
 [Unit]
-Description=Frigate Sidecar (triage UI + analysis)
+Description=Marcellus (triage UI + analysis)
 Documentation=https://github.com/$REPO
 After=network.target
 
@@ -127,10 +127,13 @@ After=network.target
 Type=simple
 # Needs READ access to Frigate's recordings and frigate.db -- grant via group
 # membership or ACLs if Frigate's files aren't world-readable.
-User=frigate-sidecar
+User=marcellus
 WorkingDirectory=$INSTALL_DIR
-Environment="FRIGATE_SIDECAR_CONFIG=/etc/frigate-sidecar/sidecar.yml"
-ExecStart=$INSTALL_DIR/venv/bin/python -m frigate_sidecar serve
+Environment="MARCELLUS_CONFIG=/etc/marcellus/sidecar.yml"
+# Optional, 0600 root-owned file for secrets that shouldn't sit in this unit
+# file, e.g. MARCELLUS_PUSH__MQTT_PASSWORD. Leading "-" makes it fine if absent.
+EnvironmentFile=-/etc/marcellus-push.env
+ExecStart=$INSTALL_DIR/venv/bin/python -m marcellus serve
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -140,7 +143,7 @@ PrivateTmp=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
-ReadWritePaths=$INSTALL_DIR /etc/frigate-sidecar
+ReadWritePaths=$INSTALL_DIR /etc/marcellus
 $EXTRA_RW
 # Signal only the main process on stop: the default (control-group) SIGTERMs
 # in-flight ffmpeg children out from under the scrub generator.
@@ -151,10 +154,10 @@ TimeoutStopSec=30
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable --now frigate-sidecar.service
-  systemctl restart frigate-sidecar.service
-  say "service runs as user 'frigate-sidecar' -- if Frigate's recordings/db are not"
-  say "readable by it, add group access (e.g. usermod -aG <frigate-group> frigate-sidecar)"
-  say "done. Check: curl http://localhost:5001/healthz  |  logs: journalctl -fu frigate-sidecar"
-  say "Config: /etc/frigate-sidecar/sidecar.yml (restart with: systemctl restart frigate-sidecar)"
+  systemctl enable --now marcellus.service
+  systemctl restart marcellus.service
+  say "service runs as user 'marcellus' -- if Frigate's recordings/db are not"
+  say "readable by it, add group access (e.g. usermod -aG <frigate-group> marcellus)"
+  say "done. Check: curl http://localhost:5001/healthz  |  logs: journalctl -fu marcellus"
+  say "Config: /etc/marcellus/sidecar.yml (restart with: systemctl restart marcellus)"
 fi

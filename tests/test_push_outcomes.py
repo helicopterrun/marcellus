@@ -6,8 +6,8 @@ evaluator's suppression, and the glance surface lookup."""
 
 from __future__ import annotations
 
-from frigate_sidecar.push import ladder, ladder_policy, policy_settings
-from frigate_sidecar.push.ladder import SUPPRESSED, Snapshot
+from marcellus.push import ladder, ladder_policy, policy_settings
+from marcellus.push.ladder import SUPPRESSED, Snapshot
 
 
 def _fresh(doc=None):

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from frigate_sidecar.scrub import tiling
+from marcellus.scrub import tiling
 
 CELL_W, CELL_H = 8, 4
 COLS, ROWS = 4, 2

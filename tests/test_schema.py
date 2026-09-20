@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 import sqlite3
 
-from frigate_sidecar import db
+from marcellus import db
 
 # Frozen pre-migration CREATE TABLE text for the five tables that have
 # `_ADDED_COLUMNS` entries, exactly as they were before those columns

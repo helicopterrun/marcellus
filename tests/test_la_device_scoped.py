@@ -11,16 +11,16 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar import db
-from frigate_sidecar.config import PushSection
-from frigate_sidecar.push import store
-from frigate_sidecar.push.delivery_wire import (
+from marcellus import db
+from marcellus.config import PushSection
+from marcellus.push import store
+from marcellus.push.delivery_wire import (
     end_activity_if_card_closed,
     handle_delivery_event,
     handle_delivery_resolve,
 )
-from frigate_sidecar.push.engine import PushEngine
-from frigate_sidecar.push.transport import LogTransport
+from marcellus.push.engine import PushEngine
+from marcellus.push.transport import LogTransport
 from tests.test_push_live_activities_wire import (
     _reset_ladder_table,  # noqa: F401  (autouse fixture)
     attach_token,

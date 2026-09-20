@@ -13,8 +13,8 @@ from unittest import mock
 import httpx
 import pytest
 
-from frigate_sidecar.config import WatchdogSection
-from frigate_sidecar.watchdog import _classify, _prune, _try_restart
+from marcellus.config import WatchdogSection
+from marcellus.watchdog import _classify, _prune, _try_restart
 
 
 def _cfg(**overrides: object) -> WatchdogSection:
@@ -38,7 +38,7 @@ def _classify_with(response_or_exc: httpx.Response | Exception) -> str:
             raise response_or_exc
         return response_or_exc
 
-    with mock.patch("frigate_sidecar.watchdog.httpx.get", side_effect=_get):
+    with mock.patch("marcellus.watchdog.httpx.get", side_effect=_get):
         outcome, _ = _classify("http://frigate.test:5000/api/version", 2.0)
     return outcome
 
@@ -67,7 +67,7 @@ def test_4xx_is_not_the_hang_signature() -> None:
 def test_restart_cap_blocks_a_restart_storm() -> None:
     cfg = _cfg(max_restarts_per_hour=2)
     restarts: deque[float] = deque([1000.0, 2000.0])
-    with mock.patch("frigate_sidecar.watchdog.subprocess.run") as run:
+    with mock.patch("marcellus.watchdog.subprocess.run") as run:
         assert _try_restart(cfg, restarts, now=2500.0) is False
     run.assert_not_called()
 
@@ -77,7 +77,7 @@ def test_restart_cap_window_slides() -> None:
     cfg = _cfg(max_restarts_per_hour=2)
     restarts: deque[float] = deque([1000.0, 2000.0])
     ok = mock.Mock(returncode=0, stdout="frigate\n", stderr="")
-    with mock.patch("frigate_sidecar.watchdog.subprocess.run", return_value=ok):
+    with mock.patch("marcellus.watchdog.subprocess.run", return_value=ok):
         assert _try_restart(cfg, restarts, now=1000.0 + 3601.0) is True
     assert len(restarts) == 2  # one aged out, one new appended
 
@@ -95,7 +95,7 @@ def test_successful_restart_is_recorded() -> None:
     cfg = _cfg()
     restarts: deque[float] = deque()
     ok = mock.Mock(returncode=0, stdout="frigate\n", stderr="")
-    with mock.patch("frigate_sidecar.watchdog.subprocess.run", return_value=ok):
+    with mock.patch("marcellus.watchdog.subprocess.run", return_value=ok):
         assert _try_restart(cfg, restarts, now=100.0) is True
     assert list(restarts) == [100.0]
 
@@ -106,7 +106,7 @@ def test_failed_restart_is_not_counted_against_the_cap() -> None:
     cfg = _cfg()
     restarts: deque[float] = deque()
     bad = mock.Mock(returncode=1, stdout="", stderr="no such container")
-    with mock.patch("frigate_sidecar.watchdog.subprocess.run", return_value=bad):
+    with mock.patch("marcellus.watchdog.subprocess.run", return_value=bad):
         assert _try_restart(cfg, restarts, now=100.0) is False
     assert not restarts
 
@@ -115,7 +115,7 @@ def test_timed_out_restart_returns_false() -> None:
     cfg = _cfg()
     restarts: deque[float] = deque()
     with mock.patch(
-        "frigate_sidecar.watchdog.subprocess.run",
+        "marcellus.watchdog.subprocess.run",
         side_effect=subprocess.TimeoutExpired(cmd="docker restart frigate", timeout=5.0),
     ):
         assert _try_restart(cfg, restarts, now=100.0) is False
@@ -126,7 +126,7 @@ def test_unrunnable_command_returns_false() -> None:
     cfg = _cfg(restart_command=["/no/such/binary"])
     restarts: deque[float] = deque()
     with mock.patch(
-        "frigate_sidecar.watchdog.subprocess.run", side_effect=OSError("not found")
+        "marcellus.watchdog.subprocess.run", side_effect=OSError("not found")
     ):
         assert _try_restart(cfg, restarts, now=100.0) is False
     assert not restarts
