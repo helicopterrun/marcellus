@@ -10,9 +10,9 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from frigate_sidecar.config import FrigateSection, PushSection, Settings, SidecarSection
-from frigate_sidecar.push import policy_settings
-from frigate_sidecar.server import create_app
+from marcellus.config import FrigateSection, PushSection, Settings, SidecarSection
+from marcellus.push import policy_settings
+from marcellus.server import create_app
 
 
 @pytest.fixture(autouse=True)
@@ -192,7 +192,7 @@ def test_put_cleans_up_empty_zone_override_entries(client: TestClient):
 
 
 def test_put_applies_immediately_to_the_routing_engine(client: TestClient):
-    from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
+    from marcellus.push.ladder import Snapshot, evaluate_ladder
 
     # The outcomes table is the authority when present (merged ladder,
     # 2026-08-16) -- a new client edits it; the legacy levels are derived.

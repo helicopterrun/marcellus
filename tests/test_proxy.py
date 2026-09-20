@@ -14,8 +14,8 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from frigate_sidecar.config import FrigateSection, ProxySection, Settings, SidecarSection
-from frigate_sidecar.server import create_app
+from marcellus.config import FrigateSection, ProxySection, Settings, SidecarSection
+from marcellus.server import create_app
 
 
 class _StubResponse:
@@ -226,7 +226,7 @@ def test_options_is_proxied(client: TestClient) -> None:
 def test_build_request_gets_the_media_stream_timeout(client: TestClient) -> None:
     """The one request through the shared client that legitimately needs an
     unbounded read (see frigate_api._DEFAULT_TIMEOUT's now-finite default)."""
-    from frigate_sidecar.routes import proxy as proxy_module
+    from marcellus.routes import proxy as proxy_module
 
     _StubAsyncClient.next_response = _StubResponse(200, {"content-type": "video/mp4"}, b"x")
     r = client.get("/vod/doorbell/index.m3u8")
@@ -256,7 +256,7 @@ class _HangingResponse:
 def test_idle_chunk_watchdog_ends_a_stalled_stream(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frigate_sidecar.routes import proxy as proxy_module
+    from marcellus.routes import proxy as proxy_module
 
     monkeypatch.setattr(proxy_module, "_IDLE_CHUNK_TIMEOUT_S", 0.05)
     hanging = _HangingResponse()
@@ -275,7 +275,7 @@ def test_client_stall_ends_the_stream(monkeypatch: pytest.MonkeyPatch) -> None:
     upstream connection open forever -- see the 2026-09-10 pool-exhaustion
     incident in routes/proxy.py. Exercises `_BoundedStreamingResponse`
     directly: `send()` never returns, simulating a stalled client."""
-    from frigate_sidecar.routes import proxy as proxy_module
+    from marcellus.routes import proxy as proxy_module
 
     monkeypatch.setattr(proxy_module, "_CLIENT_STALL_TIMEOUT_S", 0.05)
     closed = {"value": False}
@@ -303,7 +303,7 @@ def test_client_stall_ends_the_stream(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_max_duration_ends_the_stream(monkeypatch: pytest.MonkeyPatch) -> None:
-    from frigate_sidecar.routes import proxy as proxy_module
+    from marcellus.routes import proxy as proxy_module
 
     monkeypatch.setattr(proxy_module, "_STREAM_MAX_DURATION_S", 0.0)
     closed = {"value": False}
@@ -348,7 +348,7 @@ def test_header_wait_timeout_maps_to_504(
     """A `client.send` that never returns (Frigate's nginx half-closing a
     keepalive socket before sending headers) must 504 rather than hang the
     whole route, and must not leak a response (none was ever created)."""
-    from frigate_sidecar.routes import proxy as proxy_module
+    from marcellus.routes import proxy as proxy_module
 
     monkeypatch.setattr(proxy_module, "_HEADER_WAIT_TIMEOUT_S", 0.05)
 
@@ -364,7 +364,7 @@ def test_header_wait_timeout_maps_to_504(
 def test_slow_acquire_is_logged(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from frigate_sidecar.routes import proxy as proxy_module
+    from marcellus.routes import proxy as proxy_module
 
     monkeypatch.setattr(proxy_module, "_SLOW_ACQUIRE_LOG_THRESHOLD_S", 0.0)
 
@@ -375,7 +375,7 @@ def test_slow_acquire_is_logged(
 
     monkeypatch.setattr(_StubAsyncClient, "send", _slow_send)
     _StubAsyncClient.next_response = _StubResponse(200, {"content-type": "video/mp4"}, b"x")
-    with caplog.at_level("WARNING", logger="frigate_sidecar.routes.proxy"):
+    with caplog.at_level("WARNING", logger="marcellus.routes.proxy"):
         r = client.get("/vod/doorbell/index.m3u8")
     assert r.status_code == 200
     assert any("slow upstream acquire" in rec.message for rec in caplog.records)
@@ -384,7 +384,7 @@ def test_slow_acquire_is_logged(
 def test_stream_response_acloses_iterator_when_send_raises() -> None:
     """`send()` raising mid-stream (a client disconnect surfaced by ASGI) must
     still release the upstream connection via `body_iterator.aclose()`."""
-    from frigate_sidecar.routes import proxy as proxy_module
+    from marcellus.routes import proxy as proxy_module
 
     closed = {"value": False}
 

@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from frigate_sidecar.config import FrigateSection, ProxySection, Settings, SidecarSection
-from frigate_sidecar.server import create_app
+from marcellus.config import FrigateSection, ProxySection, Settings, SidecarSection
+from marcellus.server import create_app
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 

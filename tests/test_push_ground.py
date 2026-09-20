@@ -6,8 +6,8 @@ import math
 
 import pytest
 
-from frigate_sidecar.analysis import optics
-from frigate_sidecar.push import ground
+from marcellus.analysis import optics
+from marcellus.push import ground
 
 # A synthetic camera: 10ft mount, 12 deg down, 90 deg HFOV (matches the
 # stairway cameras). vfov ~ 58.7 deg at 16:9.
@@ -103,7 +103,7 @@ def test_world_position_requires_scale_and_azimuth(monkeypatch):
 
 
 def test_camera_ground_reads_settings_backed_optics():
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     doc = policy_settings.default_settings()
     doc["camera_optics"] = {

@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar.config import Settings, load_settings
+from marcellus.config import Settings, load_settings
 
 
 def test_defaults_when_no_file_no_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for k in list(__import__("os").environ):
-        if k.startswith("FRIGATE_SIDECAR_"):
+        if k.startswith("MARCELLUS_") or k.startswith("FRIGATE_SIDECAR_"):
             monkeypatch.delenv(k, raising=False)
     s = load_settings(config_path="/nonexistent/path.yml")
     assert s.sidecar.bind_port == 5001
@@ -38,7 +38,7 @@ def test_env_overrides_yaml(
 ) -> None:
     cfg = tmp_path / "sidecar.yml"
     cfg.write_text("sidecar:\n  bind_port: 9999\n")
-    monkeypatch.setenv("FRIGATE_SIDECAR_SIDECAR__BIND_PORT", "1234")
+    monkeypatch.setenv("MARCELLUS_SIDECAR__BIND_PORT", "1234")
     s = load_settings(config_path=cfg)
     assert s.sidecar.bind_port == 1234
 
@@ -55,7 +55,7 @@ def test_unknown_top_level_key_warns(
     startup, but it must still be logged so it isn't silently dropped."""
     cfg = tmp_path / "sidecar.yml"
     cfg.write_text("nonexistent_top_level_key: 1\n")
-    with caplog.at_level("WARNING", logger="frigate_sidecar.config"):
+    with caplog.at_level("WARNING", logger="marcellus.config"):
         load_settings(config_path=cfg)
     assert any(
         "nonexistent_top_level_key" in r.message for r in caplog.records
@@ -76,12 +76,50 @@ push:
   nonexistent_nested_key: 5
 """
     )
-    with caplog.at_level("WARNING", logger="frigate_sidecar.config"):
+    with caplog.at_level("WARNING", logger="marcellus.config"):
         s = load_settings(config_path=cfg)
     assert s.push.enabled is True  # extra="ignore" -- still loads fine
     assert any(
         "push.nonexistent_nested_key" in r.message for r in caplog.records
     )
+
+
+def test_legacy_env_prefix_is_honoured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-rename FRIGATE_SIDECAR_* var still takes effect when no
+    MARCELLUS_* equivalent is set."""
+    monkeypatch.delenv("MARCELLUS_SIDECAR__BIND_PORT", raising=False)
+    monkeypatch.setenv("FRIGATE_SIDECAR_SIDECAR__BIND_PORT", "4321")
+    s = load_settings(config_path="/nonexistent/path.yml")
+    assert s.sidecar.bind_port == 4321
+
+
+def test_new_env_prefix_wins_over_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When both prefixes set the same key, MARCELLUS_* wins."""
+    monkeypatch.setenv("FRIGATE_SIDECAR_SIDECAR__BIND_PORT", "4321")
+    monkeypatch.setenv("MARCELLUS_SIDECAR__BIND_PORT", "1234")
+    s = load_settings(config_path="/nonexistent/path.yml")
+    assert s.sidecar.bind_port == 1234
+
+
+def test_legacy_env_prefix_warns_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("MARCELLUS_SIDECAR__BIND_PORT", raising=False)
+    monkeypatch.delenv("MARCELLUS_LOG_LEVEL", raising=False)
+    monkeypatch.setenv("FRIGATE_SIDECAR_SIDECAR__BIND_PORT", "4321")
+    monkeypatch.setenv("FRIGATE_SIDECAR_LOG_LEVEL", "DEBUG")
+    with caplog.at_level("WARNING", logger="marcellus.config"):
+        load_settings(config_path="/nonexistent/path.yml")
+    deprecation_warnings = [
+        r.message for r in caplog.records if "deprecated" in r.message
+    ]
+    assert len(deprecation_warnings) == 1
+    assert "FRIGATE_SIDECAR_SIDECAR__BIND_PORT" in deprecation_warnings[0]
+    assert "FRIGATE_SIDECAR_LOG_LEVEL" in deprecation_warnings[0]
 
 
 def test_known_keys_produce_no_warnings(
@@ -99,7 +137,7 @@ push:
 log_level: DEBUG
 """
     )
-    with caplog.at_level("WARNING", logger="frigate_sidecar.config"):
+    with caplog.at_level("WARNING", logger="marcellus.config"):
         load_settings(config_path=cfg)
     unknown_key_warnings = [
         r.message for r in caplog.records if "unknown key" in r.message

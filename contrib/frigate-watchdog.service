@@ -1,6 +1,6 @@
 [Unit]
 Description=Frigate Watchdog (restarts the Frigate container on a hung backend)
-Documentation=https://github.com/helicopterrun/frigate-sidecar
+Documentation=https://github.com/helicopterrun/marcellus
 After=network.target docker.service
 Wants=docker.service
 
@@ -8,9 +8,9 @@ Wants=docker.service
 Type=simple
 # root so it can run `docker restart frigate`.
 User=root
-WorkingDirectory=/opt/frigate-sidecar
-Environment="FRIGATE_SIDECAR_CONFIG=/opt/frigate-sidecar/config/sidecar.yml"
-ExecStart=/usr/bin/python3 -m frigate_sidecar watchdog
+WorkingDirectory=/opt/marcellus
+Environment="MARCELLUS_CONFIG=/opt/marcellus/config/sidecar.yml"
+ExecStart=/usr/bin/python3 -m marcellus watchdog
 Restart=on-failure
 RestartSec=10
 

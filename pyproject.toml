@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "frigate-sidecar"
+name = "marcellus"
 dynamic = ["version"]
 description = "Companion server for Frigate NVR: triage UI and read-only analysis tooling"
 readme = "README.md"
@@ -61,14 +61,14 @@ dev = [
 ]
 
 [project.scripts]
-fsc = "frigate_sidecar.cli:app"
-frigate-sidecar = "frigate_sidecar.cli:app"
+marcellus = "marcellus.cli:app"
+fsc = "marcellus.cli:app"
 
 [tool.hatch.version]
-path = "src/frigate_sidecar/__init__.py"
+path = "src/marcellus/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/frigate_sidecar"]
+packages = ["src/marcellus"]
 
 [tool.ruff]
 line-length = 100
@@ -83,7 +83,7 @@ addopts = "-ra"
 asyncio_mode = "auto"
 # Test the working tree, not whatever was last pip-installed. CI installs
 # editable so the two coincide there, but every prod install is a plain copy
-# (install.sh, `pip install /opt/frigate-sidecar`), and on such a box a bare
+# (install.sh, `pip install /opt/marcellus`), and on such a box a bare
 # `pytest` imported dist-packages instead -- green on stale code, or red on code
 # the checkout had already fixed. Cost of this: the suite no longer exercises
 # the built artifact at all, so a data file that fails to ship in the wheel is
@@ -117,7 +117,7 @@ follow_imports_for_stubs = true
 ignore_missing_imports = true
 
 [tool.coverage.run]
-source = ["frigate_sidecar"]
+source = ["marcellus"]
 
 [tool.coverage.report]
 # Floor = measured total (78% on 2026-08-20) minus slack. Raise it as

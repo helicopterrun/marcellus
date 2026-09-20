@@ -14,8 +14,8 @@ from typing import Any
 import httpx
 from fastapi.testclient import TestClient
 
-from frigate_sidecar.config import FrigateSection, ProxySection, Settings, SidecarSection
-from frigate_sidecar.server import create_app
+from marcellus.config import FrigateSection, ProxySection, Settings, SidecarSection
+from marcellus.server import create_app
 
 
 def _build(

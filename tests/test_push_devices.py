@@ -5,9 +5,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from frigate_sidecar.config import FrigateSection, Settings, SidecarSection
-from frigate_sidecar.push import store
-from frigate_sidecar.server import create_app
+from marcellus.config import FrigateSection, Settings, SidecarSection
+from marcellus.push import store
+from marcellus.server import create_app
 
 
 @pytest.fixture
@@ -68,7 +68,7 @@ def test_register_overwrites_filters_not_duplicates(
         "/v1/push/devices/tok-abc123",
         json={"bundle_id": "com.x", "environment": "sandbox", "cameras": ["garden"]},
     )
-    from frigate_sidecar import db
+    from marcellus import db
 
     conn = db.open_sidecar(sidecar_db_path)
     try:
@@ -115,7 +115,7 @@ def test_register_frequent_pushes_enabled_true_round_trips(
         },
     )
     assert r.status_code == 200
-    from frigate_sidecar import db
+    from marcellus import db
 
     device = store.list_devices(db.open_sidecar(sidecar_db_path))[0]
     assert device.frequent_pushes_enabled is True
@@ -129,7 +129,7 @@ def test_register_frequent_pushes_enabled_defaults_false(
         json={"bundle_id": "com.x", "environment": "sandbox"},
     )
     assert r.status_code == 200
-    from frigate_sidecar import db
+    from marcellus import db
 
     device = store.list_devices(db.open_sidecar(sidecar_db_path))[0]
     assert device.frequent_pushes_enabled is False

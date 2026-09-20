@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from frigate_sidecar.push.capture import MqttCapture, read_window
+from marcellus.push.capture import MqttCapture, read_window
 
 
 def _line(path: Path, index: int) -> list[dict]:

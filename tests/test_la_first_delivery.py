@@ -6,8 +6,8 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from frigate_sidecar.push import live_activities as la
-from frigate_sidecar.push import policy_settings
+from marcellus.push import live_activities as la
+from marcellus.push import policy_settings
 
 # -- Settings: delivery + person_restricted ----------------------------------
 
@@ -90,7 +90,7 @@ def test_settings_delivery_sticky(tmp_path):
 # -- la_capable on Device ----------------------------------------------------
 
 def test_device_la_capable_default_true():
-    from frigate_sidecar.push.models import Device
+    from marcellus.push.models import Device
     d = Device(apns_token="tok", device_id="d1", bundle_id="com.test", environment="sandbox",
                push_to_start_token="pts")
     assert d.la_capable is True
@@ -98,7 +98,7 @@ def test_device_la_capable_default_true():
 
 
 def test_device_la_capable_false_blocks_la():
-    from frigate_sidecar.push.models import Device
+    from marcellus.push.models import Device
     d = Device(apns_token="tok", device_id="d1", bundle_id="com.test", environment="sandbox",
                push_to_start_token="pts", la_capable=False)
     assert d.la_capable is False
@@ -106,8 +106,8 @@ def test_device_la_capable_false_blocks_la():
 
 
 def test_la_capable_stored_in_db():
-    from frigate_sidecar import db
-    from frigate_sidecar.push import store
+    from marcellus import db
+    from marcellus.push import store
 
     with tempfile.TemporaryDirectory() as tmp:
         db_path = Path(tmp) / "sidecar.db"
@@ -164,8 +164,8 @@ def test_person_restricted_glyph():
 # -- Category audit ----------------------------------------------------------
 
 def test_card_push_includes_category():
-    from frigate_sidecar.push.cards import CREATE, Card
-    from frigate_sidecar.push.delivery import build_card_payload
+    from marcellus.push.cards import CREATE, Card
+    from marcellus.push.delivery import build_card_payload
 
     card = Card(card_key="test:stranger:t1", level="notify", created_at=1000.0, updated_at=1000.0)
     payload = build_card_payload(
@@ -178,8 +178,8 @@ def test_card_push_includes_category():
 
 
 def test_card_push_category_matches_level():
-    from frigate_sidecar.push.cards import ESCALATE, Card
-    from frigate_sidecar.push.delivery import build_card_payload
+    from marcellus.push.cards import ESCALATE, Card
+    from marcellus.push.delivery import build_card_payload
 
     card = Card(card_key="test:stranger:t1", level="urgent", created_at=1000.0, updated_at=1000.0)
     payload = build_card_payload(
@@ -194,18 +194,18 @@ def test_card_push_category_matches_level():
 # -- Escalation sound -------------------------------------------------------
 
 def test_escalation_sound_default_urgent():
-    from frigate_sidecar.push.delivery import sound_name_for_card
+    from marcellus.push.delivery import sound_name_for_card
     assert sound_name_for_card("urgent", "stranger", "person") == "urgent.caf"
 
 
 def test_escalation_sound_custom():
-    from frigate_sidecar.push.delivery import sound_name_for_card
+    from marcellus.push.delivery import sound_name_for_card
     assert sound_name_for_card("urgent", "stranger", "person",
                                escalation_sound="at-the-door") == "at-the-door.caf"
 
 
 def test_escalation_sound_non_urgent_unaffected():
-    from frigate_sidecar.push.delivery import sound_name_for_card
+    from marcellus.push.delivery import sound_name_for_card
     assert sound_name_for_card("notify", "stranger", "person",
                                escalation_sound="siren") == "at-the-door.caf"
     assert sound_name_for_card("notify", "thing", "package",
@@ -213,8 +213,8 @@ def test_escalation_sound_non_urgent_unaffected():
 
 
 def test_escalation_sound_in_card_payload():
-    from frigate_sidecar.push.cards import ESCALATE, Card
-    from frigate_sidecar.push.delivery import build_card_payload
+    from marcellus.push.cards import ESCALATE, Card
+    from marcellus.push.delivery import build_card_payload
 
     card = Card(card_key="test:stranger:t1", level="urgent", created_at=1000.0, updated_at=1000.0)
     payload = build_card_payload(
@@ -244,8 +244,8 @@ def test_escalation_sound_settings_absent_keeps_default():
 # -- Interruption-level mapping (pin all four) --------------------------------
 
 def _payload_for_level(level):
-    from frigate_sidecar.push.cards import CREATE, Card
-    from frigate_sidecar.push.delivery import build_card_payload
+    from marcellus.push.cards import CREATE, Card
+    from marcellus.push.delivery import build_card_payload
     card = Card(card_key="test:stranger:t1", level=level, created_at=1000.0, updated_at=1000.0)
     return build_card_payload(
         card, CREATE, sound=True, subject_kind="stranger", place_class="doors",
@@ -267,5 +267,5 @@ def test_interruption_level_quiet_is_passive():
 
 
 def test_interruption_level_log_does_not_push():
-    from frigate_sidecar.push.delivery import should_push
+    from marcellus.push.delivery import should_push
     assert should_push("log") is False

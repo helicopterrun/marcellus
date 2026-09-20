@@ -5,9 +5,9 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from frigate_sidecar import db
-from frigate_sidecar.push import card_store
-from frigate_sidecar.push.cards import Card
+from marcellus import db
+from marcellus.push import card_store
+from marcellus.push.cards import Card
 
 
 def open_conn(sidecar_db_path: Path) -> sqlite3.Connection:

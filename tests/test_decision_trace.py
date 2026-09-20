@@ -11,10 +11,10 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from frigate_sidecar import db
-from frigate_sidecar.config import FrigateSection, PushSection, Settings, SidecarSection
-from frigate_sidecar.push import decision_trace
-from frigate_sidecar.server import create_app
+from marcellus import db
+from marcellus.config import FrigateSection, PushSection, Settings, SidecarSection
+from marcellus.push import decision_trace
+from marcellus.server import create_app
 
 
 @pytest.fixture
@@ -117,7 +117,7 @@ class TestServeCap:
 
 class TestRetentionPruning:
     def test_stale_rows_pruned_on_next_append(self, conn, monkeypatch):
-        from frigate_sidecar.push import decision_trace as dt_mod
+        from marcellus.push import decision_trace as dt_mod
 
         conn.execute(
             "INSERT INTO push_decisions (ts, camera, label, subject, zones_csv, place, "
@@ -343,7 +343,7 @@ class TestEndpoint:
         assert resp.json()["decisions"] == {"enabled": True}
 
     def test_capabilities_advertises_attention_subjects(self, client: TestClient):
-        from frigate_sidecar.push import policy_settings
+        from marcellus.push import policy_settings
 
         resp = client.get("/v1/capabilities")
         assert resp.status_code == 200

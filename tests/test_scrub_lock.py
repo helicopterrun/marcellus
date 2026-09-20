@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from frigate_sidecar.scrub.lock import ScrubCacheLock, ScrubLockHeld
+from marcellus.scrub.lock import ScrubCacheLock, ScrubLockHeld
 
 runner = CliRunner()
 
@@ -66,8 +66,8 @@ def test_second_lock_raises_while_held_cross_process(tmp_path: Path) -> None:
 def test_cli_scrub_prune_exits_2_when_locked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frigate_sidecar.cli import app
-    from frigate_sidecar.config import Settings
+    from marcellus.cli import app
+    from marcellus.config import Settings
 
     cache_dir = tmp_path / "cache"
     lock = ScrubCacheLock(cache_dir)
@@ -77,7 +77,7 @@ def test_cli_scrub_prune_exits_2_when_locked(
         settings = settings.model_copy(
             update={"scrub": settings.scrub.model_copy(update={"cache_dir": cache_dir})}
         )
-        monkeypatch.setattr("frigate_sidecar.cli.load_settings", lambda: settings)
+        monkeypatch.setattr("marcellus.cli.load_settings", lambda: settings)
 
         result = runner.invoke(app, ["scrub", "prune"])
         assert result.exit_code == 2

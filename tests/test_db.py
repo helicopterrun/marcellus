@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar import db
+from marcellus import db
 
 
 def test_open_frigate_ro_rejects_writes(frigate_db_path: Path) -> None:
@@ -55,7 +55,7 @@ def test_open_sidecar_backfills_dwell_seconds_on_a_pre_migration_activities_tabl
     conn.commit()
     conn.close()
 
-    from frigate_sidecar.push import store
+    from marcellus.push import store
 
     conn = db.open_sidecar(sidecar_db_path)
     cols = {row[1] for row in conn.execute("PRAGMA table_info(push_activities)")}
@@ -229,7 +229,7 @@ def test_added_columns_has_no_duplicate_table_keys():
     import ast
     import inspect
 
-    from frigate_sidecar import db as db_module
+    from marcellus import db as db_module
 
     tree = ast.parse(inspect.getsource(db_module))
     for node in ast.walk(tree):
@@ -285,7 +285,7 @@ def test_open_sidecar_migrates_pre_zones_csv_card_table(tmp_path):
     dedup query and every card upsert read it."""
     import sqlite3
 
-    from frigate_sidecar import db as db_module
+    from marcellus import db as db_module
 
     path = tmp_path / "old.db"
     conn = sqlite3.connect(path)

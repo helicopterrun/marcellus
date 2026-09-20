@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from frigate_sidecar.push import policy_settings
-from frigate_sidecar.server import create_app
+from marcellus.push import policy_settings
+from marcellus.server import create_app
 
 from .test_push_settings_routes import _settings
 

@@ -17,9 +17,9 @@ from pathlib import Path
 import pytest
 from PIL import Image, ImageStat
 
-from frigate_sidecar import db
-from frigate_sidecar.config import FrigateSection, ScrubSection, Settings, SidecarSection
-from frigate_sidecar.scrub import ffmpeg_io, generator, grid
+from marcellus import db
+from marcellus.config import FrigateSection, ScrubSection, Settings, SidecarSection
+from marcellus.scrub import ffmpeg_io, generator, grid
 
 RECORDINGS_SCHEMA = """
 CREATE TABLE recordings (
@@ -1578,7 +1578,7 @@ def test_decimate_source_selects_every_nth_cell(tmp_path: Path) -> None:
             (i, _distinct_cell(tmp_path / f"src{i}.jpg", cell_w, cell_h, i))
             for i in range(12)
         ]
-        from frigate_sidecar.scrub import tiling
+        from marcellus.scrub import tiling
 
         tiling.tile_sheet(cells, cols=cols, rows=rows, cell_w=cell_w, cell_h=cell_h, out_path=out)
         db.upsert_scrub_sheet(
@@ -2299,7 +2299,7 @@ def test_prune_counts_and_logs_unlink_failures_but_still_removes_the_rest(
 
     monkeypatch.setattr(Path, "unlink", _flaky_unlink)
 
-    with caplog.at_level("WARNING", logger="frigate_sidecar.scrub.generator"):
+    with caplog.at_level("WARNING", logger="marcellus.scrub.generator"):
         result = generator.prune(env, now=1_800_000_030.0 + 30 * 86400)
 
     assert result["unlink_failures"] == 1

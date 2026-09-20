@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import httpx
 
-from frigate_sidecar.push.models import Device
-from frigate_sidecar.push.transport import LogTransport, RelayTransport
+from marcellus.push.models import Device
+from marcellus.push.transport import LogTransport, RelayTransport
 
 
 def _device(**kwargs):

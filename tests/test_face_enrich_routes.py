@@ -11,16 +11,16 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from frigate_sidecar import db
-from frigate_sidecar.config import (
+from marcellus import db
+from marcellus.config import (
     FaceEnrichSection,
     FrigateSection,
     Settings,
     SidecarSection,
 )
-from frigate_sidecar.faces import enrich
-from frigate_sidecar.frigate_api import FrigateAPIError, FrigateClient
-from frigate_sidecar.server import create_app
+from marcellus.faces import enrich
+from marcellus.frigate_api import FrigateAPIError, FrigateClient
+from marcellus.server import create_app
 from tests.conftest import FRIGATE_EVENT_SCHEMA
 
 

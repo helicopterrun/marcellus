@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar import db
-from frigate_sidecar.triage import recorder, sampler
+from marcellus import db
+from marcellus.triage import recorder, sampler
 
 
 def test_sample_quota_for_n() -> None:

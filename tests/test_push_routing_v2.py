@@ -15,17 +15,17 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar import db
-from frigate_sidecar.config import PushSection
-from frigate_sidecar.push import card_store, ladder_policy, policy_settings
-from frigate_sidecar.push.delivery_wire import (
+from marcellus import db
+from marcellus.config import PushSection
+from marcellus.push import card_store, ladder_policy, policy_settings
+from marcellus.push.delivery_wire import (
     classify_subject,
     handle_delivery_event,
     handle_recognition_event,
 )
-from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder
-from frigate_sidecar.push.models import Device, ReviewEvent
-from frigate_sidecar.push.transport import LogTransport
+from marcellus.push.ladder import Snapshot, evaluate_ladder
+from marcellus.push.models import Device, ReviewEvent
+from marcellus.push.transport import LogTransport
 
 
 def _device(token="tok1"):
@@ -340,20 +340,20 @@ def test_v2_table_thing_at_off_limits_is_quiet():
 
 
 def test_relaxed_level_relax_one_from_notify():
-    from frigate_sidecar.push.delivery_wire import _relaxed_level
+    from marcellus.push.delivery_wire import _relaxed_level
     assert _relaxed_level("notify", "relax_one") == "quiet"
 
 
 def test_relaxed_level_relax_one_from_log_is_none():
-    from frigate_sidecar.push.delivery_wire import _relaxed_level
+    from marcellus.push.delivery_wire import _relaxed_level
     assert _relaxed_level("log", "relax_one") is None
 
 
 def test_relaxed_level_relax_to_quiet_from_urgent():
-    from frigate_sidecar.push.delivery_wire import _relaxed_level
+    from marcellus.push.delivery_wire import _relaxed_level
     assert _relaxed_level("urgent", "relax_to_quiet") == "quiet"
 
 
 def test_relaxed_level_off_returns_none():
-    from frigate_sidecar.push.delivery_wire import _relaxed_level
+    from marcellus.push.delivery_wire import _relaxed_level
     assert _relaxed_level("notify", "off") is None

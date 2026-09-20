@@ -22,9 +22,9 @@ from typing import Any
 
 import pytest
 
-from frigate_sidecar.push import mqtt
-from frigate_sidecar.push.mqtt import MqttReviewSubscriber
-from frigate_sidecar.push.stats import STATS
+from marcellus.push import mqtt
+from marcellus.push.mqtt import MqttReviewSubscriber
+from marcellus.push.stats import STATS
 
 
 class _RecordingHandler(logging.Handler):
@@ -197,7 +197,7 @@ async def test_handler_exception_is_logged_and_consumer_keeps_going() -> None:
 
     sub.start_consumer()
     handler = _RecordingHandler()
-    mqtt_logger = logging.getLogger("frigate_sidecar.push.mqtt")
+    mqtt_logger = logging.getLogger("marcellus.push.mqtt")
     mqtt_logger.addHandler(handler)
     mqtt_logger.setLevel(logging.ERROR)
     try:

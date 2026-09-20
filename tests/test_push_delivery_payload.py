@@ -9,18 +9,18 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar import db
-from frigate_sidecar.push import card_store
-from frigate_sidecar.push.cards import Card
-from frigate_sidecar.push.delivery import (
+from marcellus import db
+from marcellus.push import card_store
+from marcellus.push.cards import Card
+from marcellus.push.delivery import (
     CONTRACT_VERSION,
     build_card_key,
     build_card_payload,
     send_card_mutation,
     sweep_urgent_resound,
 )
-from frigate_sidecar.push.models import Device
-from frigate_sidecar.push.transport import LogTransport
+from marcellus.push.models import Device
+from marcellus.push.transport import LogTransport
 
 
 def make_device(token: str = "tok1") -> Device:

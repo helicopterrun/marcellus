@@ -5,10 +5,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from frigate_sidecar import db
-from frigate_sidecar.config import FrigateSection, Settings, SidecarSection
-from frigate_sidecar.push import store
-from frigate_sidecar.server import create_app
+from marcellus import db
+from marcellus.config import FrigateSection, Settings, SidecarSection
+from marcellus.push import store
+from marcellus.server import create_app
 
 
 @pytest.fixture
@@ -75,7 +75,7 @@ def test_no_raw_frigate_event_id_leak_in_review_id() -> None:
     import sqlite3
 
     conn = sqlite3.connect(":memory:")
-    from frigate_sidecar.db import SIDECAR_SCHEMA
+    from marcellus.db import SIDECAR_SCHEMA
 
     conn.row_factory = sqlite3.Row
     conn.executescript(SIDECAR_SCHEMA)
@@ -91,7 +91,7 @@ def test_prune_expired_handles() -> None:
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    from frigate_sidecar.db import SIDECAR_SCHEMA
+    from marcellus.db import SIDECAR_SCHEMA
 
     conn.executescript(SIDECAR_SCHEMA)
     store.mint_handle(conn, camera="a", event_id="e1", review_id="r1", ttl_s=1, now=0.0)

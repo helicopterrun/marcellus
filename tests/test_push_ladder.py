@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar.push import ladder_policy
-from frigate_sidecar.push.ladder import Snapshot, evaluate_ladder, evaluate_ladder_explained
+from marcellus.push import ladder_policy
+from marcellus.push.ladder import Snapshot, evaluate_ladder, evaluate_ladder_explained
 
 CASES_PATH = Path(__file__).resolve().parent.parent / "fixtures" / "ladder" / "ladder_cases.json"
 CASES = json.loads(CASES_PATH.read_text())

@@ -8,11 +8,11 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from frigate_sidecar import db
-from frigate_sidecar.push import card_store
-from frigate_sidecar.push.cards import Card
-from frigate_sidecar.push.engine import PushEngine
-from frigate_sidecar.push.transport import LogTransport
+from marcellus import db
+from marcellus.push import card_store
+from marcellus.push.cards import Card
+from marcellus.push.engine import PushEngine
+from marcellus.push.transport import LogTransport
 
 
 def _make_engine(db_path: Path) -> PushEngine:

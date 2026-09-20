@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
-from frigate_sidecar import __version__
-from frigate_sidecar.server import create_app
+from marcellus import __version__
+from marcellus.server import create_app
 
 
 def test_version_string() -> None:

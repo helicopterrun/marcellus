@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from frigate_sidecar.config import FrigateSection, Settings, SidecarSection
-from frigate_sidecar.server import create_app
+from marcellus.config import FrigateSection, Settings, SidecarSection
+from marcellus.server import create_app
 
 
 @pytest.fixture

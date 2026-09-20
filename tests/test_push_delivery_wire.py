@@ -12,12 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from frigate_sidecar import db
-from frigate_sidecar.config import PushSection
-from frigate_sidecar.push.delivery_wire import handle_delivery_event, handle_delivery_resolve
-from frigate_sidecar.push.engine import PushEngine
-from frigate_sidecar.push.models import Device, ReviewEvent
-from frigate_sidecar.push.transport import LogTransport
+from marcellus import db
+from marcellus.config import PushSection
+from marcellus.push.delivery_wire import handle_delivery_event, handle_delivery_resolve
+from marcellus.push.engine import PushEngine
+from marcellus.push.models import Device, ReviewEvent
+from marcellus.push.transport import LogTransport
 
 EXTERNAL_BASE_URL = "http://192.168.50.207:5001"
 
@@ -413,7 +413,7 @@ async def test_changing_the_routing_table_via_settings_changes_the_level_applied
     `PUT /v1/push/settings` reaching a running card pipeline with no
     restart, exercised here one layer below the HTTP route
     (`tests/test_push_settings_routes.py` covers the route itself)."""
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -443,7 +443,7 @@ async def test_changing_the_routing_table_via_settings_changes_the_level_applied
 async def test_zone_classes_from_settings_take_priority_over_the_guess_heuristic(
     sidecar_db_path: Path,
 ):
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -474,7 +474,7 @@ async def test_zone_override_via_settings_is_applied_to_a_real_card(sidecar_db_p
     """Elsinore Phase 4 addendum: a `zone_overrides[zone][subject]` entry
     reaches a real card evaluation one layer below the HTTP route
     (`tests/test_push_settings_routes.py` covers the route itself)."""
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -526,7 +526,7 @@ async def test_neighbor_cameras_merge_despite_disjoint_zones(sidecar_db_path: Pa
     walkway saw the same person 10s apart and produced two stories. With
     the cameras declared neighbors, the second track merges onto the first
     card even though the zone sets are disjoint."""
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     settings = policy_settings.default_settings()
     settings["camera_neighbors"] = {"stairway-tight": ["walkway"]}
@@ -557,7 +557,7 @@ async def test_neighbor_cameras_merge_despite_disjoint_zones(sidecar_db_path: Pa
 
 @pytest.mark.asyncio
 async def test_neighbor_declaration_is_symmetric(sidecar_db_path: Path):
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     settings = policy_settings.default_settings()
     settings["camera_neighbors"] = {"stairway-tight": ["walkway"]}
@@ -584,7 +584,7 @@ async def test_neighbor_declaration_is_symmetric(sidecar_db_path: Path):
 
 @pytest.mark.asyncio
 async def test_non_neighbor_cameras_with_disjoint_zones_still_split(sidecar_db_path: Path):
-    from frigate_sidecar.push import policy_settings
+    from marcellus.push import policy_settings
 
     settings = policy_settings.default_settings()
     settings["camera_neighbors"] = {"stairway-tight": ["walkway"]}
@@ -689,7 +689,7 @@ async def test_off_cell_suppression_still_traced_once(sidecar_db_path: Path):
     entry (level "off") per track -- the Recent Decisions feed is the tuning
     lever, and a cell you can't see suppressing is a cell you can never dial
     back up."""
-    from frigate_sidecar.push import decision_trace, ladder_policy
+    from marcellus.push import decision_trace, ladder_policy
 
     conn = db.open_sidecar(sidecar_db_path)
     decision_trace.reset_for_tests(conn)
@@ -731,8 +731,8 @@ async def test_off_cell_suppression_still_traced_once(sidecar_db_path: Path):
 
 @pytest.mark.asyncio
 async def test_geo_adoption_respects_the_flag(sidecar_db_path: Path):
-    from frigate_sidecar.push import policy_settings
-    from frigate_sidecar.push.delivery_wire import _resolve_card_for_track
+    from marcellus.push import policy_settings
+    from marcellus.push.delivery_wire import _resolve_card_for_track
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -780,7 +780,7 @@ async def test_geo_adoption_respects_the_flag(sidecar_db_path: Path):
 
 @pytest.mark.asyncio
 async def test_geo_adoption_skips_closed_and_unknown_mates(sidecar_db_path: Path):
-    from frigate_sidecar.push.delivery_wire import _resolve_card_for_track
+    from marcellus.push.delivery_wire import _resolve_card_for_track
 
     conn = db.open_sidecar(sidecar_db_path)
     # No card exists for the mate at all: natural key, no adoption.

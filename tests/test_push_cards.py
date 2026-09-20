@@ -4,7 +4,7 @@ classification and sound accounting, independent of the DB or transport.
 
 from __future__ import annotations
 
-from frigate_sidecar.push.cards import (
+from marcellus.push.cards import (
     CREATE,
     DEESCALATE,
     ENRICH,

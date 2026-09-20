@@ -6,12 +6,12 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from frigate_sidecar.config import (
+from marcellus.config import (
     FrigateSection,
     Settings,
     SidecarSection,
 )
-from frigate_sidecar.server import create_app
+from marcellus.server import create_app
 
 
 @pytest.fixture
@@ -201,7 +201,7 @@ def test_healthz_upstream_pool_saturated_is_degraded(
 ) -> None:
     import httpx
 
-    from frigate_sidecar import frigate_api
+    from marcellus import frigate_api
 
     class _FakeClient:
         is_closed = False
@@ -210,7 +210,7 @@ def test_healthz_upstream_pool_saturated_is_degraded(
             return httpx.Response(200, request=httpx.Request("GET", url))
 
     monkeypatch.setattr(
-        "frigate_sidecar.routes.health.pool_stats",
+        "marcellus.routes.health.pool_stats",
         lambda c: {
             "connections": frigate_api._STREAM_LIMITS.max_connections,
             "active": frigate_api._STREAM_LIMITS.max_connections,
@@ -306,7 +306,7 @@ def _stub_motion_active(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     """Replaces `motion_active.analyze` with one that records its `days` and
     `until` kwargs and returns an empty result -- so single-window `/motion`
     parsing can be checked without a live Frigate."""
-    from frigate_sidecar.analysis import motion_active
+    from marcellus.analysis import motion_active
 
     captured: dict[str, object] = {}
 
@@ -414,7 +414,7 @@ def test_score_histogram_page_degrades_instead_of_500ing(
 ) -> None:
     """Unlike its siblings (motion/zone-hits/fps-budget), this route had no
     try/except at all -- a locked/broken DB read 500ed here."""
-    from frigate_sidecar.analysis import score_histogram
+    from marcellus.analysis import score_histogram
 
     def boom(**_kwargs: object) -> object:
         raise RuntimeError("boom")
@@ -480,8 +480,8 @@ def test_analysis_zone_hits(client: TestClient) -> None:
 def test_analysis_zone_hits_maps_db_locked_to_503(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frigate_sidecar import db
-    from frigate_sidecar.analysis import zone_hits
+    from marcellus import db
+    from marcellus.analysis import zone_hits
 
     def always_locked(**_kwargs: object) -> object:
         raise db.DBLockedError("database is locked")
@@ -497,8 +497,8 @@ def test_analysis_zone_hits_maps_db_locked_to_503(
 def test_analysis_pull_events_maps_db_locked_to_503(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frigate_sidecar import db
-    from frigate_sidecar.analysis import pull_events
+    from marcellus import db
+    from marcellus.analysis import pull_events
 
     def always_locked(**_kwargs: object) -> object:
         raise db.DBLockedError("database is locked")
@@ -579,7 +579,7 @@ def test_alignment_apply_rejects_garbage(client: TestClient) -> None:
 def test_alignment_measure_runs_in_background(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frigate_sidecar.analysis import annotation_offset as ao_mod
+    from marcellus.analysis import annotation_offset as ao_mod
 
     def _fake_analyze(**kwargs: object) -> list[dict[str, object]]:
         assert kwargs["search_window_ms"] == 8000  # wider than the CLI default
@@ -610,7 +610,7 @@ def test_alignment_state_lists_frigate_cameras(client: TestClient) -> None:
 def test_alignment_state_prefers_live_config_cameras(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frigate_sidecar import frigate_api
+    from marcellus import frigate_api
 
     # Live config wins over event history: retired camera names (present in
     # old events but no longer in Frigate's config) must not be offered.
@@ -626,7 +626,7 @@ def test_alignment_state_prefers_live_config_cameras(
 def test_alignment_state_derives_restart_pending(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frigate_sidecar import frigate_api
+    from marcellus import frigate_api
 
     # A camera whose running annotation_offset differs from the saved config
     # file needs a restart — derived fresh each time, so a sidecar restart
@@ -759,7 +759,7 @@ def test_alignment_frame_proxies_recording_snapshot(
 ) -> None:
     import time
 
-    from frigate_sidecar import frigate_api
+    from marcellus import frigate_api
 
     calls: list[tuple[str, float]] = []
 
@@ -790,7 +790,7 @@ def test_alignment_thumbnail_proxies_frigate(
     """Served by the sidecar, not the browser proxy: Frigate's nginx 401s
     proxied /api/events image requests when Frigate auth is on (the calibrator
     shipped with broken thumbnails because of exactly that)."""
-    from frigate_sidecar import frigate_api
+    from marcellus import frigate_api
 
     def _fake_thumbnail(
         self: object, event_id: str, *, timeout: float = 10.0
@@ -815,7 +815,7 @@ def test_alignment_snapshot_proxies_frigate(
 ) -> None:
     """The calibrator's reference pane: full frame with the bbox drawn, via the
     sidecar's authorized connection (the proxy path 401s, same as thumbnails)."""
-    from frigate_sidecar import frigate_api
+    from marcellus import frigate_api
 
     def _fake_snapshot(
         self: object, event_id: str, *, height: int = 480, bbox: bool = True,
@@ -842,7 +842,7 @@ def test_alignment_apply_config_writes_frigate_and_clears_override(
     """The config-pinned escalation path: value goes into Frigate's config
     (the authoritative source), Frigate restarts, and the sidecar override is
     cleared so the two sources cannot disagree."""
-    from frigate_sidecar import frigate_api
+    from marcellus import frigate_api
 
     calls: list[tuple[str, object]] = []
 

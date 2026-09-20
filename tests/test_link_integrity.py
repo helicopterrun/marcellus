@@ -9,11 +9,11 @@ import pytest
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
 
-from frigate_sidecar.config import FrigateSection, Settings, SidecarSection
-from frigate_sidecar.server import create_app
+from marcellus.config import FrigateSection, Settings, SidecarSection
+from marcellus.server import create_app
 
 TEMPLATES_DIR = (
-    Path(__file__).resolve().parent.parent / "src" / "frigate_sidecar" / "templates"
+    Path(__file__).resolve().parent.parent / "src" / "marcellus" / "templates"
 )
 
 _HREF_RE = re.compile(r'<a\b[^>]*\bhref="([^"]*)"', re.IGNORECASE)

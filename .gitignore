@@ -51,7 +51,7 @@ config/floorplan.*
 *.log
 
 # Generated, machine-specific triage worklists (dated event lists with LAN URLs)
-src/frigate_sidecar/static/triage_batch*.html
+src/marcellus/static/triage_batch*.html
 config/mqtt-capture.jsonl*
 config/push_settings.json
 config/push_settings.json.bak*

@@ -16,12 +16,12 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from frigate_sidecar import auth, db
-from frigate_sidecar.config import FrigateSection, ScrubSection, Settings, SidecarSection
-from frigate_sidecar.frigate_api import FrigateAPIError
-from frigate_sidecar.routes import scrub as scrub_routes
-from frigate_sidecar.scrub import grid
-from frigate_sidecar.server import create_app
+from marcellus import auth, db
+from marcellus.config import FrigateSection, ScrubSection, Settings, SidecarSection
+from marcellus.frigate_api import FrigateAPIError
+from marcellus.routes import scrub as scrub_routes
+from marcellus.scrub import grid
+from marcellus.server import create_app
 
 RECORDINGS_SCHEMA = """
 CREATE TABLE recordings (
@@ -55,7 +55,7 @@ CREATE TABLE event (
 
 
 def _skip_auth(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Bypass the central Frigate-session gate (frigate_sidecar.auth)."""
+    """Bypass the central Frigate-session gate (marcellus.auth)."""
 
     async def _noop(app: object, cookie: str, *, ttl_s: float | None = None) -> None:
         return None
@@ -498,7 +498,7 @@ def test_motion_totalizes_full_range(
     async def _fake_motion(
         settings: object, camera: str, start: float, end: float, scale: float
     ) -> tuple[list[float], bool]:
-        from frigate_sidecar.scrub.motion import aggregate_motion
+        from marcellus.scrub.motion import aggregate_motion
 
         # Only 9 of the requested buckets have "upstream" data -- simulates
         # the measured short-window cliff (§4.6).
@@ -724,7 +724,7 @@ def test_generation_loop_holds_its_tick_as_a_deadline(
     """
     import asyncio
 
-    from frigate_sidecar import server
+    from marcellus import server
 
     settings = Settings(
         scrub=ScrubSection(generate_interval_s=60.0, live_edge_interval_s=20.0)
@@ -759,7 +759,7 @@ def test_generation_loop_holds_its_tick_as_a_deadline(
     async def _fake_sleep(seconds: float) -> None:
         sleeps.append(seconds)
 
-    monkeypatch.setattr("frigate_sidecar.scrub.generator.generate_cycle", _fake_cycle)
+    monkeypatch.setattr("marcellus.scrub.generator.generate_cycle", _fake_cycle)
     monkeypatch.setattr(server.asyncio, "sleep", _fake_sleep)
     monkeypatch.setattr(server, "time", _Clock)
 
@@ -781,7 +781,7 @@ def test_generation_loop_tick_is_the_finer_of_the_two_intervals(
     knob's default."""
     import asyncio
 
-    from frigate_sidecar import server
+    from marcellus import server
 
     settings = Settings(
         scrub=ScrubSection(generate_interval_s=10.0, live_edge_interval_s=20.0)
@@ -807,7 +807,7 @@ def test_generation_loop_tick_is_the_finer_of_the_two_intervals(
     async def _fake_sleep(seconds: float) -> None:  # pragma: no cover - never reached
         return None
 
-    monkeypatch.setattr("frigate_sidecar.scrub.generator.generate_cycle", _fake_cycle)
+    monkeypatch.setattr("marcellus.scrub.generator.generate_cycle", _fake_cycle)
     monkeypatch.setattr(server.asyncio, "sleep", _fake_sleep)
     monkeypatch.setattr(server, "time", _Clock)
 
@@ -831,7 +831,7 @@ def test_generation_loop_skips_generation_below_free_space_floor(
     import asyncio
     from collections import namedtuple
 
-    from frigate_sidecar import server
+    from marcellus import server
 
     cache_dir = tmp_path / "scrub"
     cache_dir.mkdir()
@@ -880,14 +880,14 @@ def test_generation_loop_skips_generation_below_free_space_floor(
         # Well below the 2GB floor.
         return _Usage(total=10_000_000_000, used=9_999_000_000, free=1_000_000)
 
-    monkeypatch.setattr("frigate_sidecar.scrub.generator.generate_cycle", _fake_cycle)
+    monkeypatch.setattr("marcellus.scrub.generator.generate_cycle", _fake_cycle)
     monkeypatch.setattr(server.asyncio, "sleep", _fake_sleep)
     monkeypatch.setattr(server.asyncio, "to_thread", _fake_to_thread)
     monkeypatch.setattr(server, "time", _Clock)
     monkeypatch.setattr(server.shutil, "disk_usage", _fake_disk_usage)
 
     with (
-        caplog.at_level("WARNING", logger="frigate_sidecar.server"),
+        caplog.at_level("WARNING", logger="marcellus.server"),
         pytest.raises(asyncio.CancelledError),
     ):
         asyncio.run(server._scrub_generation_loop(app))  # type: ignore[arg-type]
@@ -1340,7 +1340,7 @@ def test_reel_continuation_start_is_on_the_target_cameras_clock(
     """Offsets are per camera: the link's start must carry the TARGET
     camera's record-clock shift, because that is the time the app scrubs to
     after switching."""
-    from frigate_sidecar import db as db_mod
+    from marcellus import db as db_mod
 
     app = rich_client.app
     sconn = db_mod.open_sidecar(app.state.settings.sidecar.db_path)

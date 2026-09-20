@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 import httpx
 import pytest
 
-from frigate_sidecar.frigate_api import (
+from marcellus.frigate_api import (
     _DEFAULT_LIMITS,
     _DEFAULT_TIMEOUT,
     get_async_client,
