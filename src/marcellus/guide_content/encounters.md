@@ -34,9 +34,11 @@ one:
   confidence 0.95.
 - **Same camera**, **shared zone name**, or a configured **adjacent**
   camera join with decreasing confidence (0.9 / 0.8 / 0.6), as long as the
-  gap since the encounter's last activity is within `gap_s` for the new
-  atom's label family (person/vehicle/animal/default) — three times that
-  allowance on an identity match.
+  gap since the encounter's last activity is within `gap_s` for the label
+  family the new atom and the encounter actually **share** (person/vehicle/
+  animal/default, or, for a label with no named family, the label itself —
+  a waste bin and a garage door are separate families, not lumped into one
+  shared "default") — three times that allowance on an identity match.
 - **Companionship** (0.7): no shared label family needed if the atom's time
   span overlaps the encounter's by at least `min_copresence_s` and the
   camera is the same as or adjacent to one of the encounter's
@@ -51,10 +53,13 @@ one:
   alone in its own encounter; once it shares an encounter with another
   atom, it stays put.
 
-Camera adjacency (`/v1/encounters/adjacency`) comes from Frigate's own zone
-names: two cameras sharing a zone name are adjacent. `adjacency` adds edges
-that naming misses; `not_adjacent` removes a same-named pair that isn't
-really the same ground. Config always wins over the zone-derived graph.
+Camera adjacency (`/v1/encounters/adjacency`, and the Adjacency section on
+the [Encounters](/encounters) page) comes from Frigate's own zone names: two
+cameras sharing a zone name are adjacent. `adjacency` adds edges that
+naming misses; `not_adjacent` removes a same-named pair that isn't really
+the same ground. Config always wins over the zone-derived graph. Both are
+live [Settings](/settings) knobs — editing either takes effect on the next
+reconcile, no restart.
 
 ## Reading the pages
 

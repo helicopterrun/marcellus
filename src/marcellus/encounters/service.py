@@ -69,6 +69,12 @@ def _review_data(raw: object) -> dict[str, object]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _freeze_pairs(pairs: list[list[str]]) -> tuple[tuple[str, ...], ...]:
+    """Hashable/comparable snapshot of an `encounters.adjacency`/
+    `not_adjacent` list, for change detection between reconcile cycles."""
+    return tuple(tuple(pair) for pair in pairs)
+
+
 def _strings(value: object) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
@@ -92,6 +98,14 @@ class EncounterService:
         self.adjacency = adjacency
         self._now = now
         self._cfg = _linker_config(settings)
+        # Cache of the adjacency/not_adjacent lists `self.adjacency` was last
+        # built from, so `reconcile` only re-derives zones + rebuilds the
+        # graph when a tuning override actually changed one of them, not on
+        # every cycle.
+        self._adjacency_cfg: tuple[tuple[tuple[str, ...], ...], tuple[tuple[str, ...], ...]] = (
+            _freeze_pairs(settings.encounters.adjacency),
+            _freeze_pairs(settings.encounters.not_adjacent),
+        )
         self._last_reconcile: ReconcileStats | None = None
         self._last_reconcile_at: float | None = None
         self._last_error: str | None = None
@@ -104,6 +118,27 @@ class EncounterService:
 
     def _conn(self) -> sqlite3.Connection:
         return db.open_sidecar(self.settings.sidecar.db_path)
+
+    def _refresh_adjacency(self) -> None:
+        """Rebuild `self.adjacency` when the effective `encounters.adjacency`/
+        `not_adjacent` (tuning-overridable, live) lists differ from what it
+        was last built from. Zone names only need loading from Frigate's
+        config when that happens -- not on every reconcile cycle -- and the
+        live worker (`_link_review`) picks up the rebuilt object for free
+        since it reads `self.adjacency` on every call."""
+        enc = self.settings.encounters
+        current = (_freeze_pairs(enc.adjacency), _freeze_pairs(enc.not_adjacent))
+        if current == self._adjacency_cfg:
+            return
+        from marcellus.encounters.adjacency import build_adjacency
+        from marcellus.zones import load_camera_zones
+
+        self.adjacency = build_adjacency(
+            load_camera_zones(self.settings.frigate.config_path),
+            extra=enc.adjacency,
+            removed=enc.not_adjacent,
+        )
+        self._adjacency_cfg = current
 
     def _pin_split(
         self, conn: sqlite3.Connection, atom_id: str
@@ -256,6 +291,7 @@ class EncounterService:
         # recent_cameras/min_copresence_s pick up a tuning override live,
         # without needing a restart to recreate the service.
         self._cfg = _linker_config(self.settings)
+        self._refresh_adjacency()
         now = self._now()
         frigate_conn = db.open_frigate_ro(self.settings.frigate.db_path)
         sidecar_conn = self._conn()

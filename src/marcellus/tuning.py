@@ -45,8 +45,18 @@ from marcellus.config import (
 logger = logging.getLogger(__name__)
 
 KnobKind = Literal[
-    "int", "float", "bool", "str", "enum", "list_str", "path", "url", "secret",
-    "dict_int", "json",
+    "int",
+    "float",
+    "bool",
+    "str",
+    "enum",
+    "list_str",
+    "path",
+    "url",
+    "secret",
+    "dict_int",
+    "json",
+    "pair_list",
 ]
 
 
@@ -99,9 +109,17 @@ _ALL_WIRING_SECTIONS = {"frigate"}
 #: outside of `_RESTART_PROCESS_SECTIONS`/`_ALL_WIRING_SECTIONS`.
 _WIRING_SUFFIXES = ("_url", "_path", "_dir", "_host", "_port")
 _WIRING_EXPLICIT_FIELDS = {
-    "mqtt_host", "mqtt_port", "mqtt_username", "mqtt_password", "mqtt_client_id",
-    "mqtt_topic_reviews", "mqtt_topic_available", "mqtt_topic_events",
-    "relay_key", "server_id", "pass_request_headers", "adjacency", "not_adjacent",
+    "mqtt_host",
+    "mqtt_port",
+    "mqtt_username",
+    "mqtt_password",
+    "mqtt_client_id",
+    "mqtt_topic_reviews",
+    "mqtt_topic_available",
+    "mqtt_topic_events",
+    "relay_key",
+    "server_id",
+    "pass_request_headers",
 }
 _SECRET_FIELDS = {"mqtt_password", "relay_key"}
 
@@ -113,6 +131,8 @@ _LIVE_KEYS = {
     "encounters.max_duration_s",
     "encounters.recent_cameras",
     "encounters.min_copresence_s",
+    "encounters.adjacency",
+    "encounters.not_adjacent",
     "push.delivery_urgent_resound_s",
     "push.delivery_urgent_resound_enabled",
     "push.delivery_urgent_resound_max",
@@ -154,6 +174,14 @@ _RANGE_OVERRIDES: dict[str, tuple[float | None, float | None]] = {
 _HELP_OVERRIDES: dict[str, str] = {
     "log_level": "Root/uvicorn logger level.",
     "encounters.gap_s": "Max gap (s) before a new atom starts a new encounter, by label family.",
+    "encounters.adjacency": (
+        "Extra camera-pair edges added to the zone-derived adjacency graph, "
+        "one 'camera_a, camera_b' pair per line."
+    ),
+    "encounters.not_adjacent": (
+        "Camera-pair edges removed from the zone-derived adjacency graph, "
+        "one 'camera_a, camera_b' pair per line."
+    ),
     "scrub.format": "Sprite-sheet cell image format.",
     "push.transport": "Push transport: mock (log only) or relay (real APNs via the relay).",
     "push.dwell_source": "Where a situation's loiter check gets its clock: events or reviews.",
@@ -220,6 +248,8 @@ def _field_kind(section: str, name: str, annotation: Any) -> KnobKind:
         return "path"
     if key == "encounters.gap_s":
         return "dict_int"
+    if key in ("encounters.adjacency", "encounters.not_adjacent"):
+        return "pair_list"
     if key in ("push.delivery_zone_place_map", "push.delivery_la_families"):
         return "json"
     return _infer_kind(annotation)
@@ -469,7 +499,31 @@ def _type_errors(knob: Knob, value: Any) -> list[str]:
         if not isinstance(value, dict):
             return [f"{knob.key}: expected an object"]
         return []
+    if k == "pair_list":
+        if not isinstance(value, list) or not all(
+            isinstance(pair, list)
+            and len(pair) == 2
+            and all(isinstance(x, str) and x for x in pair)
+            for pair in value
+        ):
+            return [f"{knob.key}: expected a list of [camera_a, camera_b] pairs"]
+        if any(pair[0] == pair[1] for pair in value):
+            return [f"{knob.key}: a camera pair can't name the same camera twice"]
+        return []
     return []  # pragma: no cover -- exhaustive over KnobKind
+
+
+def normalise_pairs(value: list[list[str]]) -> list[list[str]]:
+    """Sort each `[camera_a, camera_b]` pair and dedupe, for a `pair_list`
+    knob (`encounters.adjacency`/`not_adjacent`) -- pair order shouldn't
+    matter to storage or to `build_adjacency`, which treats them as an
+    undirected edge."""
+    seen: list[list[str]] = []
+    for pair in value:
+        sorted_pair = sorted(pair)
+        if sorted_pair not in seen:
+            seen.append(sorted_pair)
+    return seen
 
 
 def _default_settings_dump() -> dict[str, Any]:

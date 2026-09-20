@@ -60,5 +60,34 @@
     </details>
   </section>
   {% endfor %}
+
+  <section class="capture-visit enc-adjacency">
+    <header>
+      <b class="id-title">Adjacency</b>
+      <span class="mode">
+        {{ adjacency.cameras|length }} camera{{ 's' if adjacency.cameras|length != 1 else '' }}
+        &middot; {{ adjacency.edges|length }} edge{{ 's' if adjacency.edges|length != 1 else '' }}
+        &middot; <a href="/settings#encounters">edit in Settings</a>
+      </span>
+    </header>
+    {% if not adjacency.edges %}
+      <p class="empty">No adjacency edges (no shared zones, no
+        <code>encounters.adjacency</code> overrides).</p>
+    {% else %}
+      <table class="enc-member-table">
+        <thead><tr><th>Camera A</th><th>Camera B</th><th>Source</th><th>Shared zones</th></tr></thead>
+        <tbody>
+        {% for edge in adjacency.edges %}
+          <tr>
+            <td>{{ edge.a }}</td>
+            <td>{{ edge.b }}</td>
+            <td>{{ edge.source }}</td>
+            <td>{{ edge.zones|join(', ') if edge.zones else '—' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </section>
 </main>
 {% endblock %}

@@ -925,3 +925,70 @@ def test_encounters_prune_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert set(payload) == {"encounters", "members", "decisions"}
+
+
+def test_reconcile_picks_up_live_adjacency_override(tmp_path: Path) -> None:
+    """encounters.adjacency is a live tuning key (Part B): a reconcile after
+    the override changes must use the new edge without recreating the
+    service."""
+    frigate_db = _reviewsegment_db(tmp_path)
+    now = time.time()
+    _insert_review(
+        frigate_db,
+        rid="r1",
+        camera="alley-wide",
+        start=now - 200,
+        end=now - 190,
+        objects=("person",),
+    )
+
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()), now=lambda: now)
+    stats = service.reconcile()
+    assert stats.new == 1
+    assert not service.adjacency.adjacent("alley-wide", "street")
+
+    _insert_review(
+        frigate_db,
+        rid="r2",
+        camera="street",
+        start=now - 150,
+        end=now - 140,
+        objects=("person",),
+    )
+
+    # No override yet -- the new atom on "street" isn't adjacent to
+    # "alley-wide", so it starts a new encounter.
+    stats2 = service.reconcile()
+    assert stats2.new == 1
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    before = conn.execute("SELECT COUNT(*) AS c FROM encounters").fetchone()["c"]
+    conn.close()
+    assert before == 2
+
+    # Live-override the adjacency graph with a brand-new camera ("yard") not
+    # sharing a camera with either open encounter -- it can only link via
+    # the "adjacent" continuity rule, exercising the override.
+    settings.encounters.adjacency = [["street", "yard"]]
+    _insert_review(
+        frigate_db,
+        rid="r3",
+        camera="yard",
+        start=now - 90,
+        end=now - 80,
+        objects=("person",),
+    )
+    service.reconcile()
+    assert service.adjacency.adjacent("street", "yard")
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    r3_row = conn.execute(
+        "SELECT encounter_id, link_reason FROM encounter_members WHERE atom_id = 'r3'"
+    ).fetchone()
+    r2_row = conn.execute(
+        "SELECT encounter_id FROM encounter_members WHERE atom_id = 'r2'"
+    ).fetchone()
+    conn.close()
+    assert r3_row["link_reason"] == "adjacent"
+    assert r3_row["encounter_id"] == r2_row["encounter_id"]
