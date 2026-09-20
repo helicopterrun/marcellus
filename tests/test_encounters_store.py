@@ -321,6 +321,42 @@ def test_update_after_end_keeps_end_time(sidecar_db_path: Path) -> None:
         conn.close()
 
 
+def test_prune_drops_old_sealed_encounters(sidecar_db_path: Path) -> None:
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        old_start = now - 40 * 86400
+        old_sealed = store.upsert_atom(
+            conn, _atom("old", start=old_start), LinkDecision(None, "new", 1.0), old_start
+        )
+        conn.execute(
+            "UPDATE encounters SET sealed_at = ? WHERE id = ?",
+            (now - 40 * 86400, old_sealed),
+        )
+        conn.execute(
+            "INSERT INTO encounter_decisions (atom_id, action, encounter_id, created_at) "
+            "VALUES ('old', 'pin', ?, 'x')",
+            (old_sealed,),
+        )
+        recent_sealed = store.upsert_atom(
+            conn, _atom("recent", start=now - 10), LinkDecision(None, "new", 1.0), now - 10
+        )
+        conn.execute("UPDATE encounters SET sealed_at = ? WHERE id = ?", (now - 10, recent_sealed))
+        unsealed = store.upsert_atom(
+            conn, _atom("open", start=now - 100000), LinkDecision(None, "new", 1.0), now - 100000
+        )
+        conn.commit()
+
+        result = store.prune(conn, now, retention_days=30)
+        assert result == {"encounters": 1, "members": 1, "decisions": 1}
+
+        assert store.get(conn, old_sealed) is None
+        assert store.get(conn, recent_sealed) is not None
+        assert store.get(conn, unsealed) is not None
+    finally:
+        conn.close()
+
+
 def test_watermark_roundtrip(sidecar_db_path: Path) -> None:
     conn = db.open_sidecar(sidecar_db_path)
     try:

@@ -23,13 +23,15 @@ triage_app = typer.Typer(help="Sample borderline events and record tp/fp/skip la
 analysis_app = typer.Typer(help="Read-only analyses over Frigate's DB and live API.")
 face_capture_app = typer.Typer(
     help="High-res cross-camera face capture: grab the ID camera's full-res frame "
-         "when a front camera sees a person."
+    "when a front camera sees a person."
 )
 scrub_app = typer.Typer(help="Uniform-cadence scrub-cache generation (sprite sheets).")
+encounters_app = typer.Typer(help="Encounters: linked chains of Frigate review segments.")
 app.add_typer(triage_app, name="triage")
 app.add_typer(analysis_app, name="analysis")
 app.add_typer(face_capture_app, name="face-capture")
 app.add_typer(scrub_app, name="scrub")
+app.add_typer(encounters_app, name="encounters")
 
 
 @app.command()
@@ -268,9 +270,13 @@ def triage_record(
     s = load_settings()
     try:
         result = record(
-            frigate_db=s.frigate.db_path, sidecar_db=s.sidecar.db_path,
-            event_id=event_id, label=label,  # type: ignore[arg-type]
-            note=note, session=session, force=force,
+            frigate_db=s.frigate.db_path,
+            sidecar_db=s.sidecar.db_path,
+            event_id=event_id,
+            label=label,  # type: ignore[arg-type]
+            note=note,
+            session=session,
+            force=force,
         )
     except EventNotFoundError:
         typer.echo(
@@ -282,7 +288,9 @@ def triage_record(
         typer.echo(
             json.dumps(
                 {
-                    "id": event_id, "ok": False, "before": exc.existing,
+                    "id": event_id,
+                    "ok": False,
+                    "before": exc.existing,
                     "error": f"already labeled '{exc.existing}'; use --force to overwrite",
                 }
             ),
@@ -332,6 +340,24 @@ def face_capture_prune() -> None:
     from marcellus.faces import crosscam
 
     typer.echo(json.dumps(crosscam.prune(load_settings())))
+
+
+@encounters_app.command("prune")
+def encounters_prune() -> None:
+    """Drop sealed encounters (and their members/decisions) past
+    encounters.retention_days."""
+    import time
+
+    from marcellus import db
+    from marcellus.encounters import store
+
+    s = load_settings()
+    conn = db.open_sidecar(s.sidecar.db_path)
+    try:
+        result = store.prune(conn, time.time(), s.encounters.retention_days)
+    finally:
+        conn.close()
+    typer.echo(json.dumps(result))
 
 
 @face_capture_app.command("stats")
@@ -400,15 +426,28 @@ def analysis_score_histogram(
     result = score_histogram.analyze(
         frigate_db=s.frigate.db_path,
         sidecar_db=s.sidecar.db_path,
-        days=days, camera=camera, label=label, min_samples=min_samples,
+        days=days,
+        camera=camera,
+        label=label,
+        min_samples=min_samples,
     )
     if output_json:
         typer.echo(json.dumps(result, indent=2))
         return
     headers = [
-        "camera", "label", "n", "n_tp", "n_fp",
-        "median_score", "p10_top", "p25_top", "p50_top", "p75_top",
-        "suggested_min_score", "suggested_threshold", "confidence",
+        "camera",
+        "label",
+        "n",
+        "n_tp",
+        "n_fp",
+        "median_score",
+        "p10_top",
+        "p25_top",
+        "p50_top",
+        "p75_top",
+        "suggested_min_score",
+        "suggested_threshold",
+        "confidence",
     ]
     typer.echo(render_table(headers, result["rows"]))
 
@@ -427,8 +466,14 @@ def analysis_motion_rate(
         typer.echo(json.dumps(rows, indent=2))
         return
     headers = [
-        "camera", "events_total", "events_per_hr_avg", "events_per_hr_p95",
-        "peak_hour_count", "spikiness", "night_ratio", "suggestion",
+        "camera",
+        "events_total",
+        "events_per_hr_avg",
+        "events_per_hr_p95",
+        "peak_hour_count",
+        "spikiness",
+        "night_ratio",
+        "suggestion",
     ]
     typer.echo(render_table(headers, rows))
 
@@ -454,8 +499,11 @@ def analysis_fps_budget(output_json: bool = typer.Option(False, "--json")) -> No
     typer.echo(
         render_table(
             [
-                "camera", "configured_detect_fps", "observed_detection_fps",
-                "observed_skipped_fps", "gap_pct",
+                "camera",
+                "configured_detect_fps",
+                "observed_detection_fps",
+                "observed_skipped_fps",
+                "gap_pct",
             ],
             result["cameras"],
         )
@@ -484,8 +532,15 @@ def analysis_motion_active(
         typer.echo(json.dumps(result, indent=2))
         return
     headers = [
-        "camera", "class", "mu_per_hr", "events_per_hr", "yield_per_kmu",
-        "obs_det_fps", "cfg_det_fps", "motion_threshold", "hours_with_data",
+        "camera",
+        "class",
+        "mu_per_hr",
+        "events_per_hr",
+        "yield_per_kmu",
+        "obs_det_fps",
+        "cfg_det_fps",
+        "motion_threshold",
+        "hours_with_data",
     ]
     typer.echo(render_table(headers, result["rows"]))
 
@@ -508,8 +563,15 @@ def analysis_motion_compare(
         return
     typer.echo(f"# baseline {result['baseline']} vs target {result['target']}\n")
     headers = [
-        "camera", "class", "base_mu_per_hr", "tgt_mu_per_hr", "ratio",
-        "base_yield_per_kmu", "tgt_yield_per_kmu", "motion_threshold", "suggestion",
+        "camera",
+        "class",
+        "base_mu_per_hr",
+        "tgt_mu_per_hr",
+        "ratio",
+        "base_yield_per_kmu",
+        "tgt_yield_per_kmu",
+        "motion_threshold",
+        "suggestion",
     ]
     typer.echo(render_table(headers, result["rows"]))
 
@@ -527,23 +589,29 @@ def analysis_zone_hits(
     result = zone_hits.analyze(
         frigate_db=s.frigate.db_path,
         sidecar_db=s.sidecar.db_path,
-        days=days, camera=camera,
+        days=days,
+        camera=camera,
     )
     if output_json:
         typer.echo(json.dumps(result, indent=2))
         return
     typer.echo(f"## Zone hits (last {result['days']} days)\n")
-    typer.echo(
-        render_table(["camera", "zone", "label", "n", "fp_in_triage"], result["hits"])
-    )
+    typer.echo(render_table(["camera", "zone", "label", "n", "fp_in_triage"], result["hits"]))
     typer.echo("\n## Possible mask candidates\n")
     if not result["mask_candidates"]:
         typer.echo("_none_")
     else:
         typer.echo(
             render_table(
-                ["camera", "label", "cluster_size", "centroid_x", "centroid_y",
-                 "sample_event_id", "reason"],
+                [
+                    "camera",
+                    "label",
+                    "cluster_size",
+                    "centroid_x",
+                    "centroid_y",
+                    "sample_event_id",
+                    "reason",
+                ],
                 result["mask_candidates"],
             )
         )
@@ -560,9 +628,7 @@ def analysis_pull_events(
 
     s = load_settings()
     n = 0
-    for ev in pull_events.pull(
-        frigate_db=s.frigate.db_path, days=days, camera=camera, label=label
-    ):
+    for ev in pull_events.pull(frigate_db=s.frigate.db_path, days=days, camera=camera, label=label):
         typer.echo(json.dumps(ev))
         n += 1
     typer.echo(f"# wrote {n} events", err=True)
@@ -595,9 +661,15 @@ def analysis_annotation_offset(
         typer.echo(json.dumps(result, indent=2))
         return
     headers = [
-        "camera", "n_contributing_events", "n_qualifying_events",
-        "p25_ms", "median_offset_ms", "p75_ms", "iqr_ms",
-        "suggested_offset_ms", "confidence",
+        "camera",
+        "n_contributing_events",
+        "n_qualifying_events",
+        "p25_ms",
+        "median_offset_ms",
+        "p75_ms",
+        "iqr_ms",
+        "suggested_offset_ms",
+        "confidence",
     ]
     typer.echo(render_table(headers, result))
 
@@ -674,9 +746,7 @@ def scrub_backfill(
     # this the option was inert and every backfill covered full retention.
     days = max(1, min(days, s.scrub.retention_days))
     s = s.model_copy(
-        update={
-            "scrub": s.scrub.model_copy(update={"cameras": [camera], "retention_days": days})
-        }
+        update={"scrub": s.scrub.model_copy(update={"cameras": [camera], "retention_days": days})}
     )
     start = _time.time()
     cutoff = start - days * 86400
@@ -695,9 +765,7 @@ def scrub_backfill(
                 f"# stopped after {_BACKFILL_MAX_CYCLES} cycles; re-run to continue", err=True
             )
     typer.echo(
-        json.dumps(
-            {"camera": camera, "days": days, "since": cutoff, "new_frames": total_frames}
-        )
+        json.dumps({"camera": camera, "days": days, "since": cutoff, "new_frames": total_frames})
     )
 
 
