@@ -256,6 +256,230 @@ async def test_live_then_reconcile_agree_no_duplicates(tmp_path: Path) -> None:
         conn.close()
 
 
+async def test_live_founder_rehomed_into_companion_encounter(tmp_path: Path) -> None:
+    """A dog atom with no shared label family with the person atom next to it
+    founds its own encounter on first sight (no overlap yet). Once a later
+    "update" message shows real copresence with the person's still-open
+    encounter, the dog's lone-founder encounter must be re-homed into it as
+    "companion" -- and the dog's old encounter must be gone."""
+    frigate_db = _reviewsegment_db(tmp_path)
+    settings = _settings(tmp_path, frigate_db)
+    clock = [10.0]
+    service = EncounterService(
+        settings, adjacency=Adjacency(edges=frozenset()), now=lambda: clock[0]
+    )
+
+    service.observe_review(
+        ReviewEvent(
+            review_id="p1",
+            camera="alley-wide",
+            severity="alert",
+            labels=("person",),
+            msg_type="new",
+            start_time=10.0,
+        )
+    )
+    await service.process_pending()
+
+    clock[0] = 11.0
+    service.observe_review(
+        ReviewEvent(
+            review_id="d1",
+            camera="alley-wide",
+            severity="detection",
+            labels=("dog",),
+            msg_type="new",
+            start_time=11.0,
+        )
+    )
+    await service.process_pending()
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        person_row = conn.execute(
+            "SELECT encounter_id FROM encounter_members WHERE atom_id = 'p1'"
+        ).fetchone()
+        dog_row = conn.execute(
+            "SELECT encounter_id, link_reason FROM encounter_members WHERE atom_id = 'd1'"
+        ).fetchone()
+        assert dog_row["link_reason"] == "new"
+        assert dog_row["encounter_id"] != person_row["encounter_id"]
+        dog_old_encounter_id = dog_row["encounter_id"]
+        person_encounter_id = person_row["encounter_id"]
+    finally:
+        conn.close()
+
+    clock[0] = 16.0
+    service.observe_review(
+        ReviewEvent(
+            review_id="d1",
+            camera="alley-wide",
+            severity="detection",
+            labels=("dog",),
+            msg_type="update",
+            start_time=11.0,
+        )
+    )
+    await service.process_pending()
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        dog_row = conn.execute(
+            "SELECT encounter_id, link_reason FROM encounter_members WHERE atom_id = 'd1'"
+        ).fetchone()
+        assert dog_row["encounter_id"] == person_encounter_id
+        assert dog_row["link_reason"] == "companion"
+
+        assert store.get(conn, dog_old_encounter_id) is None
+
+        enc_row = store.get(conn, person_encounter_id)
+        assert enc_row is not None
+        assert enc_row["atom_count"] == 2
+        assert "dog" in json.loads(enc_row["labels_json"])
+    finally:
+        conn.close()
+
+
+def test_reconcile_founder_rehomed_into_companion_encounter(tmp_path: Path) -> None:
+    """Same scenario as the live-hook version, but driven entirely through
+    `reconcile()` from `reviewsegment` rows with real end_times -- the
+    backfill path must reach the same result."""
+    frigate_db = _reviewsegment_db(tmp_path)
+    now = time.time()
+    _insert_review(
+        frigate_db,
+        rid="p1",
+        camera="alley-wide",
+        start=now,
+        end=now + 6,
+        objects=("person",),
+    )
+    _insert_review(
+        frigate_db,
+        rid="d1",
+        camera="alley-wide",
+        start=now + 1,
+        end=now + 1.5,
+        objects=("dog",),
+    )
+
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(
+        settings, adjacency=Adjacency(edges=frozenset()), now=lambda: now + 6
+    )
+    stats = service.reconcile()
+    assert stats.new == 2
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        person_row = conn.execute(
+            "SELECT encounter_id FROM encounter_members WHERE atom_id = 'p1'"
+        ).fetchone()
+        dog_row = conn.execute(
+            "SELECT encounter_id, link_reason FROM encounter_members WHERE atom_id = 'd1'"
+        ).fetchone()
+        assert dog_row["link_reason"] == "new"
+        assert dog_row["encounter_id"] != person_row["encounter_id"]
+        dog_old_encounter_id = dog_row["encounter_id"]
+        person_encounter_id = person_row["encounter_id"]
+    finally:
+        conn.close()
+
+    # Frigate extends the dog's review item -- now it genuinely overlaps the
+    # still-open person encounter for 5s (>= the 3s default min_copresence_s).
+    conn = sqlite3.connect(frigate_db)
+    conn.execute("UPDATE reviewsegment SET end_time = ? WHERE id = 'd1'", (now + 6,))
+    conn.commit()
+    conn.close()
+
+    stats = service.reconcile()
+    assert stats.updated >= 1
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        dog_row = conn.execute(
+            "SELECT encounter_id, link_reason FROM encounter_members WHERE atom_id = 'd1'"
+        ).fetchone()
+        assert dog_row["encounter_id"] == person_encounter_id
+        assert dog_row["link_reason"] == "companion"
+
+        assert store.get(conn, dog_old_encounter_id) is None
+
+        enc_row = store.get(conn, person_encounter_id)
+        assert enc_row is not None
+        assert enc_row["atom_count"] == 2
+        assert "dog" in json.loads(enc_row["labels_json"])
+    finally:
+        conn.close()
+
+
+async def test_live_start_time_zero_skipped_without_member_row(tmp_path: Path) -> None:
+    frigate_db = _reviewsegment_db(tmp_path)
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()))
+
+    service.observe_review(
+        ReviewEvent(
+            review_id="r1",
+            camera="alley-wide",
+            severity="alert",
+            labels=("person",),
+            msg_type="new",
+            start_time=0.0,
+        )
+    )
+    await service.process_pending()
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        n = conn.execute("SELECT COUNT(*) AS n FROM encounter_members").fetchone()["n"]
+        assert n == 0
+    finally:
+        conn.close()
+
+
+async def test_live_start_time_zero_keeps_stored_start_time(tmp_path: Path) -> None:
+    frigate_db = _reviewsegment_db(tmp_path)
+    settings = _settings(tmp_path, frigate_db)
+    now = time.time()
+    service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()), now=lambda: now)
+
+    service.observe_review(
+        ReviewEvent(
+            review_id="r1",
+            camera="alley-wide",
+            severity="alert",
+            labels=("person",),
+            msg_type="new",
+            start_time=now - 50,
+        )
+    )
+    await service.process_pending()
+
+    # A later "update" arrives with start_time 0.0 (the parser bug) -- the
+    # stored start_time must not regress to 0.
+    service.observe_review(
+        ReviewEvent(
+            review_id="r1",
+            camera="alley-wide",
+            severity="alert",
+            labels=("person",),
+            msg_type="update",
+            start_time=0.0,
+        )
+    )
+    await service.process_pending()
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        row = conn.execute(
+            "SELECT start_time FROM encounter_members WHERE atom_id = 'r1'"
+        ).fetchone()
+        assert row["start_time"] == pytest.approx(now - 50)
+    finally:
+        conn.close()
+
+
 async def test_observe_review_does_not_touch_sqlite_synchronously(tmp_path: Path) -> None:
     """`observe_review` must be a non-blocking enqueue only -- no sqlite
     connection opened on the caller's thread/loop. Nothing is linked until
@@ -265,7 +489,13 @@ async def test_observe_review_does_not_touch_sqlite_synchronously(tmp_path: Path
     settings = _settings(tmp_path, frigate_db)
     service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()))
 
-    ev = ReviewEvent(review_id="r1", camera="alley-wide", severity="alert", labels=("person",))
+    ev = ReviewEvent(
+        review_id="r1",
+        camera="alley-wide",
+        severity="alert",
+        labels=("person",),
+        start_time=time.time(),
+    )
     service.observe_review(ev)
 
     # The sidecar DB file shouldn't even exist yet -- open_sidecar's

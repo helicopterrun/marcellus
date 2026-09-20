@@ -72,14 +72,65 @@ def load_one(conn: sqlite3.Connection, encounter_id: str, now: float) -> OpenEnc
 
 def _member_row(conn: sqlite3.Connection, atom_id: str) -> sqlite3.Row | None:
     row: sqlite3.Row | None = conn.execute(
-        "SELECT encounter_id FROM encounter_members WHERE atom_id = ?", (atom_id,)
+        "SELECT encounter_id, start_time, end_time, link_reason FROM encounter_members "
+        "WHERE atom_id = ?",
+        (atom_id,),
     ).fetchone()
     return row
+
+
+def member_row(conn: sqlite3.Connection, atom_id: str) -> sqlite3.Row | None:
+    """Public wrapper on `_member_row` for callers outside this module (e.g.
+    `service._link_review`'s start_time <= 0 fallback)."""
+    return _member_row(conn, atom_id)
 
 
 def _encounter_sealed(conn: sqlite3.Connection, encounter_id: str) -> bool:
     row = conn.execute("SELECT sealed_at FROM encounters WHERE id = ?", (encounter_id,)).fetchone()
     return row is not None and row["sealed_at"] is not None
+
+
+def _member_count(conn: sqlite3.Connection, encounter_id: str) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM encounter_members WHERE encounter_id = ?", (encounter_id,)
+    ).fetchone()
+    return int(row["n"])
+
+
+def founder_singleton(conn: sqlite3.Connection, atom_id: str) -> str | None:
+    """If `atom_id` is the sole member of an unsealed encounter it founded
+    (its own membership row has `link_reason == "new"`), return that
+    encounter's id -- else None.
+
+    Callers exclude this id from the candidate set passed to `decide()`
+    before re-deciding an already-stored atom: left in, the atom's own
+    singleton encounter would win on `same_camera` (its only member IS the
+    atom, so camera/labels always match) even when a real link (e.g.
+    `companion`) exists elsewhere. Never recorded as a split decision --
+    it's a per-call exclusion, not a permanent one.
+    """
+    row = conn.execute(
+        "SELECT encounter_id, link_reason FROM encounter_members WHERE atom_id = ?", (atom_id,)
+    ).fetchone()
+    if row is None or row["link_reason"] != "new":
+        return None
+    encounter_id = str(row["encounter_id"])
+    if _encounter_sealed(conn, encounter_id):
+        return None
+    if _member_count(conn, encounter_id) != 1:
+        return None
+    return encounter_id
+
+
+def _donor_after_move(conn: sqlite3.Connection, encounter_id: str, now: float) -> None:
+    """After an atom leaves `encounter_id` for another encounter: recompute
+    its aggregates from the members that remain, or delete it outright if
+    none remain."""
+    if _member_count(conn, encounter_id) == 0:
+        conn.execute("DELETE FROM encounters WHERE id = ?", (encounter_id,))
+        return
+    recompute(conn, encounter_id)
+    conn.execute("UPDATE encounters SET updated_at = ? WHERE id = ?", (now, encounter_id))
 
 
 def _ensure_encounter(conn: sqlite3.Connection, encounter_id: str, atom: Atom, now: float) -> None:
@@ -99,10 +150,14 @@ def upsert_atom(conn: sqlite3.Connection, atom: Atom, decision: LinkDecision, no
     """Insert or update one atom's membership row, then refresh its
     encounter's aggregates. Returns the encounter id the atom ends up in.
 
-    Membership never changes on update unless the atom's current encounter is
-    sealed and `decision` names a different (live) encounter -- that's the
-    one case where a late-arriving update has to be re-homed because its old
-    encounter is no longer a linking candidate.
+    Membership changes on update in two cases: (1) the atom's current
+    encounter is sealed and `decision` names a different (live) encounter --
+    a late-arriving update has to be re-homed because its old encounter is no
+    longer a linking candidate; (2) the atom is the lone founder of its own
+    (unsealed) encounter -- `link_reason == "new"`, one member -- and
+    `decision` (re-decided with that singleton excluded from candidates,
+    see `founder_singleton`) found a real link elsewhere. Only lone founders
+    move this way; an atom already grouped with others never churns.
     """
     existing = _member_row(conn, atom.atom_id)
     labels_json = json.dumps(list(atom.labels))
@@ -112,13 +167,26 @@ def upsert_atom(conn: sqlite3.Connection, atom: Atom, decision: LinkDecision, no
 
     if existing is not None:
         current_encounter_id = str(existing["encounter_id"])
-        if (
+        sealed_rehome = (
             decision.encounter_id is not None
             and decision.encounter_id != current_encounter_id
             and _encounter_sealed(conn, current_encounter_id)
-        ):
+        )
+        founder_rehome = (
+            not sealed_rehome
+            and decision.encounter_id is not None
+            and decision.encounter_id != current_encounter_id
+            and decision.reason != "new"
+            and not _encounter_sealed(conn, current_encounter_id)
+            and existing["link_reason"] == "new"
+            and _member_count(conn, current_encounter_id) == 1
+        )
+        if sealed_rehome or founder_rehome:
             encounter_id = decision.encounter_id
+            assert encounter_id is not None
             _ensure_encounter(conn, encounter_id, atom, now)
+            existing_end_time = existing["end_time"]
+            end_time = atom.end_time if atom.end_time is not None else existing_end_time
             conn.execute(
                 "UPDATE encounter_members SET encounter_id = ?, camera = ?, start_time = ?, "
                 "end_time = ?, severity = ?, labels_json = ?, zones_json = ?, "
@@ -128,7 +196,7 @@ def upsert_atom(conn: sqlite3.Connection, atom: Atom, decision: LinkDecision, no
                     encounter_id,
                     atom.camera,
                     atom.start_time,
-                    atom.end_time,
+                    end_time,
                     atom.severity,
                     labels_json,
                     zones_json,
@@ -140,8 +208,11 @@ def upsert_atom(conn: sqlite3.Connection, atom: Atom, decision: LinkDecision, no
                     atom.atom_id,
                 ),
             )
+            _donor_after_move(conn, current_encounter_id, now)
         else:
             encounter_id = current_encounter_id
+            existing_end_time = existing["end_time"]
+            end_time = atom.end_time if atom.end_time is not None else existing_end_time
             conn.execute(
                 "UPDATE encounter_members SET camera = ?, start_time = ?, end_time = ?, "
                 "severity = ?, labels_json = ?, zones_json = ?, event_ids_json = ?, "
@@ -149,7 +220,7 @@ def upsert_atom(conn: sqlite3.Connection, atom: Atom, decision: LinkDecision, no
                 (
                     atom.camera,
                     atom.start_time,
-                    atom.end_time,
+                    end_time,
                     atom.severity,
                     labels_json,
                     zones_json,
@@ -203,7 +274,8 @@ def recompute(conn: sqlite3.Connection, encounter_id: str) -> None:
     labels: set[str] = set()
     identities: set[str] = set()
     zones: set[str] = set()
-    start_time = min(m["start_time"] for m in members)
+    positive_starts = [m["start_time"] for m in members if m["start_time"] > 0]
+    start_time = min(positive_starts) if positive_starts else min(m["start_time"] for m in members)
     any_open = any(m["end_time"] is None for m in members)
     end_time = None if any_open else max(m["end_time"] for m in members)
     peak_severity = "alert" if any(m["severity"] == "alert" for m in members) else "detection"

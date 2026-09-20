@@ -139,20 +139,41 @@ class EncounterService:
             sub_labels = tuple(ev.sub_labels) + tuple(
                 q for q in qualifiers if q not in ev.sub_labels
             )
-            atom = Atom(
-                atom_id=ev.review_id,
-                camera=ev.camera,
-                start_time=ev.start_time,
-                end_time=end_time,
-                labels=labels,
-                zones=ev.zones,
-                event_ids=ev.track_ids,
-                sub_labels=sub_labels,
-                severity=ev.severity,
-            )
             conn = self._conn()
             try:
+                start_time = ev.start_time
+                if start_time <= 0:
+                    # Frigate occasionally sends `after.start_time` as 0/absent
+                    # (prod has ~178 encounters seeded this way). A brand new
+                    # atom with no true start_time can't be linked at all yet
+                    # -- the reconciler will pick it up from Frigate's
+                    # `reviewsegment` row, which does carry a real start_time.
+                    # An atom we've already stored keeps its previously
+                    # recorded start_time rather than regressing to 0.
+                    existing_member = store.member_row(conn, ev.review_id)
+                    if existing_member is None:
+                        logger.debug(
+                            "encounters: skipping live link for %s -- start_time <= 0 and "
+                            "no stored member row yet; reconciler will backfill",
+                            ev.review_id,
+                        )
+                        return
+                    start_time = float(existing_member["start_time"])
+
+                atom = Atom(
+                    atom_id=ev.review_id,
+                    camera=ev.camera,
+                    start_time=start_time,
+                    end_time=end_time,
+                    labels=labels,
+                    zones=ev.zones,
+                    event_ids=ev.track_ids,
+                    sub_labels=sub_labels,
+                    severity=ev.severity,
+                )
                 pinned_to, split_from = self._pin_split(conn, atom.atom_id)
+                founder = store.founder_singleton(conn, atom.atom_id)
+                exclude = split_from | ({founder} if founder is not None else frozenset())
                 open_encounters = store.load_open(conn, now)
                 decision = decide(
                     atom,
@@ -161,7 +182,7 @@ class EncounterService:
                     self._cfg,
                     now=now,
                     pinned_to=pinned_to,
-                    split_from=split_from,
+                    split_from=exclude,
                 )
                 store.upsert_atom(conn, atom, decision, now)
             finally:
@@ -250,9 +271,13 @@ class EncounterService:
             updated_count = 0
             for atom in atoms:
                 existing = sidecar_conn.execute(
-                    "SELECT 1 FROM encounter_members WHERE atom_id = ?", (atom.atom_id,)
+                    "SELECT encounter_id FROM encounter_members WHERE atom_id = ?",
+                    (atom.atom_id,),
                 ).fetchone()
+                old_encounter_id = str(existing["encounter_id"]) if existing is not None else None
                 pinned_to, split_from = self._pin_split(sidecar_conn, atom.atom_id)
+                founder = store.founder_singleton(sidecar_conn, atom.atom_id)
+                exclude = split_from | ({founder} if founder is not None else frozenset())
                 decision = decide(
                     atom,
                     list(by_id.values()),
@@ -260,10 +285,26 @@ class EncounterService:
                     self._cfg,
                     now=now,
                     pinned_to=pinned_to,
-                    split_from=split_from,
+                    split_from=exclude,
                 )
                 encounter_id = store.upsert_atom(sidecar_conn, atom, decision, now)
-                if encounter_id in by_id:
+
+                # Keep the in-memory `by_id` view consistent with what the
+                # store just did, including a re-home: refresh the
+                # destination, and refresh (or drop, if it was deleted for
+                # having zero members left) the donor.
+                if old_encounter_id is not None and old_encounter_id != encounter_id:
+                    donor = store.load_one(sidecar_conn, old_encounter_id, now)
+                    if donor is not None:
+                        by_id[old_encounter_id] = donor
+                    else:
+                        by_id.pop(old_encounter_id, None)
+
+                if encounter_id in by_id and old_encounter_id != encounter_id:
+                    refreshed = store.load_one(sidecar_conn, encounter_id, now)
+                    if refreshed is not None:
+                        by_id[encounter_id] = refreshed
+                elif encounter_id in by_id:
                     apply(by_id[encounter_id], atom, now)
                 else:
                     refreshed = store.load_one(sidecar_conn, encounter_id, now)
