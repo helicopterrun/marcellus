@@ -370,3 +370,42 @@ class ObservationDetailResponse(_Wire):
     observation: Observation
     encounter: EncounterSummary
     neighbours: ObservationNeighbours
+
+
+# --------------------------------------------------------------------------
+# Camera topology (M2, docs/encounters.md "Camera topology"): adjacency +
+# learned/config/default transition stats, for `/v1/topology` and
+# `/v1/cameras/{camera}/neighbours`.
+# --------------------------------------------------------------------------
+
+
+class TransitionStatsOut(_Wire):
+    p10: float
+    p50: float
+    p90: float
+    samples: int
+    source: str
+
+
+class TopologyEdge(_Wire):
+    a: str
+    b: str
+    zones: list[str]
+    source: str
+    transitions: dict[str, dict[str, TransitionStatsOut]]
+
+
+class TopologyResponse(_Wire):
+    cameras: list[str]
+    edges: list[TopologyEdge]
+
+
+class NeighbourCamera(_Wire):
+    camera: str
+    zones: list[str]
+    transitions: dict[str, TransitionStatsOut]
+
+
+class CameraNeighboursResponse(_Wire):
+    camera: str
+    neighbours: list[NeighbourCamera]

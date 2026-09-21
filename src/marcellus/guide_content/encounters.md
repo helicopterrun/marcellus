@@ -103,3 +103,13 @@ Each member also carries a best-effort direction guess -- see
 [Observations](/guide/investigation) for the `first_zone`/`last_zone`/
 `direction`/`heading_deg`/`dir_source` fields and the `/v1/observations`
 read API that surfaces atoms directly instead of grouped by encounter.
+
+## Camera topology
+
+See [Observations](/guide/investigation)'s "Camera topology" section for
+the learned per-camera-pair transition times (`transitions_enabled`,
+`transition_min_samples`, `transition_max_sample_s`,
+`transition_learn_interval_s`, `transition_learn_window_days`,
+`transition_default_s`, `transition_overrides`, `use_learned_gaps`,
+`transition_slack`) and the `/v1/topology` / `/v1/cameras/{camera}/
+neighbours` read APIs.

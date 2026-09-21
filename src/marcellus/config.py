@@ -647,6 +647,53 @@ class EncountersSection(BaseModel):
     # encounters are never pruned regardless of age.
     retention_days: int = 30
 
+    # Camera topology (M2, docs/encounters.md "Camera topology"): learn
+    # per-camera-pair, per-label-family transition times from linked
+    # encounters and store them in `camera_transitions`. Off by default --
+    # this only writes `camera_transitions`, nothing downstream reads it yet
+    # (see `use_learned_gaps`).
+    transitions_enabled: bool = False
+
+    # Minimum number of samples a camera-pair/family edge needs before the
+    # learner trusts its own percentiles ('learned'); below this it writes
+    # `transition_default_s` instead ('default'), with the true (sub-
+    # threshold) sample count recorded.
+    transition_min_samples: int = 8
+
+    # Discard a transition sample whose gap exceeds this many seconds --
+    # keeps one very slow, atypical crossing from skewing the percentiles.
+    transition_max_sample_s: float = 180.0
+
+    # Minimum interval (seconds) between learning scans -- the scan is a
+    # full read over `encounter_members` for the window below, so it runs on
+    # its own cadence inside `reconcile()`, not every cycle.
+    transition_learn_interval_s: float = 3600.0
+
+    # How far back (days) the learning scan looks for transition samples.
+    transition_learn_window_days: float = 14.0
+
+    # Fallback {p10, p50, p90} (seconds) written for a camera-pair/family
+    # edge with fewer than `transition_min_samples` samples.
+    transition_default_s: dict[str, float] = Field(
+        default_factory=lambda: {"p10": 2.0, "p50": 15.0, "p90": 60.0}
+    )
+
+    # Manual overrides for specific transitions, keyed `"camA>camB"` (applies
+    # to every label family) or `"camA>camB:family"` (family-specific, wins
+    # over the unqualified key) -- each value a {p10, p50, p90} mapping.
+    # Written with `source='config'`, taking precedence over learned stats.
+    transition_overrides: dict[str, dict[str, float]] = Field(default_factory=dict)
+
+    # Whether the linker reads `camera_transitions` when deciding adjacency
+    # gaps. No effect yet -- added now so the schema/learner can ship ahead
+    # of the linker change that will consume it (M3).
+    use_learned_gaps: bool = False
+
+    # Multiplier applied to a learned p90 when `use_learned_gaps` is on, to
+    # allow slack beyond the observed 90th percentile. No effect yet -- see
+    # `use_learned_gaps`.
+    transition_slack: float = 1.5
+
 
 class PushSection(BaseModel):
     """Push notifications (docs/push-notifications.md).

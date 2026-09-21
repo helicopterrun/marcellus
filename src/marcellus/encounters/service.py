@@ -19,6 +19,7 @@ from marcellus.encounters import store
 from marcellus.encounters.adjacency import Adjacency
 from marcellus.encounters.linker import Atom, LinkerConfig, apply, decide, normalise_labels
 from marcellus.encounters.observations import Direction, load_direction
+from marcellus.encounters.transitions import learn, transition_config_from_settings
 from marcellus.push.models import ReviewEvent
 
 logger = logging.getLogger(__name__)
@@ -455,6 +456,8 @@ class EncounterService:
             if atoms:
                 store.set_watermark(sidecar_conn, max(a.start_time for a in atoms))
 
+            self._maybe_learn_transitions(sidecar_conn, now)
+
             if now - (self._last_prune_at or 0.0) >= 3600.0:
                 retention_days = self.settings.encounters.retention_days
                 pruned = store.prune(sidecar_conn, now, retention_days)
@@ -481,6 +484,36 @@ class EncounterService:
         finally:
             frigate_conn.close()
             sidecar_conn.close()
+
+    def _maybe_learn_transitions(self, conn: sqlite3.Connection, now: float) -> None:
+        """Camera topology (M2): run the learning scan at most every
+        `transition_learn_interval_s`, throttled via `encounter_state`
+        (`transitions_learned_at`) so a restart doesn't relearn immediately.
+        Never raises into `reconcile` -- a learning failure must never block
+        the linking cycle it rides along with."""
+        enc = self.settings.encounters
+        if not enc.transitions_enabled:
+            return
+        try:
+            last = store.get_state_float(conn, "transitions_learned_at")
+            if last is not None and now - last < enc.transition_learn_interval_s:
+                return
+            cfg = transition_config_from_settings(self.settings)
+            start = time.monotonic()
+            rows = learn(
+                conn,
+                adjacency=self.adjacency,
+                cfg=cfg,
+                window_s=enc.transition_learn_window_days * 86400.0,
+                now=now,
+            )
+            elapsed_ms = (time.monotonic() - start) * 1000.0
+            store.set_state_float(conn, "transitions_learned_at", now)
+            logger.info(
+                "encounters: transitions learned %d row(s) in %.1fms", rows, elapsed_ms
+            )
+        except Exception:  # noqa: BLE001 -- learning must never break reconcile
+            logger.exception("encounters: transition learning failed")
 
     def status(self) -> dict[str, object]:
         """Status summary for `/healthz`."""
