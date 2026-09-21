@@ -1,7 +1,7 @@
 ---
 title: Settings
-section: sidecar
-order: 5
+section: notifications
+order: 2
 routes: ["/settings"]
 config: ["watchdog", "proxy"]
 ---
@@ -111,5 +111,5 @@ Suggested continuations' own weights and score thresholds
 (`continuation_w_topo`, `continuation_w_time`, `continuation_w_direction`,
 `continuation_w_class`, `continuation_min_score`, `continuation_likely_score`)
 live under the tuning panel's Encounters section and are covered in
-[Investigation](/guide/investigation) — they never bucket a machine
+[Camera topology](/guide/topology) -- they never bucket a machine
 prediction as `confirmed`, whatever the score.
