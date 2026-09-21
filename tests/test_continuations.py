@@ -140,6 +140,25 @@ def test_stats_none_also_caps_the_time_factor() -> None:
     assert capped <= uncapped
 
 
+def test_negative_elapsed_clamps_to_zero_and_notes_overlap() -> None:
+    """An overlapping hand-off (candidate starts before the source atom
+    ends) is an early arrival, not a penalty case: -2s and -20s should score
+    identically to a 0s elapsed (clamped), and the why string should read
+    honestly as an overlap rather than a typical-time note."""
+    small_overlap, why_small = score_candidate(
+        _SOURCE, "shed", "person", -2.0, _LEARNED, _ADJ_WITH_ZONES, _CFG
+    )
+    big_overlap, why_big = score_candidate(
+        _SOURCE, "shed", "person", -20.0, _LEARNED, _ADJ_WITH_ZONES, _CFG
+    )
+    zero_elapsed, _ = score_candidate(
+        _SOURCE, "shed", "person", 0.0, _LEARNED, _ADJ_WITH_ZONES, _CFG
+    )
+    assert small_overlap == zero_elapsed == big_overlap
+    assert any("overlapped 2s" in w for w in why_small)
+    assert any("overlapped 20s" in w for w in why_big)
+
+
 # --------------------------------------------------------------------------
 # direction (D) factor
 # --------------------------------------------------------------------------

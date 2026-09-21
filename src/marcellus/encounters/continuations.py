@@ -80,23 +80,31 @@ def _time_factor(
     if elapsed_s is None:
         why = f"typical {st.p50:.0f}s" if st.source == "learned" else "prediction window"
         return 1.0, why
+    overlapped = elapsed_s < 0
+    # Overlapping hand-offs (candidate starts before the source atom ends)
+    # are an early arrival, not a penalty case -- clamp to 0 so a -1s and a
+    # -20s overlap score identically instead of decaying further negative.
+    e_input = max(0.0, elapsed_s)
     p10, p90 = st.p10, st.p90
-    if p10 <= elapsed_s <= p90:
+    if p10 <= e_input <= p90:
         e = 1.0
-    elif elapsed_s < p10:
+    elif e_input < p10:
         e = cfg.early_floor if p10 <= 0 else cfg.early_floor + (1.0 - cfg.early_floor) * (
-            elapsed_s / p10
+            e_input / p10
         )
     else:
         late_edge = p90 * cfg.late_factor
         e = (
             0.0
             if late_edge <= p90
-            else max(0.0, 1.0 - (elapsed_s - p90) / (late_edge - p90))
+            else max(0.0, 1.0 - (e_input - p90) / (late_edge - p90))
         )
     if stats is None or stats.source != "learned":
         e = min(e, cfg.unlearned_time_cap)
-    why = f"typical {st.p50:.0f}s" if st.source == "learned" else "unlearned typical time"
+    if overlapped:
+        why = f"overlapped {-elapsed_s:.0f}s"
+    else:
+        why = f"typical {st.p50:.0f}s" if st.source == "learned" else "unlearned typical time"
     return max(0.0, min(1.0, e)), why
 
 
@@ -182,6 +190,23 @@ def predict_window(
         p10=0.0, p50=0.0, p90=0.0, samples=0, source="default"
     )
     return (source_end + st.p10, source_end + st.p90 * cfg.max_window_factor)
+
+
+def candidate_search_window(
+    source_start: float, source_end: float, stats: TransitionStats | None, cfg: ContinuationConfig
+) -> tuple[float, float]:
+    """[source.start_time, source.end + p90 * max_window_factor] -- the
+    window `members_in_window` is searched in for an EXISTING candidate
+    member, wider than `predict_window` on purpose: it starts at the
+    source's own start, not its end, so an overlapping hand-off (both
+    cameras see the entity at once, e.g. a linker-joined sibling that starts
+    while the source is still being seen) is found as a candidate instead of
+    only ever showing up as a pure prediction. `predict_window` is still the
+    window reported to the app for a pure prediction."""
+    st = stats if stats is not None else TransitionStats(
+        p10=0.0, p50=0.0, p90=0.0, samples=0, source="default"
+    )
+    return (source_start, source_end + st.p90 * cfg.max_window_factor)
 
 
 def continuation_config_from_settings(settings: object) -> ContinuationConfig:
