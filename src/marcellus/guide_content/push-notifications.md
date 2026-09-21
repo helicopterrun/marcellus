@@ -111,11 +111,24 @@ goes out ungrouped rather than late.
 
 The `push:` config section:
 
-- `enabled` and `transport` — `relay` for real APNs delivery via the push
+- `enabled` (default `false`) and `transport` — push is off until you flip
+  `enabled`; `transport` picks `relay` for real APNs delivery via the push
   relay, `mock` for development.
 - `relay_base_url` — where the relay lives.
-- `mqtt` host/port — the sidecar must see Frigate's MQTT broker, or no
-  events arrive at all.
+- `mqtt_host` — hostname or IP of Frigate's MQTT broker; the sidecar must be
+  able to reach it or no events arrive at all.
+- `mqtt_queue_max` — hard cap on the MQTT consumer queue depth (default
+  2000).
+- `mqtt_topic_reviews` — the broker topic the sidecar subscribes to for
+  Frigate review items; this is the sole authority on whether anything is
+  push-worthy.
+- `mqtt_topic_available` — the broker topic carrying Frigate's own
+  online/offline availability payload.
+- `capture_path` — file path the MQTT flight recorder writes its rolling
+  JSONL capture to; empty (default) uses `mqtt-capture.jsonl` next to
+  `push_settings_path`.
+- `backfill_lookback_s` (default 60s) — how far back, in seconds, to
+  back-fill on reconnect after an offline gap.
 - `card_resolution_s` — an open Live Activity "card" idle this long (default
   10 minutes) is closed silently, covering a resolve that never arrived
   (e.g. a dropped Frigate `end` or a failed write) so it doesn't leak open
@@ -123,62 +136,15 @@ The `push:` config section:
 - `server_id` — short opaque id of this sidecar instance carried in APNs
   payloads, so a device with more than one server registered routes the
   redeem fetch to the right one. Generated at startup if left blank.
-- `mqtt_host` / `mqtt_port` / `mqtt_username` / `mqtt_password` /
-  `mqtt_client_id` — how the sidecar connects to Frigate's MQTT broker.
-- `mqtt_queue_max` — hard cap on the MQTT consumer queue depth (default
-  2000).
-- `mqtt_topic_reviews` / `mqtt_topic_available` / `mqtt_topic_events` — the
-  broker topics subscribed to (reviews is the sole push-worthiness
-  authority; events is dwell input only).
-- `capture_enabled` / `capture_path` / `capture_max_bytes` — the MQTT
-  flight recorder: a rolling JSONL capture of every consumed message, so a
-  real situation can be replayed exactly (default on, size-rotated at
-  64MiB).
-- `reconnect_backoff_s` / `reconnect_backoff_max_s` — MQTT reconnect
-  backoff, initial and capped (default 2.0s / 60.0s).
-- `offline_silence_s` — how long without broker traffic before Frigate is
-  treated as possibly offline and the gap is back-filled on reconnect
-  (default 60s).
-- `backfill_lookback_s` — how far back to back-fill on reconnect (default
-  60s).
-- `relay_timeout_s` — per-attempt timeout for a relay-transport send
-  (default 5.0s).
-- `relay_retry_attempts` — total send attempts for retryable push kinds
-  (default 3).
-- `relay_breaker_failures` / `relay_breaker_open_s` — consecutive relay
-  failures that open the circuit breaker, and how long it stays open before
-  a half-open probe (default 3 / 30.0s).
 - `handle_ttl_s` — lifetime of a v1 thumbnail-redemption handle (default
   3600s).
-- `situation_handle_ttl_s` — lifetime of a situation handle with its
-  pre-warmed thumbnail (default 86400s / 24h).
 - `rate_limit_window_s` — window used for push rate-limiting (default
   3600s).
-- `thumbnail_max_edge` / `thumbnail_quality` / `thumbnail_timeout_s` — size,
-  JPEG quality and fetch timeout for a pre-warmed notification thumbnail
-  (default 320px / 60 / 5.0s).
 - `dwell_source` — which MQTT topic drives a situation's loiter/dwell
   clock, `events` (default) or `reviews`.
-- `activity_resolution_s` — quiet period after which a Present situation
-  counts as resolved (default 30s).
-- `activity_dismissal_tail_s` — how long a Live Activity lingers on screen
-  after the end push (default 30s).
-- `activity_reap_after_s` — how long an unresolved activity is force-reaped
-  (default 300s).
-- `activity_sweep_interval_s` — how often the activity-resolution sweeper
-  runs (default 5s).
-- `delivery_enabled` — turns on the attention-ladder delivery pipeline
-  (card state + alert/silent pushes) on top of `enabled` (default on).
 - `delivery_zone_place_map` — superseded by the user-editable
   `settings.zone_classes` in the app; no longer read, kept only for
   backward-compatible YAML.
-- `delivery_urgent_resound_s` / `delivery_urgent_resound_enabled` /
-  `delivery_urgent_resound_max` — an unhandled urgent card may re-alert
-  once this long after its last sound (default 120s, on, cap 5).
-- `delivery_resound_sweep_interval_s` — how often the urgent re-sound sweep
-  runs (default 15s).
-- `delivery_backfill_staleness_s` — backfilled events older than this are
-  discarded rather than replayed (default 300s).
 - `delivery_la_stale_s` — Live Activity stale-date offset from now (default
   900s).
 - `relay_key` — auth key sent as the `x-relay-key` header on every relay
@@ -186,8 +152,6 @@ The `push:` config section:
 - `external_base_url` — phone-reachable base URL for this sidecar instance,
   used to build card-contract media URLs. Empty (default) omits `media`
   entirely.
-- `delivery_la_enabled` — master switch for card Live Activities,
-  independent of `delivery_enabled` (default on).
 - `delivery_la_families` — superseded by the user-editable
   `settings.live_activities` in the app; no longer read, kept only for
   backward-compatible YAML.
@@ -196,6 +160,66 @@ The `push:` config section:
   `config/push_settings.json`).
 - `floorplan_path` — where the uploaded floorplan/site image for the
   `/cameras` map is stored (default `config/floorplan`).
+
+### MQTT connection
+
+| Field | Default | Effect |
+|---|---|---|
+| `mqtt_client_id` | `marcellus-push` | Client id the sidecar identifies itself with to the Frigate MQTT broker. |
+| `mqtt_port` | `1883` | TCP port of the Frigate MQTT broker. |
+| `mqtt_username` | none | Broker username, if the broker requires auth; unset connects anonymously. |
+| `mqtt_password` | none | Broker password paired with `mqtt_username`. |
+| `mqtt_topic_events` | `frigate/events` | Topic subscribed for dwell/loiter timing only — `frigate/reviews` stays the sole authority on whether anything is push-worthy. |
+| `reconnect_backoff_s` | `2.0` | Initial delay, in seconds, before retrying a dropped MQTT connection. |
+| `reconnect_backoff_max_s` | `60.0` | Cap, in seconds, the reconnect backoff grows to. |
+| `offline_silence_s` | `60.0` | How long without any broker traffic before Frigate is treated as possibly offline and the gap is back-filled on reconnect. |
+
+### MQTT flight recorder
+
+| Field | Default | Effect |
+|---|---|---|
+| `capture_enabled` | `true` | Turns on the rolling JSONL capture of every consumed reviews/events MQTT message, so a real situation can be replayed exactly via `tools/replay_capture.py`. |
+| `capture_max_bytes` | `67108864` | Size, in bytes, the capture file is rotated at (one `.1` sibling kept); default 64MiB. |
+
+### Relay transport
+
+| Field | Default | Effect |
+|---|---|---|
+| `relay_base_url` | the shared `elsinore-push-relay` worker | Base URL the sidecar posts content-free templated alerts to. Override only when running your own relay fork under your own bundle id/team. |
+| `relay_timeout_s` | `5.0` | Per-attempt timeout, in seconds, for a relay-transport send. |
+| `relay_retry_attempts` | `3` | Total send attempts for retryable push kinds (push, Live Activity start/end); `1` disables retry. Live Activity update/situation/test always send once regardless. |
+| `relay_breaker_failures` | `3` | Consecutive transport failures (exception or 5xx; 429/4xx never count) that open the circuit breaker. |
+| `relay_breaker_open_s` | `30.0` | How long, in seconds, the breaker stays open before a single half-open probe attempt. |
+
+### Delivery and resound
+
+| Field | Default | Effect |
+|---|---|---|
+| `delivery_enabled` | `true` | Turns on the attention-ladder delivery pipeline (card state plus alert/silent pushes) on top of `enabled`. |
+| `delivery_backfill_staleness_s` | `300.0` | Backfilled events older than this, in seconds, are discarded rather than replayed. |
+| `delivery_urgent_resound_enabled` | `true` | Lets an unhandled urgent card re-alert once after `delivery_urgent_resound_s`. |
+| `delivery_urgent_resound_s` | `120.0` | How long, in seconds, an unhandled urgent card waits since its last sound before it may re-alert. |
+| `delivery_urgent_resound_max` | `5` | Cap on the number of times a single card may re-sound. |
+| `delivery_resound_sweep_interval_s` | `15.0` | How often, in seconds, the urgent re-sound sweep runs. |
+
+### Live Activity lifecycle
+
+| Field | Default | Effect |
+|---|---|---|
+| `delivery_la_enabled` | `true` | Master switch for card Live Activities, independent of `delivery_enabled`. |
+| `activity_resolution_s` | `30.0` | Quiet period, in seconds, after which a Present situation counts as resolved even without Frigate's own `end`. |
+| `activity_dismissal_tail_s` | `30.0` | How long, in seconds, a Live Activity lingers on screen after the end push. |
+| `activity_reap_after_s` | `300.0` | How long, in seconds, an unresolved activity is force-reaped rather than left open forever. |
+| `activity_sweep_interval_s` | `5.0` | How often, in seconds, the activity-resolution sweeper runs. |
+| `situation_handle_ttl_s` | `86400.0` | Lifetime, in seconds, of a situation handle with its pre-warmed thumbnail (24h). |
+
+### Notification thumbnail capture
+
+| Field | Default | Effect |
+|---|---|---|
+| `thumbnail_max_edge` | `320` | Long-edge pixel size a pre-warmed notification thumbnail is resized to; the notification service extension runs under a tight memory ceiling, so bigger buys nothing a notification can show. |
+| `thumbnail_quality` | `60` | JPEG quality used when re-encoding the pre-warmed thumbnail. |
+| `thumbnail_timeout_s` | `5.0` | Timeout, in seconds, for fetching the source snapshot to build the thumbnail from. |
 
 Devices register themselves: install Elsinore, complete onboarding, and the
 phone appears in the device table with a **Test** button. Pressing it now
