@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -138,6 +139,55 @@ async def test_link_now_after_worker_returns_the_workers_encounter(tmp_path: Pat
         conn.close()
 
     assert await asyncio.to_thread(service.link_now, ev) == stored
+
+
+@pytest.mark.asyncio
+async def test_link_now_concurrent_worker_and_push_paths_agree(tmp_path: Path) -> None:
+    """The actual PR #80 race: `_link_review` (live MQTT worker) and
+    `link_now` (push delivery path) both run the same brand-new review on
+    separate threads/connections at once. Before the `store.upsert_atom`
+    `BEGIN IMMEDIATE` fix, the loser's INSERT could raise a UNIQUE
+    constraint error, which `link_now` swallowed and turned into `None` --
+    dropping the encounter id from the push payload. Both paths must agree
+    on one encounter id and there must be exactly one membership row."""
+    settings = _settings(tmp_path)
+    service = EncounterService(
+        settings, adjacency=Adjacency(edges=frozenset()), now=lambda: 100.0
+    )
+    ev = ReviewEvent(
+        review_id="r1", camera="alley_wide", severity="alert", labels=("person",),
+        msg_type="new", track_ids=("ev1",), start_time=100.0,
+    )
+
+    barrier = threading.Barrier(2)
+    link_now_result: list[str | None] = [None]
+
+    def run_worker() -> None:
+        barrier.wait(timeout=5)
+        service._link_review(ev)
+
+    def run_push() -> None:
+        barrier.wait(timeout=5)
+        link_now_result[0] = service.link_now(ev)
+
+    t1 = threading.Thread(target=run_worker)
+    t2 = threading.Thread(target=run_push)
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert link_now_result[0] is not None
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT encounter_id FROM encounter_members WHERE atom_id = 'r1'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["encounter_id"] == link_now_result[0]
+    finally:
+        conn.close()
 
 
 @pytest.mark.asyncio

@@ -258,53 +258,146 @@ def upsert_atom(
     the empty Direction, same as a genuinely undeterminable one; this upsert
     must never fail because direction derivation couldn't.
     """
-    existing = _member_row(conn, atom.atom_id)
-    labels_json = json.dumps(list(atom.labels))
-    zones_json = json.dumps(list(atom.zones))
-    event_ids_json = json.dumps(list(atom.event_ids))
-    sub_labels_json = json.dumps(list(atom.sub_labels))
-    dir_ = direction if direction is not None else _EMPTY_DIRECTION
+    # `commit=True` is the standalone-caller mode (live worker / push path,
+    # both via `asyncio.to_thread` on independent connections). Python's
+    # sqlite3 module does not BEGIN ahead of a bare SELECT, so without an
+    # explicit transaction here two callers can both read `_member_row` as
+    # None for the same brand-new atom_id, then both attempt the INSERT --
+    # the second raises `UNIQUE constraint failed: encounter_members.atom_id`
+    # and its caller (`service.link_now`) returns None, dropping the
+    # encounter id from that push card. `BEGIN IMMEDIATE` takes the write
+    # lock up front so the read-then-write is one serialised unit; with
+    # `busy_timeout = 3000` (db.py) the second writer just waits for the
+    # first to commit, then reads the now-committed row and takes the UPDATE
+    # path instead of racing the INSERT.
+    #
+    # `commit=False` is the reconciler's mode: it already opened its own
+    # `BEGIN` around the whole batch (see `run_reconciler`), so BEGINning
+    # again here would error ("cannot start a transaction within a
+    # transaction"). `conn.in_transaction` covers both that case and any
+    # other caller that happens to already be mid-transaction.
+    began_here = False
+    if commit and not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+        began_here = True
+    try:
+        existing = _member_row(conn, atom.atom_id)
+        labels_json = json.dumps(list(atom.labels))
+        zones_json = json.dumps(list(atom.zones))
+        event_ids_json = json.dumps(list(atom.event_ids))
+        sub_labels_json = json.dumps(list(atom.sub_labels))
+        dir_ = direction if direction is not None else _EMPTY_DIRECTION
 
-    if existing is not None:
-        current_encounter_id = str(existing["encounter_id"])
-        # A human decision (split/pin) locks this atom's membership -- it is
-        # never re-homed by a later decide()/reconcile pass, sealed donor or
-        # not. `pin_atom`/`split_atom` are the only ways to move it after
-        # that; see docs/encounters.md "Correcting encounters".
-        human_locked = existing["link_reason"] in ("pinned", "split")
-        sealed_rehome = (
-            not human_locked
-            and decision.encounter_id is not None
-            and decision.encounter_id != current_encounter_id
-            and _encounter_sealed(conn, current_encounter_id)
-        )
-        founder_rehome = (
-            not human_locked
-            and not sealed_rehome
-            and decision.encounter_id is not None
-            and decision.encounter_id != current_encounter_id
-            and decision.reason != "new"
-            and not _encounter_sealed(conn, current_encounter_id)
-            and existing["link_reason"] == "new"
-            and _member_count(conn, current_encounter_id) == 1
-        )
-        if sealed_rehome or founder_rehome:
-            encounter_id = decision.encounter_id
-            assert encounter_id is not None
+        if existing is not None:
+            current_encounter_id = str(existing["encounter_id"])
+            # A human decision (split/pin) locks this atom's membership -- it is
+            # never re-homed by a later decide()/reconcile pass, sealed donor or
+            # not. `pin_atom`/`split_atom` are the only ways to move it after
+            # that; see docs/encounters.md "Correcting encounters".
+            human_locked = existing["link_reason"] in ("pinned", "split")
+            sealed_rehome = (
+                not human_locked
+                and decision.encounter_id is not None
+                and decision.encounter_id != current_encounter_id
+                and _encounter_sealed(conn, current_encounter_id)
+            )
+            founder_rehome = (
+                not human_locked
+                and not sealed_rehome
+                and decision.encounter_id is not None
+                and decision.encounter_id != current_encounter_id
+                and decision.reason != "new"
+                and not _encounter_sealed(conn, current_encounter_id)
+                and existing["link_reason"] == "new"
+                and _member_count(conn, current_encounter_id) == 1
+            )
+            if sealed_rehome or founder_rehome:
+                encounter_id = decision.encounter_id
+                assert encounter_id is not None
+                _ensure_encounter(conn, encounter_id, atom, now)
+                existing_end_time = existing["end_time"]
+                end_time = atom.end_time if atom.end_time is not None else existing_end_time
+                conn.execute(
+                    "UPDATE encounter_members SET encounter_id = ?, camera = ?, start_time = ?, "
+                    "end_time = ?, severity = ?, labels_json = ?, zones_json = ?, "
+                    "event_ids_json = ?, sub_labels_json = ?, link_reason = ?, confidence = ?, "
+                    "joined_at = ?, first_zone = ?, last_zone = ?, direction = ?, "
+                    "heading_deg = ?, dir_source = ? WHERE atom_id = ?",
+                    (
+                        encounter_id,
+                        atom.camera,
+                        atom.start_time,
+                        end_time,
+                        atom.severity,
+                        labels_json,
+                        zones_json,
+                        event_ids_json,
+                        sub_labels_json,
+                        decision.reason,
+                        decision.confidence,
+                        now,
+                        dir_.first_zone,
+                        dir_.last_zone,
+                        dir_.direction,
+                        dir_.heading_deg,
+                        dir_.source,
+                        atom.atom_id,
+                    ),
+                )
+                _donor_after_move(conn, current_encounter_id, now)
+            else:
+                encounter_id = current_encounter_id
+                existing_end_time = existing["end_time"]
+                end_time = atom.end_time if atom.end_time is not None else existing_end_time
+                conn.execute(
+                    "UPDATE encounter_members SET camera = ?, start_time = ?, end_time = ?, "
+                    "severity = ?, labels_json = ?, zones_json = ?, event_ids_json = ?, "
+                    "sub_labels_json = ?, first_zone = ?, last_zone = ?, direction = ?, "
+                    "heading_deg = ?, dir_source = ? WHERE atom_id = ?",
+                    (
+                        atom.camera,
+                        atom.start_time,
+                        end_time,
+                        atom.severity,
+                        labels_json,
+                        zones_json,
+                        event_ids_json,
+                        sub_labels_json,
+                        dir_.first_zone,
+                        dir_.last_zone,
+                        dir_.direction,
+                        dir_.heading_deg,
+                        dir_.source,
+                        atom.atom_id,
+                    ),
+                )
+        else:
+            # Defense in depth: `service._link_review` already refuses to link a
+            # brand-new atom with start_time <= 0 (it waits for the reconciler,
+            # which always sources start_time from Frigate's NOT NULL
+            # reviewsegment column), but a member must never be *written* with
+            # start_time <= 0 regardless of caller -- that's what produced the
+            # ~465 zero-start rows `encounters repair` cleans up. See
+            # docs/encounters.md "Repair".
+            if atom.start_time <= 0:
+                raise ValueError(
+                    f"upsert_atom: refusing to insert new member {atom.atom_id!r} with "
+                    f"start_time={atom.start_time} <= 0"
+                )
+            encounter_id = decision.encounter_id or uuid.uuid4().hex
             _ensure_encounter(conn, encounter_id, atom, now)
-            existing_end_time = existing["end_time"]
-            end_time = atom.end_time if atom.end_time is not None else existing_end_time
             conn.execute(
-                "UPDATE encounter_members SET encounter_id = ?, camera = ?, start_time = ?, "
-                "end_time = ?, severity = ?, labels_json = ?, zones_json = ?, "
-                "event_ids_json = ?, sub_labels_json = ?, link_reason = ?, confidence = ?, "
-                "joined_at = ?, first_zone = ?, last_zone = ?, direction = ?, "
-                "heading_deg = ?, dir_source = ? WHERE atom_id = ?",
+                "INSERT INTO encounter_members (atom_id, encounter_id, camera, start_time, "
+                "end_time, severity, labels_json, zones_json, event_ids_json, sub_labels_json, "
+                "link_reason, confidence, joined_at, first_zone, last_zone, direction, "
+                "heading_deg, dir_source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
+                    atom.atom_id,
                     encounter_id,
                     atom.camera,
                     atom.start_time,
-                    end_time,
+                    atom.end_time,
                     atom.severity,
                     labels_json,
                     zones_json,
@@ -318,84 +411,18 @@ def upsert_atom(
                     dir_.direction,
                     dir_.heading_deg,
                     dir_.source,
-                    atom.atom_id,
                 ),
             )
-            _donor_after_move(conn, current_encounter_id, now)
-        else:
-            encounter_id = current_encounter_id
-            existing_end_time = existing["end_time"]
-            end_time = atom.end_time if atom.end_time is not None else existing_end_time
-            conn.execute(
-                "UPDATE encounter_members SET camera = ?, start_time = ?, end_time = ?, "
-                "severity = ?, labels_json = ?, zones_json = ?, event_ids_json = ?, "
-                "sub_labels_json = ?, first_zone = ?, last_zone = ?, direction = ?, "
-                "heading_deg = ?, dir_source = ? WHERE atom_id = ?",
-                (
-                    atom.camera,
-                    atom.start_time,
-                    end_time,
-                    atom.severity,
-                    labels_json,
-                    zones_json,
-                    event_ids_json,
-                    sub_labels_json,
-                    dir_.first_zone,
-                    dir_.last_zone,
-                    dir_.direction,
-                    dir_.heading_deg,
-                    dir_.source,
-                    atom.atom_id,
-                ),
-            )
-    else:
-        # Defense in depth: `service._link_review` already refuses to link a
-        # brand-new atom with start_time <= 0 (it waits for the reconciler,
-        # which always sources start_time from Frigate's NOT NULL
-        # reviewsegment column), but a member must never be *written* with
-        # start_time <= 0 regardless of caller -- that's what produced the
-        # ~465 zero-start rows `encounters repair` cleans up. See
-        # docs/encounters.md "Repair".
-        if atom.start_time <= 0:
-            raise ValueError(
-                f"upsert_atom: refusing to insert new member {atom.atom_id!r} with "
-                f"start_time={atom.start_time} <= 0"
-            )
-        encounter_id = decision.encounter_id or uuid.uuid4().hex
-        _ensure_encounter(conn, encounter_id, atom, now)
-        conn.execute(
-            "INSERT INTO encounter_members (atom_id, encounter_id, camera, start_time, "
-            "end_time, severity, labels_json, zones_json, event_ids_json, sub_labels_json, "
-            "link_reason, confidence, joined_at, first_zone, last_zone, direction, "
-            "heading_deg, dir_source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                atom.atom_id,
-                encounter_id,
-                atom.camera,
-                atom.start_time,
-                atom.end_time,
-                atom.severity,
-                labels_json,
-                zones_json,
-                event_ids_json,
-                sub_labels_json,
-                decision.reason,
-                decision.confidence,
-                now,
-                dir_.first_zone,
-                dir_.last_zone,
-                dir_.direction,
-                dir_.heading_deg,
-                dir_.source,
-            ),
-        )
 
-    recompute(conn, encounter_id)
-    conn.execute("UPDATE encounters SET updated_at = ? WHERE id = ?", (now, encounter_id))
-    if commit:
-        conn.commit()
-    return encounter_id
+        recompute(conn, encounter_id)
+        conn.execute("UPDATE encounters SET updated_at = ? WHERE id = ?", (now, encounter_id))
+        if commit:
+            conn.commit()
+        return encounter_id
+    except Exception:
+        if began_here:
+            conn.rollback()
+        raise
 
 
 def recompute(conn: sqlite3.Connection, encounter_id: str) -> None:
