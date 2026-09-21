@@ -205,6 +205,58 @@ with disjoint zone sets (symmetric at read time — declaring one direction
 is enough). Resolution is asymmetric: an aliased track resolving drops its
 alias silently; only the owning track's resolve closes the card.
 
+### Encounter-aware push
+
+Encounters (`docs/encounters.md`) already know that the alley-wide review
+and the stairway-wide review three seconds later are one crossing. Push
+uses that directly. `PushEngine.handle_event` resolves the review's
+encounter *synchronously* before delivery — `EncounterService.link_now`
+run through `asyncio.to_thread` under
+`push.encounter_link_timeout_s` (0.25s) — because a payload needs the id
+before it is built. On timeout or error the push goes out exactly as it did
+before this feature (per-camera card, camera `thread-id`) and the log is
+rate-limited to once a minute; the ordinary queued `on_review` worker links
+the review a moment later regardless, and the two paths are idempotent
+(`store.upsert_atom` only ever re-homes a sealed-donor or lone-founder
+atom).
+
+Two flags, independently useful:
+
+- `push.encounter_threading` (default **on**) — presentation only. The APNs
+  `thread-id` becomes the encounter id instead of the camera, so every
+  camera of one crossing collapses into a single Notification Center group,
+  and the payload carries `encounter_id`. Cards stay per-camera.
+- `push.encounter_merge` (default **off**) — routing. A later camera's
+  review of the same encounter is aliased onto the card the first camera
+  already opened: one card, one collapse id, one notification that updates
+  in place. With the flag off the would-be merge is logged at DEBUG
+  (`"encounter_merge would have routed <track> onto <card_key>"`) so real
+  duplicates can be counted against it before switching it on — the same
+  validation shape `geometric_dedup` used.
+
+Routing order in `_resolve_card_for_track`: track alias → **encounter** →
+zone/geo dedup → natural key. The encounter step is gated on subject
+family (`encounters.linker.family_of` over the card's stored label and the
+event's), so the person and the car they arrived in can share an encounter
+without sharing a card. A card that has already resolved or closed is never
+a merge target: the encounter's story does not reopen — the new review
+mints its own card and is grouped by `thread-id` instead.
+
+An encounter-stamped card records `cameras_path` (ordered distinct cameras,
+first-seen order, persisted as `cameras_path_json`). Once it holds two or
+more entries the notification body *becomes* the path — `"Alley Wide →
+Stairway Wide → Gate Walkway"`, capped at four entries with a leading `…` —
+replacing the `" · also on X"` suffix, which stays for ordinary
+(non-encounter) zone/geo dedup merges. A camera-crossing update on an open
+card is an ordinary ENRICH (visible, no re-sound) unless the ladder itself
+says ESCALATE; no new mutation kind was added. `apns-collapse-id` remains
+the card key.
+
+`encounter_id` and `cameras_path` are additive payload fields (no `v` bump)
+and additive Live Activity content-state fields, exactly like
+`extra_stories`: both stay off the wire when absent, so a single-camera
+story's content state is byte-identical to before.
+
 ### Payload contract
 
 `docs/apns-payload-spec.md` is the versioned (`"v": 1`) contract:

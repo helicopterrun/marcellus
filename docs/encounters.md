@@ -310,6 +310,24 @@ class EncounterService:
   ordered consumer already serialises calls, so no extra locking.
 * `/healthz`: add `encounters: ok|disabled|error` plus last reconcile stats.
 
+## Encounter-aware push
+
+`EncounterService.link_now(ev) -> str | None` is `_link_review`'s body with
+its encounter id returned instead of discarded — the push pipeline's
+synchronous entry point. `_link_review` is now a thin wrapper that calls it
+and drops the result, so the queued worker and the push path cannot drift.
+It is wired in `server.py` as `PushEngine.encounter_link` (a plain callable,
+not the service object, so `push` never imports `encounters`), alongside the
+unchanged fire-and-forget `on_review` hook.
+
+The push side (`docs/push-notifications.md` "Encounter-aware push") uses the
+id for two things: the APNs `thread-id`, so one crossing is one Notification
+Center group (`push.encounter_threading`, on by default), and — behind
+`push.encounter_merge`, off by default — routing a later camera's review
+onto the card the first camera already opened, whose body then grows into
+the camera path. Encounters themselves are unchanged by this: push reads
+membership, never writes it.
+
 ## Routes (`routes/encounters.py`)
 
 HTML (same middleware auth as other admin pages, `base.html`, triage.css,

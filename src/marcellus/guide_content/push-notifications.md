@@ -69,6 +69,33 @@ outcomes-table cell directly, without needing a card to point at.
 the last review/decision/send timestamps, quiet-hours state, and registered
 device count — used by the Status page and the app's own health strip.
 
+## Encounter-aware notifications
+
+When one person walks past three cameras, that is one thing happening — not
+three. The sidecar's encounters feature already groups those reviews into a
+single crossing, and notifications use it.
+
+By default (`encounter_threading`) every notification from one crossing
+lands in the **same Notification Center group**, whichever camera saw it, and
+the notification carries the encounter so tapping through opens the
+Investigation screen on that crossing rather than on one camera's clip.
+
+Turn on `encounter_merge` and it goes further: instead of one notification
+per camera, you get **one notification that updates as the subject moves**.
+The title stays put; the body becomes the path — "Alley Wide → Stairway
+Wide → Gate Walkway" — and there is no second buzz for the same walk. It is
+off by default so you can watch the logs first; with it off, the sidecar
+simply records which notifications it *would* have merged.
+
+Two safeguards: a person and a vehicle in the same crossing never merge onto
+one notification (they are different subjects), and a crossing whose
+notification has already resolved never reopens — a new sighting starts a
+fresh notification, still grouped with the old one.
+
+`encounter_link_timeout_s` is how long a notification will wait for the
+crossing to be worked out (a quarter second). Past that the notification
+goes out ungrouped rather than late.
+
 ## Configuration
 
 The `push:` config section:
