@@ -234,7 +234,11 @@ gap_s` or span ≥ max_duration_s), `list_recent(conn, *, since, limit,
 camera=None)`, `get(conn, encounter_id)`, `decisions_for(conn, atom_id)`,
 `get_watermark/set_watermark`, `prune(conn, now, retention_days) -> dict`
 (deletes sealed encounters -- and their members/decisions -- past
-`retention_days`, one transaction).
+`retention_days`, one transaction). `purge_phantoms(sidecar_conn,
+frigate_conn, now, dry_run=False) -> dict` (drops `start_time <= 0` members
+with no matching Frigate `reviewsegment` row -- the push backfill's
+pre-fix phantom atoms -- via `remove_member`; one transaction, rolled back
+under `--dry-run`; CLI: `marcellus encounters purge-phantoms`).
 
 A live review message with `start_time <= 0` (Frigate occasionally sends
 `after.start_time` as 0/absent) is skipped for linking if no member row

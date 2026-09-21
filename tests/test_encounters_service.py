@@ -187,6 +187,37 @@ def test_reconcile_over_reviewsegment(tmp_path: Path) -> None:
         conn.close()
 
 
+async def test_observe_review_ignores_synthetic_events(tmp_path: Path) -> None:
+    """A `synthetic` event (the push backfill's /api/events phantoms) must
+    never enqueue -- defensive drop, on top of PushEngine.handle_event
+    already skipping the on_review hook for these."""
+    frigate_db = _reviewsegment_db(tmp_path)
+    now = time.time()
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()), now=lambda: now)
+
+    ev = ReviewEvent(
+        review_id="phantom1",
+        camera="alley-wide",
+        severity="alert",
+        labels=("person",),
+        msg_type="new",
+        track_ids=("ev1",),
+        start_time=0.0,
+        synthetic=True,
+    )
+    service.observe_review(ev)
+    assert service._queue.qsize() == 0
+    await service.process_pending()
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        row = conn.execute("SELECT * FROM encounter_members WHERE atom_id = 'phantom1'").fetchone()
+        assert row is None
+    finally:
+        conn.close()
+
+
 async def test_live_then_reconcile_agree_no_duplicates(tmp_path: Path) -> None:
     frigate_db = _reviewsegment_db(tmp_path)
     now = time.time()

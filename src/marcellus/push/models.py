@@ -50,6 +50,12 @@ class ReviewEvent:
     # leaves it null until the review item finalizes). encounters/service.py
     # prefers this real end over the live-hook's own wall clock when present.
     end_time: float | None = None
+    # Set for events synthesized from Frigate's /api/events (object tracking
+    # events, not review segments) by the push backfill after MQTT
+    # reconnect/staleness. These are not real review items -- no start_time,
+    # zones, or end -- and must never reach review-segment consumers such as
+    # encounters.
+    synthetic: bool = False
 
     def __post_init__(self) -> None:
         if not self.event_id:

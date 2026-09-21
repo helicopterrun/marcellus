@@ -288,7 +288,7 @@ class PushEngine:
         return await self.handle_event(event)
 
     async def handle_event(self, event: ReviewEvent) -> int:
-        if self.on_review is not None:
+        if self.on_review is not None and not event.synthetic:
             try:
                 self.on_review(event)
             except Exception:

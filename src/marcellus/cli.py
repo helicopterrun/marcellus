@@ -360,6 +360,33 @@ def encounters_prune() -> None:
     typer.echo(json.dumps(result))
 
 
+@encounters_app.command("purge-phantoms")
+def encounters_purge_phantoms(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report what would be removed only."),
+) -> None:
+    """Drop phantom encounter members synthesized by the pre-fix push
+    backfill (zero-start members with no matching Frigate `reviewsegment`
+    row)."""
+    import time
+
+    from marcellus import db
+    from marcellus.encounters import store
+
+    s = load_settings()
+    try:
+        frigate_conn = db.open_frigate_ro(s.frigate.db_path)
+    except Exception as exc:  # noqa: BLE001 -- never delete anything on a bad Frigate DB
+        typer.echo(f"encounters purge-phantoms: could not open Frigate DB: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    sidecar_conn = db.open_sidecar(s.sidecar.db_path)
+    try:
+        result = store.purge_phantoms(sidecar_conn, frigate_conn, time.time(), dry_run=dry_run)
+    finally:
+        sidecar_conn.close()
+        frigate_conn.close()
+    typer.echo(json.dumps(result))
+
+
 @face_capture_app.command("stats")
 def face_capture_stats(days: int = typer.Option(7, min=1)) -> None:
     """Counts by status/review plus the last-run heartbeat."""

@@ -158,7 +158,14 @@ class EncounterService:
         opening a sqlite connection here would risk a `busy_timeout` wait
         (up to 3s) stalling that whole loop whenever the reconciler happens
         to be mid-write against the same WAL file.
+
+        Defensive: `PushEngine.handle_event` already skips this hook for
+        synthetic events (backfilled from Frigate's /api/events, not real
+        review segments), but drop them here too in case this is ever called
+        directly.
         """
+        if ev.synthetic:
+            return
         try:
             self._queue.put_nowait(ev)
         except asyncio.QueueFull:
