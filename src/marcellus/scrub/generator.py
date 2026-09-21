@@ -1645,7 +1645,12 @@ async def generate_cycle(
             backfill_deadline if backfill_deadline is not None
             else started + scrub.live_edge_interval_s
         )
-        live_edge_deadline = tick_end - scrub.backfill_min_share_s
+        # Subtract Pass 3's reserve too: backfill's own floor sits at
+        # `deadline - reserve`, so a live edge that stops only
+        # `backfill_min_share_s` before the tick end would still hand backfill
+        # almost nothing (measured on prod: 20 s tick, 5 s reserve -> 1 s).
+        pass3_reserve = min(scrub.derive_time_reserve_s, scrub.backfill_time_budget_s / 2)
+        live_edge_deadline = tick_end - pass3_reserve - scrub.backfill_min_share_s
         start_le = profile.live_edge_cursor % len(cameras)
         order_le = cameras[start_le:] + cameras[:start_le]
         served_le = 0
