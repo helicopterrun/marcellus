@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class _Wire(BaseModel):
@@ -438,3 +438,37 @@ class TimelineResponse(_Wire):
     lanes: list[TimelineLane]
     encounters: list[EncounterSummary]
     truncated: bool
+
+
+# --------------------------------------------------------------------------
+# Suggested continuations (M5, docs/encounters.md "Suggested continuations"):
+# GET /v1/observations/{atom_id}/continuations.
+# --------------------------------------------------------------------------
+
+
+class ContinuationFrom(_Wire):
+    id: str
+    camera: str
+    end: float
+    direction: str
+    last_zone: str
+    labels: list[str]
+    encounter_id: str
+
+
+class ContinuationSuggestion(_Wire):
+    camera: str
+    window: list[float]
+    score: float
+    bucket: str
+    why: list[str]
+    observation_id: str | None
+    encounter_id: str | None
+    start: float | None
+
+
+class ContinuationsResponse(_Wire):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    from_: ContinuationFrom = Field(alias="from")
+    suggestions: list[ContinuationSuggestion]

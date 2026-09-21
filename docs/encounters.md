@@ -455,3 +455,28 @@ side of `compose_reel` never leaves the event-loop thread.
 
 `ruff check`, `ruff format --check`, `mypy`, `pytest` all green. Do not
 touch push ladder/card logic beyond the `on_review` hook.
+
+## Suggested continuations (M5)
+
+`encounters/continuations.py` (pure) scores a candidate next-camera
+observation -- or, when none exists yet, a bare prediction -- against a
+source observation: topology (adjacency edge or learned-only edge),
+elapsed time vs. `camera_transitions` percentiles, exit-zone direction
+match, and same-label vs. same-family. Weights need not sum to 1;
+`score_candidate` normalises over whichever factors it actually used (the
+direction factor is dropped and the rest renormalised on a config-only edge
+with no shared-zone data).
+
+**Product rule: a machine prediction is never shown as certain.**
+`bucket()` returns `confirmed` only when the candidate is already linked
+into the source's encounter (the linker already joined them) or carries a
+human `pin` decision naming that encounter -- never from score alone.
+Otherwise `likely` (>= `continuation_likely_score`), `possible` (>=
+`continuation_min_score`), or dropped.
+
+`GET /v1/observations/{atom_id}/continuations?limit=5`
+(`routes/observations.py`) is the read-only surface: for each neighbour
+camera x shared label family, it predicts a window (`predict_window`),
+looks for a real candidate member in `encounter_members`, and falls back to
+a `observation_id: null` prediction candidate carrying just the window when
+none exists. Same auth as the rest of `/v1/observations`.

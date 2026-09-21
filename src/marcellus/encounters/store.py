@@ -768,3 +768,39 @@ def set_watermark(conn: sqlite3.Connection, value: float) -> None:
         (str(value),),
     )
     conn.commit()
+
+
+def members_in_window(
+    conn: sqlite3.Connection, camera: str, start: float, end: float, *, limit: int = 20
+) -> list[dict[str, Any]]:
+    """Membership rows on `camera` whose `start_time` falls in `[start, end]`
+    (M5, "Suggested continuations": the candidate search for one neighbour
+    camera's predicted window), oldest first, capped at `limit`."""
+    rows = conn.execute(
+        "SELECT * FROM encounter_members WHERE camera = ? AND start_time >= ? "
+        "AND start_time <= ? ORDER BY start_time LIMIT ?",
+        (camera, start, end, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def cameras_with_learned_transition(conn: sqlite3.Connection, camera: str) -> set[str]:
+    """Every `cam_b` with a `camera_transitions` row directed `camera -> cam_b`
+    (M5's candidate neighbour set includes learned-only edges, not just
+    adjacency-graph ones)."""
+    rows = conn.execute(
+        "SELECT DISTINCT cam_b FROM camera_transitions WHERE cam_a = ?", (camera,)
+    ).fetchall()
+    return {str(r["cam_b"]) for r in rows}
+
+
+def has_pin_decision(conn: sqlite3.Connection, atom_id: str, encounter_id: str) -> bool:
+    """True if `atom_id` carries a human `pin` decision naming `encounter_id`
+    (M5's `bucket(pinned=...)` -- a pin can outrun `upsert_atom` re-homing
+    the membership row itself)."""
+    row = conn.execute(
+        "SELECT 1 FROM encounter_decisions WHERE atom_id = ? AND action = 'pin' "
+        "AND encounter_id = ?",
+        (atom_id, encounter_id),
+    ).fetchone()
+    return row is not None
