@@ -4,6 +4,7 @@ watermark (docs/encounters.md "Tests" section)."""
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -601,3 +602,75 @@ def test_upsert_missing_event_rows_still_works(sidecar_db_path: Path) -> None:
         assert row["dir_source"] == ""
     finally:
         conn.close()
+
+
+def _run_upsert(
+    db_path: Path,
+    atom: Atom,
+    decision: LinkDecision,
+    now: float,
+    barrier: threading.Barrier,
+    results: list[object],
+    errors: list[BaseException],
+    slot: int,
+) -> None:
+    conn = db.open_sidecar(db_path)
+    try:
+        barrier.wait(timeout=5)
+        results[slot] = store.upsert_atom(conn, atom, decision, now)
+    except BaseException as exc:  # noqa: BLE001 -- surfaced in main thread
+        errors.append(exc)
+    finally:
+        conn.close()
+
+
+def test_concurrent_upsert_of_same_atom_does_not_raise(sidecar_db_path: Path) -> None:
+    """PR #80's `link_now` runs the same brand-new atom through two
+    connections on two threads (the live MQTT worker and the push delivery
+    path, both `asyncio.to_thread`). Before the `BEGIN IMMEDIATE` fix, both
+    threads' `_member_row` reads landed outside any transaction, both saw
+    None, and the loser's INSERT raised `UNIQUE constraint failed:
+    encounter_members.atom_id` -- which made `link_now` return None and
+    dropped the encounter id from that push card. Run several iterations
+    against a real file (not :memory:, so the two connections actually
+    contend for the same lock) to make the race likely to reproduce if the
+    fix regresses.
+    """
+    for i in range(20):
+        db_path = sidecar_db_path.with_name(f"{sidecar_db_path.stem}-{i}.db")
+        # Apply schema once via a throwaway connection, then let each thread
+        # open its own.
+        db.open_sidecar(db_path).close()
+
+        now = time.time()
+        atom = _atom(f"race-{i}", start=now, end_time=None)
+        decision = LinkDecision(None, "new", 1.0)
+        barrier = threading.Barrier(2)
+        results: list[object] = [None, None]
+        errors: list[BaseException] = []
+
+        threads = [
+            threading.Thread(
+                target=_run_upsert,
+                args=(db_path, atom, decision, now, barrier, results, errors, slot),
+            )
+            for slot in (0, 1)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"iteration {i}: {errors!r}"
+        assert results[0] and results[1]
+        assert results[0] == results[1]
+
+        conn = db.open_sidecar(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT encounter_id FROM encounter_members WHERE atom_id = ?",
+                (atom.atom_id,),
+            ).fetchall()
+            assert len(rows) == 1
+        finally:
+            conn.close()
