@@ -63,8 +63,17 @@ def parse_review_message(payload: dict[str, Any]) -> ReviewEvent | None:
     track_ids = _strings(data.get("detections"))
     event_id = track_ids[0] if track_ids else str(review_id)
 
+    before = payload.get("before")
+    raw_start = after.get("start_time")
+    if not raw_start and isinstance(before, dict):
+        # `after.start_time` has been observed as 0/absent on some messages
+        # (prod has ~178 encounters seeded with start_time 0.0) even though
+        # `before` -- Frigate's prior snapshot of the same review item --
+        # carries the real one. Fall back to it rather than losing the true
+        # dwell origin.
+        raw_start = before.get("start_time")
     try:
-        start_time = float(after.get("start_time") or 0.0)
+        start_time = float(raw_start or 0.0)
     except (TypeError, ValueError):
         start_time = 0.0
 

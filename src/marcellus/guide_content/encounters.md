@@ -44,6 +44,12 @@ one:
   dog together, then the dog alone next door" stays one encounter.
 - An encounter's total span is capped at `max_duration_s`; past that (or
   quiet long enough) it's sealed and no longer a linking candidate.
+- A **lone founder** — an atom that started its own encounter because
+  nothing matched yet — can be re-homed into a better-matching encounter
+  once a later message shows a real link (e.g. companionship once two
+  atoms' spans actually overlap). This only ever moves an atom that's still
+  alone in its own encounter; once it shares an encounter with another
+  atom, it stays put.
 
 Camera adjacency (`/v1/encounters/adjacency`) comes from Frigate's own zone
 names: two cameras sharing a zone name are adjacent. `adjacency` adds edges

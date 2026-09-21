@@ -3,6 +3,7 @@ watermark (docs/encounters.md "Tests" section)."""
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -191,6 +192,131 @@ def test_seal_stale_still_seals_an_open_member_past_max_duration(
         row = store.get(conn, enc_id)
         assert row is not None
         assert row["sealed_at"] is not None
+    finally:
+        conn.close()
+
+
+def test_grouped_atom_is_not_rehomed_by_a_later_update(sidecar_db_path: Path) -> None:
+    """A founder re-home only ever applies to a *lone* founder. An atom
+    already sharing an encounter with another member must never be moved,
+    even if a later decision names a different encounter."""
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        enc_a = store.upsert_atom(conn, _atom("a1", start=now), LinkDecision(None, "new", 1.0), now)
+        # a2 joins a1's encounter -- now enc_a has 2 members, so a1 is no
+        # longer a lone founder even though its own link_reason is "new".
+        store.upsert_atom(
+            conn,
+            _atom("a2", start=now + 1),
+            LinkDecision(enc_a, "companion", 0.7),
+            now + 1,
+        )
+        enc_b = store.upsert_atom(
+            conn, _atom("b1", camera="shed", start=now), LinkDecision(None, "new", 1.0), now
+        )
+
+        # A later message re-decides a1 as belonging to enc_b -- must be
+        # ignored: enc_a has 2 members.
+        moved = store.upsert_atom(
+            conn,
+            _atom("a1", start=now, end_time=now + 20),
+            LinkDecision(enc_b, "companion", 0.7),
+            now + 20,
+        )
+        assert moved == enc_a
+        row = conn.execute(
+            "SELECT encounter_id FROM encounter_members WHERE atom_id = 'a1'"
+        ).fetchone()
+        assert row["encounter_id"] == enc_a
+    finally:
+        conn.close()
+
+
+def test_sealed_rehome_recomputes_surviving_donor(sidecar_db_path: Path) -> None:
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        donor = store.upsert_atom(
+            conn,
+            _atom("a1", camera="alley-wide", start=now, end_time=now + 5),
+            LinkDecision(None, "new", 1.0),
+            now,
+        )
+        store.upsert_atom(
+            conn,
+            _atom("a2", camera="shed", start=now + 1, end_time=now + 6),
+            LinkDecision(donor, "companion", 0.7),
+            now + 1,
+        )
+        conn.execute("UPDATE encounters SET sealed_at = ? WHERE id = ?", (now + 100, donor))
+        conn.commit()
+
+        dest = store.upsert_atom(
+            conn, _atom("b1", camera="deck", start=now), LinkDecision(None, "new", 1.0), now
+        )
+        moved = store.upsert_atom(
+            conn,
+            _atom("a1", camera="alley-wide", start=now, end_time=now + 5),
+            LinkDecision(dest, "companion", 0.7),
+            now + 200,
+        )
+        assert moved == dest
+
+        donor_row = store.get(conn, donor)
+        assert donor_row is not None
+        assert donor_row["atom_count"] == 1
+        assert json.loads(donor_row["cameras_json"]) == ["shed"]
+        assert donor_row["end_time"] == now + 6
+    finally:
+        conn.close()
+
+
+def test_sealed_rehome_deletes_donor_left_with_no_members(sidecar_db_path: Path) -> None:
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        donor = store.upsert_atom(conn, _atom("a1", start=now), LinkDecision(None, "new", 1.0), now)
+        conn.execute("UPDATE encounters SET sealed_at = ? WHERE id = ?", (now + 100, donor))
+        conn.commit()
+
+        dest = store.upsert_atom(
+            conn, _atom("b1", camera="deck", start=now), LinkDecision(None, "new", 1.0), now
+        )
+        store.upsert_atom(
+            conn, _atom("a1", start=now), LinkDecision(dest, "companion", 0.7), now + 200
+        )
+
+        assert store.get(conn, donor) is None
+    finally:
+        conn.close()
+
+
+def test_update_after_end_keeps_end_time(sidecar_db_path: Path) -> None:
+    """An "update" message arriving after "end" carries `end_time=None`
+    (Frigate only ever sets it on the "end" message) -- it must not blank
+    out the previously recorded end_time, or the encounter would look open
+    again."""
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        enc_id = store.upsert_atom(
+            conn,
+            _atom("a1", start=now, end_time=now + 5),  # "end" message
+            LinkDecision(None, "new", 1.0),
+            now,
+        )
+        store.upsert_atom(
+            conn,
+            _atom("a1", start=now, end_time=None),  # stray "update" after "end"
+            LinkDecision(enc_id, "new", 1.0),
+            now + 10,
+        )
+        row = conn.execute("SELECT end_time FROM encounter_members WHERE atom_id = 'a1'").fetchone()
+        assert row["end_time"] == now + 5
+        enc_row = store.get(conn, enc_id)
+        assert enc_row is not None
+        assert enc_row["end_time"] == now + 5
     finally:
         conn.close()
 

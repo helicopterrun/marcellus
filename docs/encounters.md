@@ -190,13 +190,32 @@ Functions (all take `conn: sqlite3.Connection`, sync): `load_open(conn) ->
 list[OpenEncounter]`, `upsert_atom(conn, atom, decision, now) -> str`
 (insert or, if the atom already exists, update its mutable fields —
 end_time, labels, zones, event_ids, sub_labels, severity — and refresh its
-encounter's aggregates; membership never changes on update unless the
-atom's current encounter is sealed and a decision forces otherwise),
-`recompute(conn, encounter_id)` (aggregates from members), `seal_stale(conn,
-now, cfg) -> int` (seal when open and `now - last_end > 1.5 × largest gap_s`
-or span ≥ max_duration_s), `list_recent(conn, *, since, limit, camera=None)`,
-`get(conn, encounter_id)`, `decisions_for(conn, atom_id)`,
+encounter's aggregates; an update never regresses a previously recorded
+end_time to NULL, so a stray "update" arriving after "end" can't reopen a
+closed encounter). Membership changes on update in two cases: the atom's
+current encounter is sealed and a decision forces otherwise, or the atom is
+the **lone founder** of its own still-open encounter (its membership row
+has `link_reason == "new"` and it's the encounter's only member) and a
+later message finds a real link elsewhere — `founder_singleton(conn,
+atom_id) -> str | None` identifies this case so callers can exclude that
+singleton encounter from the candidates passed to `decide()` (otherwise the
+atom's own trivial encounter always wins on `same_camera`, since its only
+member is itself). Only lone founders are ever re-homed this way; an atom
+already grouped with another member never moves. Either re-home path
+recomputes the donor encounter's aggregates afterward and deletes it if it's
+left with zero members. `recompute(conn, encounter_id)` (aggregates from
+members; the min `start_time` ignores non-positive values — a parser
+artifact, see below — when at least one member has a real one), `seal_stale
+(conn, now, cfg) -> int` (seal when open and `now - last_end > 1.5 × largest
+gap_s` or span ≥ max_duration_s), `list_recent(conn, *, since, limit,
+camera=None)`, `get(conn, encounter_id)`, `decisions_for(conn, atom_id)`,
 `get_watermark/set_watermark`.
+
+A live review message with `start_time <= 0` (Frigate occasionally sends
+`after.start_time` as 0/absent) is skipped for linking if no member row
+exists yet for that atom — the reconciler picks it up later from Frigate's
+`reviewsegment` row, which carries a true start_time — and keeps its
+previously stored start_time if one does exist, rather than regressing it.
 
 ## service.py
 
