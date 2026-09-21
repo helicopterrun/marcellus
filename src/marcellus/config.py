@@ -698,6 +698,12 @@ class EncountersSection(BaseModel):
     # `use_learned_gaps`.
     transition_slack: float = 1.5
 
+    # M4 /v1/timeline: hard cap (seconds) on the [start, end] window a single
+    # request may ask for -- a global multi-camera composition is far more
+    # expensive per second of window than one reel, so this is deliberately
+    # tighter than any per-reel limit. Default 6h.
+    timeline_max_window_s: float = 21600.0
+
 
 class PushSection(BaseModel):
     """Push notifications (docs/push-notifications.md).

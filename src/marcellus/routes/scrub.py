@@ -683,16 +683,34 @@ def _reviews_json(
     return out
 
 
-@router.get("/reel/{camera}", responses={200: {"model": ReelResponse}})
-async def reel(
-    camera: str, start: float, end: float, request: Request, motion_scale: float = 10.0
-) -> Any:
-    """One call per reel window (§4.5) -- collapses coverage + scrub buckets +
-    motion + events into one response with one cache lifetime."""
-    settings = request.app.state.settings
-    _require_series(start, end, motion_scale)
+async def compose_reel(
+    request: Request,
+    settings: Any,
+    camera: str,
+    start: float,
+    end: float,
+    motion_scale: float,
+    *,
+    frigate_conn: Any = None,
+) -> dict[str, Any]:
+    """Build the `/v1/reel/{camera}` body (§4.5) without the HTTP wrapper --
+    shared by `reel()` and `/v1/timeline`, which composes several lanes in
+    one request.
 
-    conn = db.open_frigate_ro(settings.frigate.db_path)
+    `frigate_conn`, when given, is used instead of opening a fresh
+    `db.open_frigate_ro` connection -- the caller owns closing it. The
+    Frigate-side work here runs synchronously inline (never via
+    `asyncio.to_thread`), so it only ever executes on the event-loop thread;
+    sharing one connection across several `compose_reel` calls composed with
+    `asyncio.gather` is safe for that reason (never touched from more than
+    one thread), but is NOT a general invitation to hold a sqlite3
+    connection across threads.
+    """
+    conn = (
+        frigate_conn
+        if frigate_conn is not None
+        else db.open_frigate_ro(settings.frigate.db_path)
+    )
     try:
         if camera not in _known_cameras(request.app.state, conn):
             raise HTTPException(
@@ -706,7 +724,8 @@ async def reel(
         # Review segments come off the detect stream too -- same clock shift.
         reviews = _reviews_json(conn, camera, start, end, offset_s=offset_s)
     finally:
-        conn.close()
+        if frigate_conn is None:
+            conn.close()
 
     bucket_rows = await db.with_sidecar(
         settings.sidecar.db_path,
@@ -742,6 +761,18 @@ async def reel(
     }
     if motion_unavailable:
         body["motion_unavailable"] = True
+    return body
+
+
+@router.get("/reel/{camera}", responses={200: {"model": ReelResponse}})
+async def reel(
+    camera: str, start: float, end: float, request: Request, motion_scale: float = 10.0
+) -> Any:
+    """One call per reel window (§4.5) -- collapses coverage + scrub buckets +
+    motion + events into one response with one cache lifetime."""
+    settings = request.app.state.settings
+    _require_series(start, end, motion_scale)
+    body = await compose_reel(request, settings, camera, start, end, motion_scale)
     ReelResponse.model_validate(body)
     return _etagged(request, body)
 

@@ -57,6 +57,7 @@ from marcellus.routes import scrub_ui as scrub_ui_routes
 from marcellus.routes import search as search_routes
 from marcellus.routes import settings_page as settings_page_routes
 from marcellus.routes import status as status_routes
+from marcellus.routes import timeline as timeline_routes
 from marcellus.routes import topology as topology_routes
 from marcellus.routes import toybox as toybox_routes
 from marcellus.routes import triage as triage_routes
@@ -666,6 +667,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(encounters_routes.v1_router)
     app.include_router(observations_routes.v1_router)
     app.include_router(topology_routes.v1_router)
+    app.include_router(timeline_routes.router)
     app.include_router(motion_routes.router)
     app.include_router(score_histogram_routes.router)
     app.include_router(fps_budget_routes.router)

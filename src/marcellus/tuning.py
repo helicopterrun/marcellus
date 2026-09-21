@@ -157,6 +157,7 @@ _LIVE_KEYS = {
     "scrub.backfill_time_budget_s",
     "log_level",
     "face_enrich.interval_s",
+    "encounters.timeline_max_window_s",
 }
 #: `face_enrich.*` is live=True except `interval_s` (already above) and
 #: `model_dir` (still wiring -- see `_field_editable`/`_field_kind`).

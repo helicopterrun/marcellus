@@ -102,3 +102,7 @@ the sidecar's own knobs in one place.
   - `enabled` — master on/off switch for the proxy (default on).
   - `pass_request_headers` — request headers forwarded upstream (default
     `["range", "authorization", "cookie"]`).
+
+`encounters.timeline_max_window_s` (Tuning, live) caps how long a `GET
+/v1/timeline` window may be (default 21600s / 6h) -- see
+[Encounters](/guide/encounters) "Global timeline".

@@ -113,3 +113,12 @@ the learned per-camera-pair transition times (`transitions_enabled`,
 `transition_default_s`, `transition_overrides`, `use_learned_gaps`,
 `transition_slack`) and the `/v1/topology` / `/v1/cameras/{camera}/
 neighbours` read APIs.
+
+## Global timeline
+
+`GET /v1/timeline` (see [Observations](/guide/investigation) "Global
+timeline") composes several cameras' reels into one multi-lane response, and
+overlays each lane's observations plus the encounters they belong to. Its
+window is capped by `timeline_max_window_s` (default 6h, live-tunable) --
+tighter than any single reel's own limits, since one request there can fan
+out to a dozen cameras at once.
