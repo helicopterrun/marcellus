@@ -60,20 +60,22 @@ class SourceProfile:
     reconfigured and re-probing every cycle cost two ffprobe calls per camera
     against an ~80s cycle.
 
-    Also carries `backfill_cursor`, which is scheduler state rather than a
-    stream property: it is the camera the next cycle's backfill pass starts
-    from, and it lives here because this is already the object the generation
-    loop keeps between cycles.
+    Also carries `backfill_cursor` and `live_edge_cursor`, which are scheduler
+    state rather than a stream property: each is the camera the next cycle's
+    backfill (resp. live-edge) pass starts from, and they live here because
+    this is already the object the generation loop keeps between cycles.
     """
 
     gop_s: dict[str, float]
     aspect: dict[str, float]
     backfill_cursor: int
+    live_edge_cursor: int
 
     def __init__(self) -> None:
         self.gop_s = {}
         self.aspect = {}
         self.backfill_cursor = 0
+        self.live_edge_cursor = 0
 
 
 def _cells_dir(cache_dir: Path, camera: str, interval_s: float, sheet_start: float) -> Path:
@@ -391,15 +393,34 @@ def _reap_orphaned_publish_temp(cache_dir: Path, *, now: float, max_age_s: float
     return removed
 
 
+def _span_covered_by_aged(
+    aged_rows: list[sqlite3.Row], start_ts: float, end_ts: float
+) -> bool:
+    """Whether `aged_rows` (sorted by `start_ts`) together cover `[start_ts,
+    end_ts)` with no gap. Adjacent/overlapping rows merge; a gap anywhere in
+    the span, or no aged coverage at all, means the span is not covered.
+    """
+    covered_through = start_ts
+    for row in aged_rows:
+        if row["start_ts"] > covered_through:
+            break
+        covered_through = max(covered_through, row["end_ts"])
+        if covered_through >= end_ts:
+            return True
+    return covered_through >= end_ts
+
+
 def _retire_stale_recent_buckets(
     sidecar_conn: sqlite3.Connection,
     cache_dir: Path,
     camera: str,
     recent_interval_s: float,
     boundary: float,
+    aged_interval_s: float | None = None,
 ) -> None:
     """Drop any recent-tier bucket/sheet that now falls (even partially)
-    before `boundary` (§4.2 non-overlap, §5.5 thinning).
+    before `boundary` (§4.2 non-overlap, §5.5 thinning) -- but only once the
+    aged tier already has data covering its span.
 
     `boundary` (= now - aged_after_h) advances every cycle, so a recent
     bucket created when it was still "recent" eventually ages past it. Once
@@ -410,25 +431,55 @@ def _retire_stale_recent_buckets(
     fresh from the underlying recordings, which is simpler than surgically
     splitting an already-tiled sheet, and correct since the source segments
     are still on disk within retention.
+
+    `aged_interval_s`, when given, gates retirement on the aged tier already
+    covering the stale bucket's exact span: backfill runs on its own budget
+    and can lag behind the boundary by cycles, and retiring the recent-tier
+    data before the aged tier has regenerated it erases that span with
+    nothing to refill it from at the finer cadence -- measured live as a
+    total loss of the recent tier for cameras whose live edge routinely ate
+    the whole tick. Omit it (`None`) to retire unconditionally, e.g. when no
+    aged tier is configured for this plan at all.
     """
     stale = sidecar_conn.execute(
-        "SELECT start_ts FROM scrub_buckets WHERE camera = ? AND interval_s = ? AND start_ts < ?",
+        "SELECT start_ts, end_ts FROM scrub_buckets "
+        "WHERE camera = ? AND interval_s = ? AND start_ts < ?",
         (camera, recent_interval_s, boundary),
     ).fetchall()
     if not stale:
         return
+
+    if aged_interval_s is not None:
+        aged_rows = sidecar_conn.execute(
+            "SELECT start_ts, end_ts FROM scrub_buckets "
+            "WHERE camera = ? AND interval_s = ? ORDER BY start_ts",
+            (camera, aged_interval_s),
+        ).fetchall()
+        retirable = [
+            r["start_ts"]
+            for r in stale
+            if _span_covered_by_aged(aged_rows, r["start_ts"], r["end_ts"])
+        ]
+    else:
+        retirable = [r["start_ts"] for r in stale]
+    if not retirable:
+        return
+
+    placeholders = ",".join("?" for _ in retirable)
     sheet_rows = sidecar_conn.execute(
         "SELECT path, start_ts FROM scrub_sheets "
-        "WHERE camera = ? AND interval_s = ? AND start_ts < ?",
-        (camera, recent_interval_s, boundary),
+        f"WHERE camera = ? AND interval_s = ? AND start_ts IN ({placeholders})",
+        (camera, recent_interval_s, *retirable),
     ).fetchall()
     sidecar_conn.execute(
-        "DELETE FROM scrub_buckets WHERE camera = ? AND interval_s = ? AND start_ts < ?",
-        (camera, recent_interval_s, boundary),
+        "DELETE FROM scrub_buckets "
+        f"WHERE camera = ? AND interval_s = ? AND start_ts IN ({placeholders})",
+        (camera, recent_interval_s, *retirable),
     )
     sidecar_conn.execute(
-        "DELETE FROM scrub_sheets WHERE camera = ? AND interval_s = ? AND start_ts < ?",
-        (camera, recent_interval_s, boundary),
+        "DELETE FROM scrub_sheets "
+        f"WHERE camera = ? AND interval_s = ? AND start_ts IN ({placeholders})",
+        (camera, recent_interval_s, *retirable),
     )
     sidecar_conn.commit()
     for r in sheet_rows:
@@ -1164,10 +1215,6 @@ async def generate_camera(
     # retention is "recent".
     effective_boundary = max(aged_boundary, retention_cutoff)
 
-    _retire_stale_recent_buckets(
-        sidecar_conn, scrub.cache_dir, camera, scrub.recent_interval_s, effective_boundary
-    )
-
     live = await generate_live_edge(
         settings, camera, frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
         now=now, profile=profile, sem=sem,
@@ -1176,6 +1223,13 @@ async def generate_camera(
         settings, camera, budget=scrub.backfill_segments_per_cycle,
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
         now=now, profile=profile, sem=sem,
+    )
+    # Retire after backfill, not before: retirement is gated on the aged
+    # tier already covering the stale span, and it's this same cycle's
+    # backfill call above that's most likely to have just produced it.
+    _retire_stale_recent_buckets(
+        sidecar_conn, scrub.cache_dir, camera, scrub.recent_interval_s,
+        effective_boundary, aged_interval_s=scrub.aged_interval_s,
     )
     return {
         "camera": camera,
@@ -1194,12 +1248,20 @@ async def generate_live_edge(
     now: float,
     profile: SourceProfile,
     sem: asyncio.Semaphore,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Hold `camera`'s recent tier against wall clock. Cheap and always first.
 
     The reel opens at the live edge, so that is where sprites have to exist:
     `generated_through` sitting in the past means a client's "is this
     generated?" check answers no for the one window people actually scrub.
+
+    `deadline` (a `time.monotonic()` instant), when given, is threaded
+    through to `_generate_tier`/`_generate_tiers`, which check it between
+    segments -- never mid-segment. `generate_cycle` sets this so a slow live
+    edge stops with time left for backfill's own guaranteed share, rather
+    than consuming the whole tick and leaving backfill nothing (see
+    `scrub.backfill_min_share_s`).
     """
     scrub = settings.scrub
     gop_s = await camera_gop_seconds(
@@ -1212,7 +1274,8 @@ async def generate_live_edge(
     # buckets.
     if len(plan) > 1:
         _retire_stale_recent_buckets(
-            sidecar_conn, scrub.cache_dir, camera, interval_s, window_start
+            sidecar_conn, scrub.cache_dir, camera, interval_s, window_start,
+            aged_interval_s=scrub.aged_interval_s,
         )
 
     # Resume from where the recent tier actually reaches, but
@@ -1230,7 +1293,7 @@ async def generate_live_edge(
         since=live_since,
         budget=max(1, scrub.live_edge_segments),
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
-        profile=profile, sem=sem, newest_first=True,
+        profile=profile, sem=sem, newest_first=True, deadline=deadline,
     )
     return {"camera": camera, **result}
 
@@ -1564,15 +1627,52 @@ async def generate_cycle(
         # Pass 1: every camera's live edge, before any camera's history. Doing
         # both per camera meant the last camera in the list waited out every
         # earlier camera's backfill before its edge was touched at all.
-        for camera in cameras:
+        #
+        # Bounded by `live_edge_deadline`, checked between cameras (never
+        # mid-segment -- `_generate_tiers` only checks between segments) so
+        # that even a live edge slow enough to eat the whole tick (measured
+        # live: 16-20s cycles against a 20s tick, decoding every frame for
+        # cameras whose GOP is coarser than `recent_interval_s`) still leaves
+        # `backfill_min_share_s` on the clock for Pass 2. Without this, the
+        # 1s cameras never got their aged tier: backfill's window had always
+        # already closed by the time Pass 1 finished.
+        #
+        # Uses the caller's tick (`backfill_deadline`) when given, else this
+        # cycle's own `live_edge_interval_s` from now -- deliberately *not*
+        # `backfill_time_budget_s`, which is a separate, much shorter knob
+        # that must not also throttle the live edge.
+        tick_end = (
+            backfill_deadline if backfill_deadline is not None
+            else started + scrub.live_edge_interval_s
+        )
+        # Subtract Pass 3's reserve too: backfill's own floor sits at
+        # `deadline - reserve`, so a live edge that stops only
+        # `backfill_min_share_s` before the tick end would still hand backfill
+        # almost nothing (measured on prod: 20 s tick, 5 s reserve -> 1 s).
+        pass3_reserve = min(scrub.derive_time_reserve_s, scrub.backfill_time_budget_s / 2)
+        live_edge_deadline = tick_end - pass3_reserve - scrub.backfill_min_share_s
+        start_le = profile.live_edge_cursor % len(cameras)
+        order_le = cameras[start_le:] + cameras[:start_le]
+        served_le = 0
+        for camera in order_le:
+            # Always run at least one camera per cycle, even past the
+            # deadline, so the live edge itself can never be starved.
+            if served_le > 0 and _time.monotonic() >= live_edge_deadline:
+                break
+            served_le += 1
             try:
                 _merge(camera, await generate_live_edge(
                     settings, camera, frigate_conn=conn, sidecar_conn=conn,
-                    now=now, profile=profile, sem=sem,
+                    now=now, profile=profile, sem=sem, deadline=live_edge_deadline,
                 ))
             except Exception:
                 logger.exception("scrub: live edge failed for camera %s", camera)
                 totals[camera]["error"] = True
+        profile.live_edge_cursor = start_le + served_le
+        if served_le < len(cameras):
+            logger.info(
+                "scrub: live-edge cut short (%d/%d cameras done)", served_le, len(cameras)
+            )
 
         # Pass 2: backfill on genuine leftovers. Bounded by wall clock as well
         # as segment count -- how long a segment takes depends on the box, and

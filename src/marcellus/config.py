@@ -497,6 +497,16 @@ class ScrubSection(BaseModel):
     # backfill is; backfill still gets everything left over. Set to 0 to
     # restore the old "decimation gets pure leftovers" behaviour.
     derive_time_reserve_s: float = 5.0
+    # Minimum wall-clock seconds per cycle reserved for the backfill phase,
+    # carved out of the live-edge pass rather than backfill's own budget.
+    # Without this, a live edge slow enough to eat the whole tick (measured
+    # live: 16-20s cycles against a 20s tick) left backfill's window already
+    # closed before it started -- "(0 backfilled)" on nearly every cycle, and
+    # cameras whose recent tier needs full decoding (not just keyframe
+    # extraction) never got their aged tier at all. Live-edge now stops
+    # early, at its per-camera boundary (never mid-segment), once the tick
+    # has less than this much time left, so backfill always gets a turn.
+    backfill_min_share_s: float = 6.0
 
     @field_validator("format")
     @classmethod
