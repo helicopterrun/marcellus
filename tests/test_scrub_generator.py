@@ -2503,3 +2503,66 @@ def test_prune_counts_and_logs_unlink_failures_but_still_removes_the_rest(
     assert poisoned.exists(), "the poisoned file could not be removed"
     remaining = list((env.scrub.cache_dir / "doorbell").rglob("*.jpg"))
     assert remaining == [poisoned], "every other sheet file should still be removed"
+
+
+def test_zero_backfill_share_runs_every_camera_live_edge(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`backfill_min_share_s <= 0` is the escape hatch for a box with no
+    decode headroom (prod: 4 cores shared with Frigate, cycles already fill
+    the tick). Measured there, a 6 s share cut the live edge to 2-3 of 10
+    cameras per tick and the live-edge lag climbed ~20 s per cycle. With the
+    share at 0 the live edge must serve every camera every cycle, however
+    slow, exactly as before #85."""
+    env = long_history_env
+    conn = sqlite3.connect(env.frigate.db_path)
+    conn.executemany(
+        "INSERT INTO recordings VALUES (?, 'garden', ?, ?, ?, 10.0, 5.0)",
+        [
+            (f"g{i}", "/media/frigate/x.mp4", 1_800_000_000.0 + i * 10,
+             1_800_000_000.0 + (i + 1) * 10)
+            for i in range(100)
+        ],
+    )
+    conn.commit()
+    conn.close()
+    env = env.model_copy(
+        update={
+            "scrub": env.scrub.model_copy(
+                update={"cameras": [], "backfill_min_share_s": 0.0, "live_edge_interval_s": 20.0}
+            )
+        }
+    )
+
+    class _FakeClock:
+        def __init__(self) -> None:
+            self.t = 1_000.0
+
+        def monotonic(self) -> float:
+            return self.t
+
+    clock = _FakeClock()
+    monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
+
+    served: list[str] = []
+
+    async def _slow_live(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        served.append(camera)
+        clock.t += 100.0
+        return {"camera": camera, "segments": 1, "new_frames": 1}
+
+    async def _noop_backfill(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "segments": 0, "new_frames": 0, "backfilled": False}
+
+    async def _noop_derived(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "new_frames": 0, "tiers_touched": 0}
+
+    monkeypatch.setattr(generator, "generate_live_edge", _slow_live)
+    monkeypatch.setattr(generator, "generate_backfill", _noop_backfill)
+    monkeypatch.setattr(generator, "generate_derived", _noop_derived)
+
+    profile = generator.SourceProfile()
+    asyncio.run(generator.generate_cycle(env, now=1_800_000_000.0 + 86400.0, profile=profile))
+
+    cameras = sorted(set(served))
+    assert len(served) == len(cameras) and len(cameras) >= 2, served

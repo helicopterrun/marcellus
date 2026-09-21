@@ -1650,14 +1650,28 @@ async def generate_cycle(
         # `backfill_min_share_s` before the tick end would still hand backfill
         # almost nothing (measured on prod: 20 s tick, 5 s reserve -> 1 s).
         pass3_reserve = min(scrub.derive_time_reserve_s, scrub.backfill_time_budget_s / 2)
-        live_edge_deadline = tick_end - pass3_reserve - scrub.backfill_min_share_s
+        # `backfill_min_share_s <= 0` switches the live-edge deadline off
+        # entirely (the pre-#85 behaviour): on a box with no decode headroom
+        # (prod: 4 cores shared with Frigate, cycles already fill the tick)
+        # any slice carved out here starves the live edge -- measured lag
+        # climbing ~20 s per cycle -- so the operator must be able to hand the
+        # whole tick back to the edge while the aged tier is produced another
+        # way (decimation of the recent tier, see `generate_derived_tier`).
+        live_edge_deadline: float | None = (
+            tick_end - pass3_reserve - scrub.backfill_min_share_s
+            if scrub.backfill_min_share_s > 0 else None
+        )
         start_le = profile.live_edge_cursor % len(cameras)
         order_le = cameras[start_le:] + cameras[:start_le]
         served_le = 0
         for camera in order_le:
             # Always run at least one camera per cycle, even past the
             # deadline, so the live edge itself can never be starved.
-            if served_le > 0 and _time.monotonic() >= live_edge_deadline:
+            if (
+                live_edge_deadline is not None
+                and served_le > 0
+                and _time.monotonic() >= live_edge_deadline
+            ):
                 break
             served_le += 1
             try:
