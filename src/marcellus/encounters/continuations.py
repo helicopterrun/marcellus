@@ -78,7 +78,7 @@ def _time_factor(
     default_stats = TransitionStats(p10=0.0, p50=0.0, p90=0.0, samples=0, source="default")
     st = stats if stats is not None else default_stats
     if elapsed_s is None:
-        why = f"typical {st.p50:.0f}s" if st.source == "learned" else "prediction window"
+        why = f"typical {st.p50:.0f}s" if st.source == "learned" else "no learned timing yet"
         return 1.0, why
     overlapped = elapsed_s < 0
     # Overlapping hand-offs (candidate starts before the source atom ends)
@@ -104,7 +104,7 @@ def _time_factor(
     if overlapped:
         why = f"overlapped {-elapsed_s:.0f}s"
     else:
-        why = f"typical {st.p50:.0f}s" if st.source == "learned" else "unlearned typical time"
+        why = f"typical {st.p50:.0f}s" if st.source == "learned" else "no learned timing yet"
     return max(0.0, min(1.0, e)), why
 
 

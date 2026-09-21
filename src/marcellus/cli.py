@@ -370,12 +370,13 @@ def encounters_backfill_direction(
     whose Frigate DB was unreachable when they linked."""
     from marcellus import db
     from marcellus.encounters import store
-    from marcellus.encounters.observations import load_direction
+    from marcellus.encounters.observations import DIR_SOURCE_NONE, load_direction
 
     s = load_settings()
     sidecar_conn = db.open_sidecar(s.sidecar.db_path)
     frigate_conn = db.open_frigate_ro(s.frigate.db_path)
     updated = 0
+    none = 0
     rows = []
     try:
         rows = store.members_missing_direction(sidecar_conn, limit)
@@ -384,11 +385,13 @@ def encounters_backfill_direction(
             direction = load_direction(frigate_conn, event_ids)
             store.set_direction(sidecar_conn, row["atom_id"], direction, commit=False)
             updated += 1
+            if direction.source == DIR_SOURCE_NONE:
+                none += 1
         sidecar_conn.commit()
     finally:
         sidecar_conn.close()
         frigate_conn.close()
-    typer.echo(json.dumps({"scanned": len(rows), "updated": updated}))
+    typer.echo(json.dumps({"scanned": len(rows), "updated": updated, "none": none}))
 
 
 @encounters_app.command("repair")

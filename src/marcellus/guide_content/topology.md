@@ -125,3 +125,10 @@ A candidate with no observation yet in the window is returned as a
 prediction (`observation_id`/`encounter_id`/`start` all `null`) carrying the
 predicted `window` instead, so the app can show "expect ~shed in 10-30s"
 before anything has actually happened.
+
+Every suggestion also carries `timing`: `{"source": "learned"|"config"|
+"default", "samples": <int>, "p50": <float|null>}`, mirroring which
+`camera_transitions` row (if any) produced the `window`. The app must not
+word a suggestion's gap as a typical or learned time unless
+`timing.source == "learned"` -- `config` and `default` windows are still
+useful ranges to show, just not ones backed by observed history.

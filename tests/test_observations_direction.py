@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
-from marcellus.encounters.observations import derive_direction
+from marcellus.encounters.observations import DIR_SOURCE_NONE, derive_direction, load_direction
 
 
 def _event(
@@ -58,7 +59,10 @@ def test_box_area_growth_prefers_toward() -> None:
     assert d.direction == "toward"
 
 
-def test_nothing_yields_empty_direction() -> None:
+def test_no_event_rows_yields_empty_source_not_none() -> None:
+    """No rows at all (nothing to look at) stays the empty '' source -- not
+    yet attempted, or the lookup found nothing -- so it stays eligible for
+    a later backfill retry."""
     d = derive_direction([])
     assert d.first_zone == ""
     assert d.last_zone == ""
@@ -66,9 +70,14 @@ def test_nothing_yields_empty_direction() -> None:
     assert d.heading_deg is None
     assert d.source == ""
 
+
+def test_event_row_with_nothing_derivable_yields_dir_source_none() -> None:
+    """We had a real event row (Frigate answered) but none of the three
+    tiers could derive anything from it -- attempted and empty, marked
+    `none` so the backfill CLI doesn't rewalk it forever."""
     d2 = derive_direction([_event()])
     assert d2.direction == ""
-    assert d2.source == ""
+    assert d2.source == DIR_SOURCE_NONE
 
 
 def test_malformed_json_never_raises() -> None:
@@ -79,4 +88,91 @@ def test_malformed_json_never_raises() -> None:
     ]
     d = derive_direction(bad_rows)
     assert d.direction == ""
+    assert d.source == DIR_SOURCE_NONE
+
+
+def test_load_direction_no_matching_events_keeps_empty_source() -> None:
+    """`load_direction` against a Frigate connection that simply has no
+    matching `event` rows for the given ids must stay '' (retryable), never
+    `none` -- `none` is reserved for rows Frigate *did* return."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE event (id TEXT, zones TEXT, data TEXT, start_time REAL)")
+    conn.commit()
+    d = load_direction(conn, ["missing-event-id"])
     assert d.source == ""
+
+
+def test_load_direction_found_rows_nothing_derivable_yields_none() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE event (id TEXT, zones TEXT, data TEXT, start_time REAL)")
+    conn.execute(
+        "INSERT INTO event (id, zones, data, start_time) VALUES (?, ?, ?, ?)",
+        ("ev1", None, "{}", 0.0),
+    )
+    conn.commit()
+    d = load_direction(conn, ["ev1"])
+    assert d.source == DIR_SOURCE_NONE
+
+
+def test_backfill_rewalk_converges_after_one_pass(tmp_path) -> None:
+    """`fsc encounters backfill-direction`'s rewalk set is
+    `store.members_missing_direction` (`dir_source == ''`). A row whose
+    Frigate events exist but yield nothing derivable must be written back
+    with `dir_source="none"`, not `''`, so it drops out of that set and the
+    backfill converges instead of rewalking it forever."""
+    import time
+
+    from marcellus import db
+    from marcellus.encounters import store
+    from marcellus.encounters.linker import Atom, LinkDecision
+
+    sidecar_path = tmp_path / "sidecar.db"
+    frigate_path = tmp_path / "frigate.db"
+
+    frigate_conn = sqlite3.connect(frigate_path)
+    frigate_conn.execute("CREATE TABLE event (id TEXT, zones TEXT, data TEXT, start_time REAL)")
+    frigate_conn.execute(
+        "INSERT INTO event (id, zones, data, start_time) VALUES (?, ?, ?, ?)",
+        ("ev-undeterminable", None, "{}", 0.0),
+    )
+    frigate_conn.commit()
+    frigate_conn.close()
+
+    sidecar_conn = db.open_sidecar(sidecar_path)
+    now = time.time()
+    atom = Atom(
+        atom_id="a1",
+        camera="alley-wide",
+        start_time=now - 100,
+        end_time=now - 90,
+        labels=("person",),
+        zones=(),
+        event_ids=("ev-undeterminable",),
+        sub_labels=(),
+        severity="alert",
+    )
+    store.upsert_atom(sidecar_conn, atom, LinkDecision(None, "new", 1.0), now)
+    sidecar_conn.commit()
+
+    def _rewalk_once() -> int:
+        frigate_conn = db.open_frigate_ro(frigate_path)
+        try:
+            rows = store.members_missing_direction(sidecar_conn, 500)
+            for row in rows:
+                event_ids = json.loads(row["event_ids_json"] or "[]")
+                direction = load_direction(frigate_conn, event_ids)
+                store.set_direction(sidecar_conn, row["atom_id"], direction, commit=False)
+            sidecar_conn.commit()
+            return len(rows)
+        finally:
+            frigate_conn.close()
+
+    first_pass = _rewalk_once()
+    assert first_pass == 1
+    row = store.observation(sidecar_conn, "a1")
+    assert row is not None
+    assert row["dir_source"] == DIR_SOURCE_NONE
+
+    second_pass = _rewalk_once()
+    assert second_pass == 0
+    sidecar_conn.close()

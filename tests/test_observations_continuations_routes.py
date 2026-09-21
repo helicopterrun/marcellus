@@ -287,6 +287,63 @@ def test_no_member_in_window_yields_prediction_with_null_ids(
     assert pred["bucket"] != "confirmed"
 
 
+def test_no_transition_row_yields_default_timing_with_null_p50(
+    settings: Settings, client: TestClient
+) -> None:
+    now = time.time()
+    _seed_atom(
+        settings,
+        "src",
+        camera="alley-wide",
+        start_offset=-100.0,
+        end_offset=-90.0,
+        direction=Direction("front_garden", "back_walkway", "out:shed", None, "zones"),
+        now=now,
+    )
+
+    resp = client.get("/v1/observations/src/continuations")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["suggestions"]
+    for s in body["suggestions"]:
+        assert s["timing"] == {"source": "default", "samples": 0, "p50": None}
+
+
+def test_learned_transition_row_yields_learned_timing_with_samples(
+    settings: Settings, client: TestClient
+) -> None:
+    now = time.time()
+    _seed_atom(
+        settings,
+        "src",
+        camera="alley-wide",
+        start_offset=-100.0,
+        end_offset=-90.0,
+        direction=Direction("front_garden", "back_walkway", "out:shed", None, "zones"),
+        now=now,
+    )
+    _seed_transition(
+        settings,
+        cam_a="alley-wide",
+        cam_b="shed",
+        family="person",
+        p10=5.0,
+        p50=10.0,
+        p90=20.0,
+        samples=15,
+    )
+
+    resp = client.get("/v1/observations/src/continuations")
+    assert resp.status_code == 200
+    body = resp.json()
+    shed_rows = [s for s in body["suggestions"] if s["camera"] == "shed"]
+    assert shed_rows
+    for s in shed_rows:
+        assert s["timing"]["source"] == "learned"
+        assert s["timing"]["samples"] == 15
+        assert s["timing"]["p50"] == 10.0
+
+
 def test_limit_caps_suggestion_count(settings: Settings, client: TestClient) -> None:
     now = time.time()
     _seed_atom(

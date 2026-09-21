@@ -83,8 +83,10 @@ Only useful with `encounters.enabled` on -- see
 - `backfill-direction --limit N` (default 500) -- recompute
   `first_zone`/`last_zone`/`direction`/`heading_deg`/`dir_source` for
   membership rows that still have `dir_source == ''`, reading each atom's
-  events back out of Frigate. Writes only those rows; see
-  [Observations](/guide/observations).
+  events back out of Frigate. Writes only those rows; rows where Frigate had
+  nothing derivable get `dir_source="none"` (attempted, not "not yet") so
+  they don't come back on the next run -- reports
+  `{"scanned", "updated", "none"}`; see [Observations](/guide/observations).
 - `repair --dry-run --limit N` -- find membership rows written with
   `start_time <= 0` and/or a null `end_time`, look each atom up in
   Frigate's `reviewsegment` table, and repair or delete it, then recompute
