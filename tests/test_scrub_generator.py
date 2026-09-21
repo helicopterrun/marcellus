@@ -522,6 +522,71 @@ def test_scrub_generate_aged_tier_falls_back_to_backfill_without_recent_data(
     assert aged_buckets, "backfill must still cover the aged tier when there's nothing to decimate"
 
 
+def test_scrub_retire_stale_recent_buckets_sweeps_every_sheet_of_a_multi_sheet_bucket(
+    aged_env: Settings,
+) -> None:
+    """A recent-tier bucket ~30 sheets deep only has its *first* sheet's
+    `start_ts` equal to the bucket's own `start_ts` -- retirement must sweep
+    every sheet whose span falls inside the retired bucket, not just that
+    one, or the rest leak as orphan rows/files (measured on prod: a single
+    1s bucket spanning ~3.5h held 134 sheets)."""
+    base = 1_800_000_000.0
+    collapsed_env = aged_env.model_copy(
+        update={"scrub": aged_env.scrub.model_copy(update={"aged_after_h": 1_000_000.0})}
+    )
+    conn = db.open_joined(aged_env.frigate.db_path, aged_env.sidecar.db_path)
+    try:
+        profile = generator.SourceProfile()
+        # Both segments (20 cells at 1.0s) split across two sheets --
+        # sheet_cols*sheet_rows == 12 in `aged_env` -- so this bucket's
+        # sheets start at base and at base+12, not just at base.
+        asyncio.run(
+            generator.generate_camera(
+                collapsed_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=base + 20.0, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        recent_sheets_1 = [
+            s for s in db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000)
+            if s["interval_s"] == 1.0
+        ]
+        assert len(recent_sheets_1) >= 2, "expected a multi-sheet recent-tier bucket"
+        assert {s["start_ts"] for s in recent_sheets_1} != {base}, (
+            "test setup didn't actually produce more than the bucket's first sheet"
+        )
+        sheet_paths_1 = [aged_env.scrub.cache_dir / s["path"] for s in recent_sheets_1]
+        assert all(p.exists() for p in sheet_paths_1)
+
+        no_backfill_env = aged_env.model_copy(
+            update={"scrub": aged_env.scrub.model_copy(update={"backfill_segments_per_cycle": 0})}
+        )
+        now2 = base + 20.0 + 1000.0
+        asyncio.run(
+            generator.generate_camera(
+                no_backfill_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=now2, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        recent_sheets_after = [
+            s for s in db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000)
+            if s["interval_s"] == 1.0
+        ]
+        recent_buckets_after = [
+            b for b in db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
+            if b["interval_s"] == 1.0
+        ]
+    finally:
+        conn.close()
+
+    assert not recent_buckets_after, "the decimated recent bucket must be retired"
+    assert not recent_sheets_after, (
+        "every sheet of the retired bucket must be gone, not just the first"
+    )
+    assert not any(p.exists() for p in sheet_paths_1), (
+        "every retired sheet's file must be unlinked, not just the first"
+    )
+
+
 def test_generation_leaves_no_scratch_behind(env: Settings) -> None:
     """Extraction used to stage frames in the system temp dir and leave every
     frame it didn't accept there -- about a segment's worth per cycle, forever,

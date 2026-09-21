@@ -455,32 +455,51 @@ def _retire_stale_recent_buckets(
             "WHERE camera = ? AND interval_s = ? ORDER BY start_ts",
             (camera, aged_interval_s),
         ).fetchall()
-        retirable = [
-            r["start_ts"]
+        retirable_ranges = [
+            (r["start_ts"], r["end_ts"])
             for r in stale
             if _span_covered_by_aged(aged_rows, r["start_ts"], r["end_ts"])
         ]
     else:
-        retirable = [r["start_ts"] for r in stale]
-    if not retirable:
+        retirable_ranges = [(r["start_ts"], r["end_ts"]) for r in stale]
+    if not retirable_ranges:
         return
+    bucket_starts = [start for start, _ in retirable_ranges]
 
-    placeholders = ",".join("?" for _ in retirable)
-    sheet_rows = sidecar_conn.execute(
-        "SELECT path, start_ts FROM scrub_sheets "
-        f"WHERE camera = ? AND interval_s = ? AND start_ts IN ({placeholders})",
-        (camera, recent_interval_s, *retirable),
+    # A sheet's own `start_ts` only equals its bucket's `start_ts` for the
+    # bucket's *first* sheet -- a bucket ~30 sheets deep (`_TierWriter.feed`)
+    # has every sheet after that at `bucket_start + k*cells_per_sheet*interval`,
+    # which never matches an `IN (bucket_starts)` filter. Measured on prod: a
+    # single 1s bucket spanning ~3.5h held 134 sheets, of which only the
+    # first would have been swept -- the other 133 would leak as orphan
+    # rows/files the moment retirement actually starts firing (it barely had
+    # before, since the aged tier it's gated on was itself barely populated
+    # pre-decimation). A sheet belongs to exactly one bucket by construction
+    # (its `start_ts` always falls inside that bucket's own span), so
+    # matching by range rather than equality is both necessary and correct.
+    all_sheets = sidecar_conn.execute(
+        "SELECT path, start_ts FROM scrub_sheets WHERE camera = ? AND interval_s = ?",
+        (camera, recent_interval_s),
     ).fetchall()
+    sheet_rows = [
+        r for r in all_sheets
+        if any(start <= r["start_ts"] < end for start, end in retirable_ranges)
+    ]
+    sheet_starts = sorted({r["start_ts"] for r in sheet_rows})
+
+    bucket_placeholders = ",".join("?" for _ in bucket_starts)
     sidecar_conn.execute(
         "DELETE FROM scrub_buckets "
-        f"WHERE camera = ? AND interval_s = ? AND start_ts IN ({placeholders})",
-        (camera, recent_interval_s, *retirable),
+        f"WHERE camera = ? AND interval_s = ? AND start_ts IN ({bucket_placeholders})",
+        (camera, recent_interval_s, *bucket_starts),
     )
-    sidecar_conn.execute(
-        "DELETE FROM scrub_sheets "
-        f"WHERE camera = ? AND interval_s = ? AND start_ts IN ({placeholders})",
-        (camera, recent_interval_s, *retirable),
-    )
+    if sheet_starts:
+        sheet_placeholders = ",".join("?" for _ in sheet_starts)
+        sidecar_conn.execute(
+            "DELETE FROM scrub_sheets "
+            f"WHERE camera = ? AND interval_s = ? AND start_ts IN ({sheet_placeholders})",
+            (camera, recent_interval_s, *sheet_starts),
+        )
     sidecar_conn.commit()
     for r in sheet_rows:
         p = cache_dir / r["path"]
