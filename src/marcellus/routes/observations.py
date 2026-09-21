@@ -283,6 +283,11 @@ async def observation_continuations(
         bkt = bucket(score, cfg, existing_same_encounter=existing_same, pinned=cand["pinned"])
         if bkt is None:
             continue
+        stats = cand["stats"]
+        if stats is None:
+            timing = {"source": "default", "samples": 0, "p50": None}
+        else:
+            timing = {"source": stats.source, "samples": stats.samples, "p50": stats.p50}
         suggestions.append(
             {
                 "camera": cand["camera"],
@@ -290,6 +295,7 @@ async def observation_continuations(
                 "score": score,
                 "bucket": bkt,
                 "why": why,
+                "timing": timing,
                 "observation_id": cand["atom_id"],
                 "encounter_id": cand["encounter_id"],
                 "start": cand["start_time"],

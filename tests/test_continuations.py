@@ -108,6 +108,18 @@ def test_elapsed_none_is_a_prediction_with_full_time_factor() -> None:
     assert any("prediction" in w or "typical" in w for w in why)
 
 
+def test_elapsed_none_without_learned_stats_says_no_learned_timing() -> None:
+    score, why = score_candidate(_SOURCE, "shed", "person", None, None, _ADJ_WITH_ZONES, _CFG)
+    assert score > 0
+    assert any("no learned timing yet" in w for w in why)
+
+
+def test_elapsed_present_without_learned_stats_says_no_learned_timing() -> None:
+    score, why = score_candidate(_SOURCE, "shed", "person", 15.0, None, _ADJ_WITH_ZONES, _CFG)
+    assert score > 0
+    assert any("no learned timing yet" in w for w in why)
+
+
 def test_elapsed_inside_p10_p90_scores_full_time_factor() -> None:
     inside, _ = score_candidate(_SOURCE, "shed", "person", 20.0, _LEARNED, _ADJ_WITH_ZONES, _CFG)
     early, _ = score_candidate(_SOURCE, "shed", "person", 0.0, _LEARNED, _ADJ_WITH_ZONES, _CFG)

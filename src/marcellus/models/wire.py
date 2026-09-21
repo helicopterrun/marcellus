@@ -456,12 +456,19 @@ class ContinuationFrom(_Wire):
     encounter_id: str
 
 
+class ContinuationTiming(_Wire):
+    source: str
+    samples: int
+    p50: float | None
+
+
 class ContinuationSuggestion(_Wire):
     camera: str
     window: list[float]
     score: float
     bucket: str
     why: list[str]
+    timing: ContinuationTiming
     observation_id: str | None
     encounter_id: str | None
     start: float | None
