@@ -522,6 +522,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 if getattr(app.state, "encounters", None) is not None
                 else None
             ),
+            # Encounter-aware push: the synchronous link the delivery path
+            # awaits (bounded by `push.encounter_link_timeout_s`) so a
+            # card can carry its encounter id. The queued `on_review` hook
+            # above is unchanged and still runs for every review.
+            encounter_link=(
+                app.state.encounters.link_now
+                if getattr(app.state, "encounters", None) is not None
+                else None
+            ),
         )
         app.state.push_engine = engine
         subscriber = MqttReviewSubscriber(

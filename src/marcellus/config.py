@@ -864,6 +864,23 @@ class PushSection(BaseModel):
     # How often the urgent re-sound sweep runs. Only ever emits the one
     # re-sound a card is owed -- not a keep-alive.
     delivery_resound_sweep_interval_s: float = 15.0
+    # -- Encounter-aware push (docs/encounters.md "Encounter-aware push") --
+    # Group a story's pushes in Notification Center by encounter instead of
+    # by camera: the APNs `thread-id` becomes the encounter id and the
+    # payload carries `encounter_id`/`cameras_path`. Presentation only --
+    # each camera still gets its own card unless `encounter_merge` is on.
+    encounter_threading: bool = True
+    # Route a later camera's review of the *same* encounter onto the card
+    # the first camera already opened -- one notification per encounter,
+    # its body becoming the crossing path. Off by default: with it off the
+    # would-be merges are still logged (DEBUG) so they can be counted
+    # against real duplicates before switching it on, same validation shape
+    # as `geometric_dedup`.
+    encounter_merge: bool = False
+    # Budget for the synchronous encounter link the push path awaits before
+    # delivery. On timeout the push goes out unthreaded/unmerged rather than
+    # late -- the queued worker still links the review a moment later.
+    encounter_link_timeout_s: float = 0.25
     # Backfilled events older than this are discarded rather than replayed.
     delivery_backfill_staleness_s: float = 300.0
     # Live Activity stale-date offset from now.
