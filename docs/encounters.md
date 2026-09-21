@@ -435,6 +435,22 @@ Existing rows (or ones linked while Frigate was unreachable) have
 `dir_source=''`; `marcellus encounters backfill-direction --limit N`
 rewalks and recomputes them.
 
+## Global timeline (M4)
+
+`GET /v1/timeline` (`routes/timeline.py`) composes several cameras'
+`/v1/reel` bodies into one multi-lane response for a shared `[start, end]`
+window (or, given `encounter=<id>`, the window/cameras derived from that
+encounter, padded by `pad_s`), overlaying each lane with the
+`encounter_members` rows on that camera in the window (via
+`store.list_observations`) and the distinct `EncounterSummary`s they
+reference. Guarded by a 12-camera cap and by `encounters.timeline_max_window_s`
+(default 6h, live-tunable); the observation overlay itself caps at 2000 rows
+and reports `truncated` rather than silently dropping the tail. Each Frigate
+lane's work runs via `scrub.compose_reel` (the `reel()` body, extracted so
+`/v1/reel` and `/v1/timeline` share it byte-for-byte), sharing one
+`frigate.db` read-only connection across the request's lanes since that
+side of `compose_reel` never leaves the event-loop thread.
+
 ## Verification bar
 
 `ruff check`, `ruff format --check`, `mypy`, `pytest` all green. Do not

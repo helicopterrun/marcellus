@@ -409,3 +409,32 @@ class NeighbourCamera(_Wire):
 class CameraNeighboursResponse(_Wire):
     camera: str
     neighbours: list[NeighbourCamera]
+
+
+# /v1/timeline (M4, docs/encounters.md "Global timeline") -- validate-then-
+# return, `_etagged`. Each lane extends `ReelResponse` with the camera name
+# and the observations overlaid on it.
+# --------------------------------------------------------------------------
+
+
+class TimelineObservation(_Wire):
+    id: str
+    start: float
+    end: float | None
+    encounter_id: str
+    labels: list[str]
+    direction: str
+    severity: str
+
+
+class TimelineLane(ReelResponse):
+    camera: str
+    observations: list[TimelineObservation]
+
+
+class TimelineResponse(_Wire):
+    t: float
+    window: list[float]
+    lanes: list[TimelineLane]
+    encounters: list[EncounterSummary]
+    truncated: bool

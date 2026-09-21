@@ -1707,3 +1707,56 @@ def test_sheets_index_etag_and_304(
         headers={"cookie": "session=fake"},
     )
     assert r3.headers["etag"] != etag
+
+
+def test_reel_route_matches_compose_reel_byte_for_byte(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M4 refactor regression: `reel()` is now a thin `compose_reel` wrapper
+    -- assert the route's JSON is byte-identical (via `sort_keys` dumps) to
+    calling `compose_reel` directly with the same params, so a future change
+    to either can't silently diverge them."""
+    _skip_auth(monkeypatch)
+
+    async def _fake_motion(
+        settings: object, camera: str, start: float, end: float, scale: float
+    ) -> tuple[list[float], bool]:
+        return [0.0] * int((end - start) / scale), False
+
+    monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _fake_motion)
+    frozen_now = time.time()
+    monkeypatch.setattr(scrub_routes.time, "time", lambda: frozen_now)
+
+    now = frozen_now
+    start, end = now - 3700, now
+    r = client.get(
+        "/v1/reel/doorbell",
+        params={"start": start, "end": end, "motion_scale": 10},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 200
+    route_body = r.json()
+
+    # Build a real Request against the same TestClient's app so
+    # `request.app.state.scrub_known_cameras_cache` etc. behave identically.
+    import asyncio as _asyncio
+
+    from fastapi import Request as _Request
+
+    from marcellus.routes.scrub import compose_reel as _compose_reel
+
+    async def _run() -> dict:
+        scope = {
+            "type": "http",
+            "app": client.app,
+            "headers": [],
+            "method": "GET",
+            "path": "/v1/reel/doorbell",
+        }
+        req = _Request(scope)
+        settings = client.app.state.settings
+        return await _compose_reel(req, settings, "doorbell", start, end, 10.0)
+
+    direct_body = _asyncio.run(_run())
+
+    assert json.dumps(route_body, sort_keys=True) == json.dumps(direct_body, sort_keys=True)

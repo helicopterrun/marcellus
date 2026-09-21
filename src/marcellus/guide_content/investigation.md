@@ -97,3 +97,30 @@ basically where the encounter already is," not a handoff.
 - `GET /v1/cameras/{camera}/neighbours` -- one camera's directed edges and
   their transition stats; 404 if the camera has no zones and no adjacency
   edges.
+
+## Global timeline
+
+`GET /v1/timeline` composes multiple cameras' reels into one call, for
+"what happened across the property in this window" instead of one camera at
+a time:
+
+- `start`/`end` (epoch seconds) and `cameras` (comma list) are required,
+  unless `encounter=<id>` is given -- then the window is that encounter's
+  `[start_time, end_time or now]` padded by `pad_s` (default 60s) on each
+  side, and `cameras` defaults to the encounter's own camera list (an
+  explicit `cameras` still overrides it).
+- `motion_scale` has the same meaning as `/v1/reel`'s.
+- Each `lanes[]` entry is exactly what `/v1/reel/{camera}` would return for
+  the same window, plus `camera` and `observations` (the encounter-linked
+  atoms overlapping the window on that camera: `id`, `start`, `end`,
+  `encounter_id`, `labels`, `direction`, `severity`).
+- `encounters[]` lists the distinct encounter summaries those observations
+  belong to, ordered by start.
+- `truncated` is `true` when the observation overlay hit its internal cap
+  (2000 rows) -- the lanes themselves are never truncated.
+
+Guards, all `400` with a machine-readable `error`/`message` body (`422` for
+missing `start`/`end`/`cameras` outside the `encounter=` form, `404` for an
+unknown camera or encounter, mirroring `/v1/reel`): at most 12 cameras per
+request, and a window no longer than `timeline_max_window_s` (see
+[Encounters](/guide/encounters) "Global timeline").
