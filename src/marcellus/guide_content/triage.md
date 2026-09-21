@@ -1,7 +1,7 @@
 ---
 title: Triage
-section: sidecar
-order: 3
+section: daily-review
+order: 2
 routes: ["/triage", "/event/{event_id}"]
 ---
 
