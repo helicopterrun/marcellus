@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 
 from marcellus import tuning
+from marcellus.zones import configured_camera_names
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +87,30 @@ async def put_tuning(request: Request) -> dict[str, Any]:
         )
     new_overrides = {k: v for k, v in raw_overrides.items() if v is not None}
 
+    for key in ("encounters.adjacency", "encounters.not_adjacent"):
+        value = new_overrides.get(key)
+        if isinstance(value, list) and all(isinstance(p, list) and len(p) == 2 for p in value):
+            new_overrides[key] = tuning.normalise_pairs(value)
+
     errors = tuning.validate(new_overrides, settings)
     if errors:
         raise HTTPException(status_code=400, detail={"error": _ERR_INVALID, "detail": errors})
+
+    pair_keys = [
+        k for k in ("encounters.adjacency", "encounters.not_adjacent") if k in new_overrides
+    ]
+    if pair_keys:
+        known_cameras = configured_camera_names(settings.frigate.config_path) or set()
+        camera_errors: list[str] = []
+        for key in pair_keys:
+            for pair in new_overrides[key]:
+                unknown = [c for c in pair if known_cameras and c not in known_cameras]
+                if unknown:
+                    camera_errors.append(f"{key}: unknown camera(s) {unknown!r} in {pair!r}")
+        if camera_errors:
+            raise HTTPException(
+                status_code=400, detail={"error": _ERR_INVALID, "detail": camera_errors}
+            )
 
     old_overrides = tuning.read_overrides(path)
     snapshot = tuning.get_startup_snapshot() or {}

@@ -8,6 +8,7 @@ from marcellus.encounters.linker import (
     LinkerConfig,
     OpenEncounter,
     decide,
+    family_of,
     fold,
     normalise_labels,
 )
@@ -298,5 +299,52 @@ def test_companion_joins_while_first_subject_still_on_camera() -> None:
         _atom("a2", "shed", 10.0, 15.0, labels=("dog",)),
     ]
     encs = fold(atoms, ADJ, CFG, now=now)
+    assert len(encs) == 1
+    assert encs[0].atom_ids == ["a1", "a2"]
+
+
+def test_family_of_known_label_unchanged() -> None:
+    assert family_of("person") == "person"
+
+
+def test_family_of_unknown_label_is_itself_not_shared_default() -> None:
+    # waste_bin and garage are both unnamed (not in LABEL_FAMILIES), but
+    # each is its own family now -- they must not collide on "default".
+    assert family_of("waste_bin") == "waste_bin"
+    assert family_of("garage") == "garage"
+    assert family_of("waste_bin") != family_of("garage")
+
+
+def test_waste_bin_does_not_continue_garage_encounter() -> None:
+    atoms = [
+        _atom("a1", "alley-wide", 0.0, 10.0, labels=("garage",)),
+        _atom("a2", "alley-wide", 15.0, 20.0, labels=("waste_bin",)),
+    ]
+    encs = fold(atoms, ADJ, CFG, now=NOW)
+    # No shared family, no companionship overlap (spans don't overlap) ->
+    # two separate encounters.
+    assert len(encs) == 2
+
+
+def test_waste_bin_continues_another_waste_bin_atom() -> None:
+    atoms = [
+        _atom("a1", "alley-wide", 0.0, 10.0, labels=("waste_bin",)),
+        _atom("a2", "alley-wide", 15.0, 20.0, labels=("waste_bin",)),
+    ]
+    encs = fold(atoms, ADJ, CFG, now=NOW)
+    assert len(encs) == 1
+    assert encs[0].atom_ids == ["a1", "a2"]
+
+
+def test_shared_family_gap_uses_shared_allowance_not_extra_label() -> None:
+    # Encounter is person-only. A later atom carries both person and car
+    # labels -- the shared family is "person" (gap_s 90s), not "vehicle"
+    # (gap_s 45s). A gap of 60s is within the person allowance but would
+    # exceed the vehicle-only allowance, so this must still link.
+    atoms = [
+        _atom("a1", "alley-wide", 0.0, 10.0, labels=("person",)),
+        _atom("a2", "alley-wide", 70.0, 80.0, labels=("person", "car")),
+    ]
+    encs = fold(atoms, ADJ, CFG, now=NOW)
     assert len(encs) == 1
     assert encs[0].atom_ids == ["a1", "a2"]

@@ -53,6 +53,7 @@ encounters:
   min_copresence_s: 3.0          # companionship needs this much time overlap
   adjacency: []                  # extra edges, e.g. [["alley-wide","shed"]]
   not_adjacent: []               # edges to remove even if zones are shared
+  retention_days: 30             # sealed encounters older than this are pruned hourly
 ```
 All fields must be mentioned in the guide topic (see test_guide.py rules).
 
@@ -74,6 +75,17 @@ name** (`load_camera_zones` output). Config `adjacency` adds edges,
 `not_adjacent` removes them (config wins). Footprint-overlap adjacency
 (camera_layout/optics) is a documented follow-up, not slice 1.
 
+Both `encounters.adjacency` and `encounters.not_adjacent` are live,
+user-editable `/settings` knobs (`tuning.py` kind `pair_list`, rendered as a
+textarea of one `camera_a, camera_b` pair per line) -- no restart needed.
+`EncounterService.reconcile()` diffs the effective lists against what
+`self.adjacency` was last built from and only re-derives zones + rebuilds
+the `Adjacency` graph when they actually changed; the live MQTT hook reads
+the same `self.adjacency` attribute, so it picks up a rebuild for free. The
+`/encounters` admin page renders the same `Adjacency.describe()`-shaped data
+`/v1/encounters/adjacency` serves, with a link to `/settings#encounters` to
+edit it.
+
 ## linker.py (pure, fully unit-testable)
 
 ```python
@@ -81,7 +93,7 @@ LABEL_FAMILIES = {"person": {"person"},
                   "vehicle": {"car","truck","bus","motorcycle","bicycle"},
                   "animal": {"dog","cat","raccoon","bird","squirrel","fox","deer","skunk","opossum","rabbit","bear"},
                   "package": {"package"}}
-def family_of(label: str) -> str   # "default" if unknown
+def family_of(label: str) -> str   # unnamed labels are their own family (not a shared "default")
 
 @dataclass(frozen=True)
 class Atom:
@@ -117,9 +129,12 @@ if `pinned_to` is given and that encounter is open, return it with reason
    atom.sub_labels and enc.identities both non-empty and disjoint
    (contradictory identity).
 2. **Gap**: `gap = atom.start_time - enc.last_end` (negative = overlap).
-   Allowed gap = max over the atom's label families of `gap_s[family]`
-   (fallback `gap_s["default"]`). Identity match (sub_labels ∩ identities)
-   allows 3× that gap.
+   Allowed gap = max over the families the atom and encounter *share*
+   (atom.labels' families ∩ enc.labels' families) of `gap_s[family]`
+   (fallback `gap_s["default"]`) -- an atom with an extra, unshared label
+   family (e.g. person+car joining a person-only encounter) doesn't get
+   that family's allowance. Identity match (sub_labels ∩ identities) allows
+   3× that gap.
 3. **Continuity** (needs a shared label family between atom.labels and
    enc.labels, and gap within allowance). Spatial test against the last
    `recent_cameras` distinct cameras of the encounter:
@@ -203,13 +218,23 @@ atom's own trivial encounter always wins on `same_camera`, since its only
 member is itself). Only lone founders are ever re-homed this way; an atom
 already grouped with another member never moves. Either re-home path
 recomputes the donor encounter's aggregates afterward and deletes it if it's
-left with zero members. `recompute(conn, encounter_id)` (aggregates from
+left with zero members -- `remove_member(conn, atom_id, now) -> str | None`
+is the public entry point for this same donor cleanup when an atom's own
+membership row is dropped outright (Frigate's reviewsegment vanished), used
+by the reconciler's vanished-segment cleanup. `upsert_atom` takes a
+`commit: bool = True` kwarg -- `reconcile` passes `commit=False` and commits
+once per cycle itself instead of once per atom. `member_unchanged(conn,
+atom) -> bool` compares a stored membership row's serialised fields against
+an atom's current ones, letting `reconcile` skip a no-op decide/upsert.
+`recompute(conn, encounter_id)` (aggregates from
 members; the min `start_time` ignores non-positive values — a parser
 artifact, see below — when at least one member has a real one), `seal_stale
 (conn, now, cfg) -> int` (seal when open and `now - last_end > 1.5 × largest
 gap_s` or span ≥ max_duration_s), `list_recent(conn, *, since, limit,
 camera=None)`, `get(conn, encounter_id)`, `decisions_for(conn, atom_id)`,
-`get_watermark/set_watermark`.
+`get_watermark/set_watermark`, `prune(conn, now, retention_days) -> dict`
+(deletes sealed encounters -- and their members/decisions -- past
+`retention_days`, one transaction).
 
 A live review message with `start_time <= 0` (Frigate occasionally sends
 `after.start_time` as 0/absent) is skipped for linking if no member row
@@ -241,8 +266,25 @@ class EncounterService:
   out so both share it), sort by start_time, run decide/upsert for each
   (existing members get their end_time/objects refreshed), then
   `seal_stale`, advance the watermark to the max start_time seen, return
-  stats (rows, new, updated, sealed). This is the "belt": anything the
-  MQTT path missed or saw only partially is repaired here.
+  stats (rows, new, updated, sealed, skipped, errors, removed). This is the
+  "belt": anything the MQTT path missed or saw only partially is repaired
+  here. The whole per-atom loop runs inside one transaction (explicit
+  `BEGIN` up front -- python's sqlite3 module only auto-BEGINs ahead of
+  INSERT/UPDATE/DELETE/REPLACE, not ahead of a bare `SAVEPOINT`, so without
+  it each atom's `RELEASE SAVEPOINT` would itself auto-commit) with one
+  `SAVEPOINT`/`RELEASE` (or `ROLLBACK TO`+`RELEASE` on an exception, counted
+  in `errors`, logged via `logger.exception`) per atom, so one bad atom
+  can't lose the whole cycle's work or block `seal_stale`/`set_watermark`.
+  An atom whose stored membership row is already identical
+  (`store.member_unchanged`) and isn't a re-homeable lone founder
+  (`store.founder_singleton` is None) is skipped entirely (counted in
+  `skipped`) rather than re-decided and re-written. After the per-atom loop
+  (and only when the Frigate read itself didn't fail -- a transient read
+  error must never be read as "everything vanished"), member rows at or
+  after `since` whose atom id wasn't among the rows just read are dropped
+  via `store.remove_member` (counted in `removed`). At most once per hour
+  the cycle also calls `store.prune(sidecar_conn, now,
+  settings.encounters.retention_days)` and logs nonzero counts.
 * Wiring in `server.py` lifespan, mirroring `_face_enrich_loop`: when
   `settings.encounters.enabled`, build adjacency from
   `load_camera_zones(settings.frigate.config_path)` + config, construct the

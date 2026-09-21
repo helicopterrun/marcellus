@@ -109,6 +109,7 @@ async def encounters_page(
             "since": window_since,
             "enabled": settings.encounters.enabled,
             "active_page": "encounters",
+            "adjacency": _adjacency_for(request).to_json(),
         },
     )
 

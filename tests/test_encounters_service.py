@@ -578,3 +578,417 @@ def test_observe_review_exception_does_not_propagate_through_handle_event(
     # Must not raise, even though the hook always blows up.
     sent = asyncio.run(engine.handle_event(event))
     assert isinstance(sent, int)
+
+
+# --- Reconcile hygiene: one txn, skip-unchanged, per-atom error isolation,
+# vanished-segment cleanup, retention (docs/encounters.md "Tests" section).
+
+
+def _three_atom_reviews(frigate_db: Path, now: float) -> None:
+    # Same camera, close together so all three link into one encounter --
+    # none stays a lone founder, so `member_unchanged` skip applies to all
+    # three on a repeat reconcile (a genuine lone founder is always
+    # re-decided, never skipped, since a later message might re-home it).
+    for rid, start in (("r1", now - 300), ("r2", now - 280), ("r3", now - 260)):
+        _insert_review(
+            frigate_db,
+            rid=rid,
+            camera="alley-wide",
+            start=start,
+            end=start + 5,
+            objects=("person",),
+        )
+
+
+def test_reconcile_skips_unchanged_atoms_on_second_run(tmp_path: Path) -> None:
+    frigate_db = _reviewsegment_db(tmp_path)
+    now = time.time()
+    _three_atom_reviews(frigate_db, now)
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()), now=lambda: now)
+
+    first = service.reconcile()
+    assert first.rows == 3
+    assert first.new == 3
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        encounter_ids_before = {
+            r["atom_id"]: r["encounter_id"]
+            for r in conn.execute("SELECT atom_id, encounter_id FROM encounter_members")
+        }
+    finally:
+        conn.close()
+
+    second = service.reconcile()
+    assert second.skipped == 3
+    assert second.new == 0
+    assert second.updated == 0
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        encounter_ids_after = {
+            r["atom_id"]: r["encounter_id"]
+            for r in conn.execute("SELECT atom_id, encounter_id FROM encounter_members")
+        }
+    finally:
+        conn.close()
+    assert encounter_ids_after == encounter_ids_before
+
+
+def test_reconcile_isolates_a_failing_atom(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    frigate_db = _reviewsegment_db(tmp_path)
+    now = time.time()
+    _three_atom_reviews(frigate_db, now)
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()), now=lambda: now)
+
+    real_upsert = store.upsert_atom
+
+    def _flaky(conn, atom, decision, now_, **kw):  # type: ignore[no-untyped-def]
+        if atom.atom_id == "r2":
+            raise RuntimeError("boom")
+        return real_upsert(conn, atom, decision, now_, **kw)
+
+    monkeypatch.setattr(store, "upsert_atom", _flaky)
+
+    stats = service.reconcile()
+    assert stats.errors == 1
+    assert stats.new == 2
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        rows = {r["atom_id"] for r in conn.execute("SELECT atom_id FROM encounter_members")}
+        assert rows == {"r1", "r3"}
+        watermark = store.get_watermark(conn)
+        assert watermark == pytest.approx(now - 260)
+    finally:
+        conn.close()
+
+
+def test_reconcile_removes_vanished_segment_and_shrinks_encounter(tmp_path: Path) -> None:
+    """Both atoms are closed (`end_time` set) well past `_VANISH_GRACE_S`, so
+    they're eligible for vanished-segment removal once dropped from
+    `reviewsegment`."""
+    frigate_db = _reviewsegment_db(tmp_path)
+    now = time.time()
+    _insert_review(
+        frigate_db,
+        rid="a1",
+        camera="alley-wide",
+        start=now - 1000,
+        end=now - 995,
+        objects=("person",),
+    )
+    _insert_review(
+        frigate_db,
+        rid="a2",
+        camera="alley-wide",
+        start=now - 990,
+        end=now - 985,
+        objects=("person",),
+    )
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()), now=lambda: now)
+
+    first = service.reconcile()
+    assert first.new == 2
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        rows = {
+            r["atom_id"]: r["encounter_id"] for r in conn.execute("SELECT * FROM encounter_members")
+        }
+        assert rows["a1"] == rows["a2"]
+        enc_id = rows["a1"]
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(frigate_db)
+    conn.execute("DELETE FROM reviewsegment WHERE id = 'a2'")
+    conn.commit()
+    conn.close()
+
+    second = service.reconcile()
+    assert second.removed == 1
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        row = conn.execute("SELECT atom_id FROM encounter_members WHERE atom_id = 'a2'").fetchone()
+        assert row is None
+        enc_row = store.get(conn, enc_id)
+        assert enc_row is not None
+        assert enc_row["atom_count"] == 1
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(frigate_db)
+    conn.execute("DELETE FROM reviewsegment WHERE id = 'a1'")
+    conn.commit()
+    conn.close()
+
+    third = service.reconcile()
+    assert third.removed == 1
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        assert store.get(conn, enc_id) is None
+    finally:
+        conn.close()
+
+
+async def test_reconcile_never_removes_an_open_live_linked_member(tmp_path: Path) -> None:
+    """Frigate publishes the MQTT new/update message (which the live hook
+    links right away) before it writes the `reviewsegment` row -- that only
+    happens once the segment closes. A member the live hook just linked, with
+    no matching `reviewsegment` row yet and `end_time IS NULL`, must never be
+    treated as vanished, no matter how long `reconcile` waits."""
+    frigate_db = _reviewsegment_db(tmp_path)
+    now = time.time()
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()), now=lambda: now)
+
+    service.observe_review(
+        ReviewEvent(
+            review_id="live1",
+            camera="alley-wide",
+            severity="alert",
+            labels=("person",),
+            msg_type="new",
+            start_time=now - 1000,
+        )
+    )
+    await service.process_pending()
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        row = conn.execute(
+            "SELECT end_time FROM encounter_members WHERE atom_id = 'live1'"
+        ).fetchone()
+        assert row is not None
+        assert row["end_time"] is None
+    finally:
+        conn.close()
+
+    # `reviewsegment` never gets a row for it (still open in Frigate) --
+    # reconcile must leave it alone regardless of grace elapsed.
+    stats = service.reconcile()
+    assert stats.removed == 0
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        row = conn.execute(
+            "SELECT atom_id FROM encounter_members WHERE atom_id = 'live1'"
+        ).fetchone()
+        assert row is not None
+    finally:
+        conn.close()
+
+
+def test_reconcile_vanish_grace_window(tmp_path: Path) -> None:
+    """A closed member missing from `reviewsegment` survives inside the
+    `_VANISH_GRACE_S` window and is removed once past it."""
+    frigate_db = _reviewsegment_db(tmp_path)
+    now = time.time()
+    _insert_review(
+        frigate_db,
+        rid="fresh",
+        camera="alley-wide",
+        start=now - 2000,
+        end=now - 60,  # closed 60s ago -- inside the 300s grace
+        objects=("person",),
+    )
+    _insert_review(
+        frigate_db,
+        rid="old",
+        camera="alley-wide",
+        start=now - 2500,
+        end=now - 600,  # closed 600s ago -- past the 300s grace
+        objects=("person",),
+    )
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()), now=lambda: now)
+
+    first = service.reconcile()
+    assert first.new == 2
+
+    conn = sqlite3.connect(frigate_db)
+    conn.execute("DELETE FROM reviewsegment WHERE id IN ('fresh', 'old')")
+    conn.commit()
+    conn.close()
+
+    second = service.reconcile()
+    assert second.removed == 1
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        assert (
+            conn.execute("SELECT atom_id FROM encounter_members WHERE atom_id = 'fresh'").fetchone()
+            is not None
+        )
+        assert (
+            conn.execute("SELECT atom_id FROM encounter_members WHERE atom_id = 'old'").fetchone()
+            is None
+        )
+    finally:
+        conn.close()
+
+
+class _ConnProxy:
+    """Thin wrapper forwarding everything to a real sqlite3.Connection --
+    `sqlite3.Connection` is a C type and can't have its methods patched
+    directly (`cannot set 'execute' attribute of immutable type`), so tests
+    that need to intercept one connection's calls wrap the connection
+    object itself instead of the class."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._conn, name)
+
+
+def test_reconcile_skips_removal_when_frigate_read_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frigate_db = _reviewsegment_db(tmp_path)
+    now = time.time()
+    _insert_review(
+        frigate_db,
+        rid="a1",
+        camera="alley-wide",
+        start=now - 100,
+        end=now - 95,
+        objects=("person",),
+    )
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()), now=lambda: now)
+    first = service.reconcile()
+    assert first.new == 1
+
+    class _BoomProxy(_ConnProxy):
+        def execute(self, sql, *a, **kw):  # type: ignore[no-untyped-def]
+            if "FROM reviewsegment" in sql:
+                raise sqlite3.OperationalError("boom")
+            return self._conn.execute(sql, *a, **kw)
+
+    real_open_frigate_ro = db.open_frigate_ro
+    monkeypatch.setattr(db, "open_frigate_ro", lambda path: _BoomProxy(real_open_frigate_ro(path)))
+    stats = service.reconcile()
+    assert stats.removed == 0
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        row = conn.execute("SELECT atom_id FROM encounter_members WHERE atom_id = 'a1'").fetchone()
+        assert row is not None
+    finally:
+        conn.close()
+
+
+def test_reconcile_commits_at_most_three_times(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frigate_db = _reviewsegment_db(tmp_path)
+    now = time.time()
+    _three_atom_reviews(frigate_db, now)
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()), now=lambda: now)
+
+    commit_count = 0
+
+    class _CountingProxy(_ConnProxy):
+        def commit(self) -> None:
+            nonlocal commit_count
+            commit_count += 1
+            self._conn.commit()
+
+    real_conn = service._conn
+    monkeypatch.setattr(service, "_conn", lambda: _CountingProxy(real_conn()))
+    service.reconcile()
+    assert commit_count <= 3
+
+
+def test_encounters_prune_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from typer.testing import CliRunner
+
+    from marcellus.cli import app as cli_app
+
+    frigate_db = _reviewsegment_db(tmp_path)
+    settings = _settings(tmp_path, frigate_db)
+    monkeypatch.setenv("MARCELLUS_SIDECAR__DB_PATH", str(settings.sidecar.db_path))
+    monkeypatch.setenv("MARCELLUS_FRIGATE__DB_PATH", str(frigate_db))
+    monkeypatch.setenv("MARCELLUS_FRIGATE__CONFIG_PATH", str(tmp_path / "frigate-config.yml"))
+    (tmp_path / "frigate-config.yml").write_text("cameras: {}\n")
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    conn.close()
+
+    runner = CliRunner()
+    result = runner.invoke(cli_app, ["encounters", "prune"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert set(payload) == {"encounters", "members", "decisions"}
+
+
+def test_reconcile_picks_up_live_adjacency_override(tmp_path: Path) -> None:
+    """encounters.adjacency is a live tuning key (Part B): a reconcile after
+    the override changes must use the new edge without recreating the
+    service."""
+    frigate_db = _reviewsegment_db(tmp_path)
+    now = time.time()
+    _insert_review(
+        frigate_db,
+        rid="r1",
+        camera="alley-wide",
+        start=now - 200,
+        end=now - 190,
+        objects=("person",),
+    )
+
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()), now=lambda: now)
+    stats = service.reconcile()
+    assert stats.new == 1
+    assert not service.adjacency.adjacent("alley-wide", "street")
+
+    _insert_review(
+        frigate_db,
+        rid="r2",
+        camera="street",
+        start=now - 150,
+        end=now - 140,
+        objects=("person",),
+    )
+
+    # No override yet -- the new atom on "street" isn't adjacent to
+    # "alley-wide", so it starts a new encounter.
+    stats2 = service.reconcile()
+    assert stats2.new == 1
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    before = conn.execute("SELECT COUNT(*) AS c FROM encounters").fetchone()["c"]
+    conn.close()
+    assert before == 2
+
+    # Live-override the adjacency graph with a brand-new camera ("yard") not
+    # sharing a camera with either open encounter -- it can only link via
+    # the "adjacent" continuity rule, exercising the override.
+    settings.encounters.adjacency = [["street", "yard"]]
+    _insert_review(
+        frigate_db,
+        rid="r3",
+        camera="yard",
+        start=now - 90,
+        end=now - 80,
+        objects=("person",),
+    )
+    service.reconcile()
+    assert service.adjacency.adjacent("street", "yard")
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    r3_row = conn.execute(
+        "SELECT encounter_id, link_reason FROM encounter_members WHERE atom_id = 'r3'"
+    ).fetchone()
+    r2_row = conn.execute(
+        "SELECT encounter_id FROM encounter_members WHERE atom_id = 'r2'"
+    ).fetchone()
+    conn.close()
+    assert r3_row["link_reason"] == "adjacent"
+    assert r3_row["encounter_id"] == r2_row["encounter_id"]

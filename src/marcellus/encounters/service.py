@@ -27,6 +27,16 @@ logger = logging.getLogger(__name__)
 #: safety net if it's ever exceeded, so dropping past this point is fine.
 _QUEUE_MAXSIZE = 1000
 
+#: Grace period (seconds) before a member row with no matching `reviewsegment`
+#: row is considered vanished. Frigate publishes the MQTT new/update message
+#: (which the live hook links immediately) before it writes the `reviewsegment`
+#: row -- that only happens when the segment closes -- so a just-linked, still
+#: open atom legitimately has no reviewsegment row yet. Vanished-segment
+#: cleanup therefore only ever considers CLOSED members (`end_time IS NOT
+#: NULL`) whose end_time is older than this grace window; a NULL end_time is
+#: never eligible for removal regardless of age.
+_VANISH_GRACE_S = 300.0
+
 
 @dataclass(frozen=True)
 class ReconcileStats:
@@ -34,6 +44,9 @@ class ReconcileStats:
     new: int
     updated: int
     sealed: int
+    skipped: int = 0
+    errors: int = 0
+    removed: int = 0
 
 
 def _linker_config(settings: Settings) -> LinkerConfig:
@@ -54,6 +67,12 @@ def _review_data(raw: object) -> dict[str, object]:
     except (TypeError, ValueError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _freeze_pairs(pairs: list[list[str]]) -> tuple[tuple[str, ...], ...]:
+    """Hashable/comparable snapshot of an `encounters.adjacency`/
+    `not_adjacent` list, for change detection between reconcile cycles."""
+    return tuple(tuple(pair) for pair in pairs)
 
 
 def _strings(value: object) -> tuple[str, ...]:
@@ -79,9 +98,18 @@ class EncounterService:
         self.adjacency = adjacency
         self._now = now
         self._cfg = _linker_config(settings)
+        # Cache of the adjacency/not_adjacent lists `self.adjacency` was last
+        # built from, so `reconcile` only re-derives zones + rebuilds the
+        # graph when a tuning override actually changed one of them, not on
+        # every cycle.
+        self._adjacency_cfg: tuple[tuple[tuple[str, ...], ...], tuple[tuple[str, ...], ...]] = (
+            _freeze_pairs(settings.encounters.adjacency),
+            _freeze_pairs(settings.encounters.not_adjacent),
+        )
         self._last_reconcile: ReconcileStats | None = None
         self._last_reconcile_at: float | None = None
         self._last_error: str | None = None
+        self._last_prune_at: float | None = None
         # Live-hook decoupling (see `observe_review`/`run_worker`): sqlite
         # writes never happen on the caller's thread/loop, only inside the
         # worker (via `asyncio.to_thread`) or `reconcile`.
@@ -90,6 +118,27 @@ class EncounterService:
 
     def _conn(self) -> sqlite3.Connection:
         return db.open_sidecar(self.settings.sidecar.db_path)
+
+    def _refresh_adjacency(self) -> None:
+        """Rebuild `self.adjacency` when the effective `encounters.adjacency`/
+        `not_adjacent` (tuning-overridable, live) lists differ from what it
+        was last built from. Zone names only need loading from Frigate's
+        config when that happens -- not on every reconcile cycle -- and the
+        live worker (`_link_review`) picks up the rebuilt object for free
+        since it reads `self.adjacency` on every call."""
+        enc = self.settings.encounters
+        current = (_freeze_pairs(enc.adjacency), _freeze_pairs(enc.not_adjacent))
+        if current == self._adjacency_cfg:
+            return
+        from marcellus.encounters.adjacency import build_adjacency
+        from marcellus.zones import load_camera_zones
+
+        self.adjacency = build_adjacency(
+            load_camera_zones(self.settings.frigate.config_path),
+            extra=enc.adjacency,
+            removed=enc.not_adjacent,
+        )
+        self._adjacency_cfg = current
 
     def _pin_split(
         self, conn: sqlite3.Connection, atom_id: str
@@ -242,6 +291,7 @@ class EncounterService:
         # recent_cameras/min_copresence_s pick up a tuning override live,
         # without needing a restart to recreate the service.
         self._cfg = _linker_config(self.settings)
+        self._refresh_adjacency()
         now = self._now()
         frigate_conn = db.open_frigate_ro(self.settings.frigate.db_path)
         sidecar_conn = self._conn()
@@ -252,6 +302,7 @@ class EncounterService:
             else:
                 since = watermark - self._cfg.max_duration_s
 
+            frigate_read_failed = False
             try:
                 rows = frigate_conn.execute(
                     "SELECT id, camera, start_time, end_time, severity, data "
@@ -260,6 +311,7 @@ class EncounterService:
                 ).fetchall()
             except sqlite3.Error:
                 rows = []
+                frigate_read_failed = True
 
             atoms = sorted(
                 (self._atom_from_review_row(row) for row in rows), key=lambda a: a.start_time
@@ -269,58 +321,132 @@ class EncounterService:
             by_id = {e.encounter_id: e for e in open_encounters}
             new_count = 0
             updated_count = 0
+            skipped_count = 0
+            error_count = 0
+
+            # One transaction for the whole cycle: python's sqlite3 module
+            # only auto-BEGINs ahead of INSERT/UPDATE/DELETE/REPLACE
+            # statements, not ahead of SAVEPOINT -- without this explicit
+            # BEGIN, each per-atom `RELEASE SAVEPOINT` below would itself be
+            # the outer transaction and auto-commit to disk, defeating the
+            # point of batching (verified empirically: a bare
+            # SAVEPOINT/INSERT/RELEASE with no enclosing BEGIN is visible to
+            # another connection immediately, before `conn.commit()` runs).
+            sidecar_conn.execute("BEGIN")
             for atom in atoms:
-                existing = sidecar_conn.execute(
-                    "SELECT encounter_id FROM encounter_members WHERE atom_id = ?",
-                    (atom.atom_id,),
-                ).fetchone()
-                old_encounter_id = str(existing["encounter_id"]) if existing is not None else None
-                pinned_to, split_from = self._pin_split(sidecar_conn, atom.atom_id)
-                founder = store.founder_singleton(sidecar_conn, atom.atom_id)
-                exclude = split_from | ({founder} if founder is not None else frozenset())
-                decision = decide(
-                    atom,
-                    list(by_id.values()),
-                    self.adjacency,
-                    self._cfg,
-                    now=now,
-                    pinned_to=pinned_to,
-                    split_from=exclude,
-                )
-                encounter_id = store.upsert_atom(sidecar_conn, atom, decision, now)
+                sidecar_conn.execute("SAVEPOINT atom")
+                try:
+                    existing = sidecar_conn.execute(
+                        "SELECT encounter_id FROM encounter_members WHERE atom_id = ?",
+                        (atom.atom_id,),
+                    ).fetchone()
+                    old_encounter_id = (
+                        str(existing["encounter_id"]) if existing is not None else None
+                    )
 
-                # Keep the in-memory `by_id` view consistent with what the
-                # store just did, including a re-home: refresh the
-                # destination, and refresh (or drop, if it was deleted for
-                # having zero members left) the donor.
-                if old_encounter_id is not None and old_encounter_id != encounter_id:
-                    donor = store.load_one(sidecar_conn, old_encounter_id, now)
-                    if donor is not None:
-                        by_id[old_encounter_id] = donor
+                    if (
+                        existing is not None
+                        and store.member_unchanged(sidecar_conn, atom)
+                        and store.founder_singleton(sidecar_conn, atom.atom_id) is None
+                    ):
+                        skipped_count += 1
+                        sidecar_conn.execute("RELEASE SAVEPOINT atom")
+                        continue
+
+                    pinned_to, split_from = self._pin_split(sidecar_conn, atom.atom_id)
+                    founder = store.founder_singleton(sidecar_conn, atom.atom_id)
+                    exclude = split_from | ({founder} if founder is not None else frozenset())
+                    decision = decide(
+                        atom,
+                        list(by_id.values()),
+                        self.adjacency,
+                        self._cfg,
+                        now=now,
+                        pinned_to=pinned_to,
+                        split_from=exclude,
+                    )
+                    encounter_id = store.upsert_atom(
+                        sidecar_conn, atom, decision, now, commit=False
+                    )
+
+                    # Keep the in-memory `by_id` view consistent with what the
+                    # store just did, including a re-home: refresh the
+                    # destination, and refresh (or drop, if it was deleted for
+                    # having zero members left) the donor.
+                    if old_encounter_id is not None and old_encounter_id != encounter_id:
+                        donor = store.load_one(sidecar_conn, old_encounter_id, now)
+                        if donor is not None:
+                            by_id[old_encounter_id] = donor
+                        else:
+                            by_id.pop(old_encounter_id, None)
+
+                    if encounter_id in by_id and old_encounter_id != encounter_id:
+                        refreshed = store.load_one(sidecar_conn, encounter_id, now)
+                        if refreshed is not None:
+                            by_id[encounter_id] = refreshed
+                    elif encounter_id in by_id:
+                        apply(by_id[encounter_id], atom, now)
                     else:
-                        by_id.pop(old_encounter_id, None)
+                        refreshed = store.load_one(sidecar_conn, encounter_id, now)
+                        if refreshed is not None:
+                            by_id[encounter_id] = refreshed
+                    if existing is None:
+                        new_count += 1
+                    else:
+                        updated_count += 1
+                except Exception:
+                    logger.exception(
+                        "encounters: reconcile failed for atom %s -- rolling back its "
+                        "partial writes and continuing the cycle",
+                        atom.atom_id,
+                    )
+                    sidecar_conn.execute("ROLLBACK TO SAVEPOINT atom")
+                    sidecar_conn.execute("RELEASE SAVEPOINT atom")
+                    error_count += 1
+                else:
+                    sidecar_conn.execute("RELEASE SAVEPOINT atom")
 
-                if encounter_id in by_id and old_encounter_id != encounter_id:
-                    refreshed = store.load_one(sidecar_conn, encounter_id, now)
-                    if refreshed is not None:
-                        by_id[encounter_id] = refreshed
-                elif encounter_id in by_id:
-                    apply(by_id[encounter_id], atom, now)
-                else:
-                    refreshed = store.load_one(sidecar_conn, encounter_id, now)
-                    if refreshed is not None:
-                        by_id[encounter_id] = refreshed
-                if existing is None:
-                    new_count += 1
-                else:
-                    updated_count += 1
+            removed_count = 0
+            if not frigate_read_failed:
+                seen_ids = {row["id"] for row in rows}
+                # Only a CLOSED member past the grace window is eligible --
+                # see `_VANISH_GRACE_S` docstring for why an open (NULL
+                # end_time) member is never removed here.
+                stale_rows = sidecar_conn.execute(
+                    "SELECT atom_id FROM encounter_members WHERE start_time >= ? "
+                    "AND end_time IS NOT NULL AND end_time < ?",
+                    (since, now - _VANISH_GRACE_S),
+                ).fetchall()
+                for stale in stale_rows:
+                    atom_id = stale["atom_id"]
+                    if atom_id in seen_ids:
+                        continue
+                    donor_id = store.remove_member(sidecar_conn, atom_id, now)
+                    if donor_id is not None:
+                        by_id.pop(donor_id, None)
+                    removed_count += 1
+
+            sidecar_conn.commit()
 
             sealed = store.seal_stale(sidecar_conn, now, self._cfg)
             if atoms:
                 store.set_watermark(sidecar_conn, max(a.start_time for a in atoms))
 
+            if now - (self._last_prune_at or 0.0) >= 3600.0:
+                retention_days = self.settings.encounters.retention_days
+                pruned = store.prune(sidecar_conn, now, retention_days)
+                self._last_prune_at = now
+                if pruned["encounters"] or pruned["members"] or pruned["decisions"]:
+                    logger.info("encounters: pruned %s", pruned)
+
             stats = ReconcileStats(
-                rows=len(rows), new=new_count, updated=updated_count, sealed=sealed
+                rows=len(rows),
+                new=new_count,
+                updated=updated_count,
+                sealed=sealed,
+                skipped=skipped_count,
+                errors=error_count,
+                removed=removed_count,
             )
             self._last_reconcile = stats
             self._last_reconcile_at = now
@@ -343,6 +469,9 @@ class EncounterService:
                 "new": self._last_reconcile.new,
                 "updated": self._last_reconcile.updated,
                 "sealed": self._last_reconcile.sealed,
+                "skipped": self._last_reconcile.skipped,
+                "errors": self._last_reconcile.errors,
+                "removed": self._last_reconcile.removed,
                 "age_s": round(self._now() - (self._last_reconcile_at or self._now()), 1),
             }
         if self._last_error is not None:

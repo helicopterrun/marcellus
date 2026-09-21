@@ -146,7 +146,96 @@ def _ensure_encounter(conn: sqlite3.Connection, encounter_id: str, atom: Atom, n
     )
 
 
-def upsert_atom(conn: sqlite3.Connection, atom: Atom, decision: LinkDecision, now: float) -> str:
+def member_unchanged(conn: sqlite3.Connection, atom: Atom) -> bool:
+    """True if `atom`'s stored membership row already matches its current
+    serialised values (camera, span, severity, labels/zones/event_ids/
+    sub_labels) -- used by `service.reconcile` to skip a no-op decide/
+    upsert for an atom Frigate hasn't actually changed."""
+    row = conn.execute(
+        "SELECT camera, start_time, end_time, severity, labels_json, zones_json, "
+        "event_ids_json, sub_labels_json FROM encounter_members WHERE atom_id = ?",
+        (atom.atom_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    return bool(
+        row["camera"] == atom.camera
+        and row["start_time"] == atom.start_time
+        and row["end_time"] == atom.end_time
+        and row["severity"] == atom.severity
+        and row["labels_json"] == json.dumps(list(atom.labels))
+        and row["zones_json"] == json.dumps(list(atom.zones))
+        and row["event_ids_json"] == json.dumps(list(atom.event_ids))
+        and row["sub_labels_json"] == json.dumps(list(atom.sub_labels))
+    )
+
+
+def remove_member(conn: sqlite3.Connection, atom_id: str, now: float) -> str | None:
+    """Drop `atom_id`'s membership row (its Frigate reviewsegment vanished)
+    and clean up the encounter it leaves behind -- same donor cleanup as a
+    re-home in `upsert_atom`. Returns the encounter id the atom left, or
+    None if it had no membership row."""
+    row = _member_row(conn, atom_id)
+    if row is None:
+        return None
+    encounter_id = str(row["encounter_id"])
+    conn.execute("DELETE FROM encounter_members WHERE atom_id = ?", (atom_id,))
+    _donor_after_move(conn, encounter_id, now)
+    return encounter_id
+
+
+def prune(conn: sqlite3.Connection, now: float, retention_days: int) -> dict[str, int]:
+    """Delete sealed encounters (and their members/decisions) whose
+    `end_time` (or `sealed_at` when `end_time` is NULL) is older than
+    `retention_days`. One transaction; unsealed and recent encounters are
+    left untouched."""
+    cutoff = now - (retention_days * 86400)
+    rows = conn.execute(
+        "SELECT id FROM encounters WHERE sealed_at IS NOT NULL "
+        "AND COALESCE(end_time, sealed_at) < ?",
+        (cutoff,),
+    ).fetchall()
+    ids = [r["id"] for r in rows]
+    out = {"encounters": 0, "members": 0, "decisions": 0}
+    if not ids:
+        return out
+    placeholders = ",".join("?" for _ in ids)
+    atom_rows = conn.execute(
+        f"SELECT atom_id FROM encounter_members WHERE encounter_id IN ({placeholders})", ids
+    ).fetchall()
+    atom_ids = [r["atom_id"] for r in atom_rows]
+
+    members_cur = conn.execute(
+        f"DELETE FROM encounter_members WHERE encounter_id IN ({placeholders})", ids
+    )
+    out["members"] = members_cur.rowcount if members_cur.rowcount is not None else 0
+
+    if atom_ids:
+        atom_placeholders = ",".join("?" for _ in atom_ids)
+        decisions_cur = conn.execute(
+            f"DELETE FROM encounter_decisions WHERE encounter_id IN ({placeholders}) "
+            f"OR atom_id IN ({atom_placeholders})",
+            [*ids, *atom_ids],
+        )
+    else:
+        decisions_cur = conn.execute(
+            f"DELETE FROM encounter_decisions WHERE encounter_id IN ({placeholders})", ids
+        )
+    out["decisions"] = decisions_cur.rowcount if decisions_cur.rowcount is not None else 0
+    encounters_cur = conn.execute(f"DELETE FROM encounters WHERE id IN ({placeholders})", ids)
+    out["encounters"] = encounters_cur.rowcount if encounters_cur.rowcount is not None else 0
+    conn.commit()
+    return out
+
+
+def upsert_atom(
+    conn: sqlite3.Connection,
+    atom: Atom,
+    decision: LinkDecision,
+    now: float,
+    *,
+    commit: bool = True,
+) -> str:
     """Insert or update one atom's membership row, then refresh its
     encounter's aggregates. Returns the encounter id the atom ends up in.
 
@@ -255,7 +344,8 @@ def upsert_atom(conn: sqlite3.Connection, atom: Atom, decision: LinkDecision, no
 
     recompute(conn, encounter_id)
     conn.execute("UPDATE encounters SET updated_at = ? WHERE id = ?", (now, encounter_id))
-    conn.commit()
+    if commit:
+        conn.commit()
     return encounter_id
 
 

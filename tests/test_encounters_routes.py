@@ -77,6 +77,17 @@ def test_encounters_page_empty_200(client: TestClient) -> None:
     assert resp.status_code == 200
 
 
+def test_encounters_page_renders_adjacency_section(client: TestClient) -> None:
+    resp = client.get("/encounters")
+    assert resp.status_code == 200
+    assert "Adjacency" in resp.text
+    # alley-wide/shed share the "back_walkway" zone in the fixture config.
+    assert "alley-wide" in resp.text
+    assert "shed" in resp.text
+    assert "back_walkway" in resp.text
+    assert 'href="/settings#encounters"' in resp.text
+
+
 def test_encounter_detail_page_200(client: TestClient, settings: Settings) -> None:
     enc_id = _seed_encounter(settings)
     resp = client.get(f"/encounters/{enc_id}")

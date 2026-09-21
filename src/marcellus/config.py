@@ -344,9 +344,7 @@ class WatchdogSection(BaseModel):
     # Consecutive failed probes before a restart. 4 × 30s = ~2 min of sustained
     # failure, so a brief blip or a single slow probe won't trip it.
     failures_before_restart: int = 4
-    restart_command: list[str] = Field(
-        default_factory=lambda: ["docker", "restart", "frigate"]
-    )
+    restart_command: list[str] = Field(default_factory=lambda: ["docker", "restart", "frigate"])
     restart_timeout_s: float = 120.0
     # After a restart, ignore failures for this long so Frigate's boot (during
     # which probes naturally fail) can't trigger a second restart mid-startup.
@@ -398,9 +396,7 @@ class ScrubSection(BaseModel):
     # default keeps 60s ("scrub a day back"), 300s and 900s, and 3600s ("scrub
     # the whole retention window") cadences on top of the recent/aged pair,
     # which is otherwise unchanged.
-    derived_intervals_s: list[float] = Field(
-        default_factory=lambda: [60.0, 300.0, 900.0, 3600.0]
-    )
+    derived_intervals_s: list[float] = Field(default_factory=lambda: [60.0, 300.0, 900.0, 3600.0])
     aged_after_h: float = 24.0
     retention_days: int = 4
     cell_w: int = 320
@@ -644,6 +640,12 @@ class EncountersSection(BaseModel):
     # name -- for a coincidental name collision that isn't really the same
     # ground. Config always wins over the zone-derived graph.
     not_adjacent: list[list[str]] = Field(default_factory=list)
+
+    # How long a sealed encounter (and its members/decisions) survives
+    # before the reconciler's hourly prune drops it -- mirrors
+    # `face_capture.retention_days`/`scrub`'s retention fields. Unsealed
+    # encounters are never pruned regardless of age.
+    retention_days: int = 30
 
 
 class PushSection(BaseModel):
