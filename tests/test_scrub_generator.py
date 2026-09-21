@@ -359,6 +359,169 @@ def test_scrub_generate_recent_bucket_retired_once_superseded_by_aged(
     assert not any(p.exists() for p in sheet_paths_1)
 
 
+def test_scrub_generate_aged_tier_decimates_from_recent_with_zero_ffmpeg(
+    aged_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once the recent tier already covers a span end to end, the aged tier
+    must be produced by decimating it (PIL crops off already-published
+    sheets) rather than a fresh ffmpeg decode -- and land exactly on the
+    aged tier's own grid: every 5th recent-tier (1.0s) cell, since aged is
+    5.0s."""
+    base = 1_800_000_000.0
+    # Cycle 1: a huge aged_after_h collapses tier_plan to a single recent
+    # tier spanning the whole retention window (no aged tier exists at all
+    # yet), so both segments land as ordinary recent-tier coverage.
+    collapsed_env = aged_env.model_copy(
+        update={"scrub": aged_env.scrub.model_copy(update={"aged_after_h": 1_000_000.0})}
+    )
+    conn = db.open_joined(aged_env.frigate.db_path, aged_env.sidecar.db_path)
+    try:
+        profile = generator.SourceProfile()
+        asyncio.run(
+            generator.generate_camera(
+                collapsed_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=base + 20.0, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        recent_buckets = [
+            b for b in db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
+            if b["interval_s"] == 1.0
+        ]
+        assert recent_buckets and recent_buckets[0]["end_ts"] >= base + 20.0
+
+        # Cycle 2, far enough later that both segments now fall entirely
+        # inside the (normal, non-collapsed) aged_env's aged window.
+        now2 = base + 20.0 + 1000.0
+
+        async def _boom_keyframes(*a: object, **k: object) -> object:
+            raise AssertionError("aged-tier decimation must not decode keyframes")
+
+        async def _boom_fps(*a: object, **k: object) -> object:
+            raise AssertionError("aged-tier decimation must not full-decode")
+
+        monkeypatch.setattr(ffmpeg_io, "extract_keyframes_with_pts", _boom_keyframes)
+        monkeypatch.setattr(ffmpeg_io, "extract_fps", _boom_fps)
+
+        result = asyncio.run(
+            generator.generate_aged_tier(
+                aged_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=now2, profile=profile,
+            )
+        )
+        aged_buckets = [
+            b for b in db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
+            if b["interval_s"] == 5.0
+        ]
+        aged_sheets = db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000, interval=5.0)
+    finally:
+        conn.close()
+
+    assert result["new_frames"] > 0
+    assert aged_buckets, "expected an aged-tier bucket produced by decimation"
+    assert all(b["complete"] for b in aged_buckets), (
+        "a fully-decimated, already-bounded span's bucket must be sealed complete"
+    )
+    assert aged_sheets, "expected an aged-tier sheet produced by decimation"
+    # Every 5th recent-tier cell, aligned to the aged (5.0s) grid.
+    cell_times = sorted(
+        {s["start_ts"] + k * 5.0 for s in aged_sheets for k in range(s["count"])}
+    )
+    assert cell_times == [base, base + 5.0, base + 10.0, base + 15.0]
+
+
+def test_scrub_generate_aged_tier_retires_recent_span_same_cycle(
+    aged_env: Settings,
+) -> None:
+    """A recent-tier span that decimation covers must be retired in the same
+    call that decimated it -- not a cycle later -- or the recent tier piles
+    up behind decimation forever."""
+    base = 1_800_000_000.0
+    collapsed_env = aged_env.model_copy(
+        update={"scrub": aged_env.scrub.model_copy(update={"aged_after_h": 1_000_000.0})}
+    )
+    conn = db.open_joined(aged_env.frigate.db_path, aged_env.sidecar.db_path)
+    try:
+        profile = generator.SourceProfile()
+        # Just segment 1 (10 cells at 1.0s = one sheet, sheet_cols*rows=12):
+        # keeps this test to the single-sheet-per-bucket shape the sheet <->
+        # bucket retirement plumbing is exercised against elsewhere, rather
+        # than also exercising a multi-sheet bucket incidentally.
+        asyncio.run(
+            generator.generate_camera(
+                collapsed_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=base + 10.0, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        sheet_paths_1 = [
+            aged_env.scrub.cache_dir / s["path"]
+            for s in db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000)
+            if s["interval_s"] == 1.0
+        ]
+        assert sheet_paths_1 and all(p.exists() for p in sheet_paths_1)
+
+        # Cycle 2: no-backfill variant of the normal aged_env, so the aged
+        # tier can only get covered by this same call's own decimation, not
+        # by backfill racing ahead of it and decoding the span itself.
+        no_backfill_env = aged_env.model_copy(
+            update={"scrub": aged_env.scrub.model_copy(update={"backfill_segments_per_cycle": 0})}
+        )
+        now2 = base + 10.0 + 1000.0
+        asyncio.run(
+            generator.generate_camera(
+                no_backfill_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=now2, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        buckets_after_2 = db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
+    finally:
+        conn.close()
+
+    aged_buckets = [b for b in buckets_after_2 if b["interval_s"] == 5.0]
+    recent_buckets = [b for b in buckets_after_2 if b["interval_s"] == 1.0]
+    assert aged_buckets, "decimation should have produced aged-tier coverage this same call"
+    assert not recent_buckets, "the decimated recent span should be retired in this same call"
+    assert not any(p.exists() for p in sheet_paths_1), (
+        "the retired recent-tier sheet files must be gone from disk too"
+    )
+
+
+def test_scrub_generate_aged_tier_falls_back_to_backfill_without_recent_data(
+    aged_env: Settings,
+) -> None:
+    """A span the recent tier never reached has nothing to decimate from --
+    `generate_aged_tier` must leave it alone, and `generate_backfill`'s own
+    aged-tier pass (via `generate_camera`) remains the only way it gets
+    covered, exactly as before this change."""
+    conn = db.open_joined(aged_env.frigate.db_path, aged_env.sidecar.db_path)
+    try:
+        profile = generator.SourceProfile()
+        now = 1_800_000_020.0  # right as segment 2 ends; boundary = base+15
+        # No prior cycle at all -- the recent tier has never generated
+        # anything, so there is nothing on disk for decimation to crop.
+        aged_only = asyncio.run(
+            generator.generate_aged_tier(
+                aged_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=now, profile=profile,
+            )
+        )
+        assert aged_only["new_frames"] == 0
+        assert not db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
+
+        result = asyncio.run(
+            generator.generate_camera(
+                aged_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=now, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        buckets = db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
+    finally:
+        conn.close()
+
+    assert result["segments"] >= 2
+    aged_buckets = [b for b in buckets if b["interval_s"] == 5.0]
+    assert aged_buckets, "backfill must still cover the aged tier when there's nothing to decimate"
+
+
 def test_generation_leaves_no_scratch_behind(env: Settings) -> None:
     """Extraction used to stage frames in the system temp dir and leave every
     frame it didn't accept there -- about a segment's worth per cycle, forever,

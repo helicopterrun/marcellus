@@ -63,7 +63,11 @@ The `scrub:` config section:
 - `min_free_bytes` — free-space floor on the cache filesystem; a tick is
   skipped rather than grinding out ENOSPC below it (default 2GiB).
 - `recent_interval_s` / `aged_interval_s` — cadence of the two decode
-  tiers, finest to coarsest (default 1.0s / 5.0s).
+  tiers, finest to coarsest (default 1.0s / 5.0s). The aged tier is now
+  produced by decimating already-cached recent-tier frames (cheap PIL crops,
+  no extra decode) whenever the recent tier already covers a span end to
+  end; only a span the recent tier never reached falls back to decoding it
+  directly from recordings.
 - `match_keyframe_cadence` — generate a camera at its own keyframe cadence
   when coarser than `recent_interval_s`, instead of full-decoding (default
   on).

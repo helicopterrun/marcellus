@@ -738,6 +738,28 @@ class _TierWriter:
             await self._flush_sheet(sheet_start, self._pending_sheets[sheet_start])
         self._dirty_sheets.clear()
 
+    async def close(self) -> None:
+        """`flush()`, then seal the trailing open bucket as complete.
+
+        Live-edge and backfill writers leave their newest bucket open on
+        purpose -- more frames may arrive for it next cycle. A writer fed
+        from a fully-known, already-bounded span (aged-tier decimation over
+        a hole the recent tier already covers end-to-end) is done for good
+        once that span is exhausted, so its trailing bucket is sealed here
+        rather than left `complete=0` forever.
+        """
+        await self.flush()
+        if self._bucket_start is not None:
+            db.upsert_scrub_bucket(
+                self.conn, camera=self.camera, start_ts=self._bucket_start,
+                end_ts=self._generated_through + self.interval_s,
+                interval_s=self.interval_s,
+                width=self.cell_w, height=self.cell_h,
+                generated_through=self._generated_through, complete=True,
+            )
+            self.conn.commit()
+            self._bucket_start = None
+
 
 async def _tier_writer(
     settings: Settings,
@@ -1224,9 +1246,18 @@ async def generate_camera(
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
         now=now, profile=profile, sem=sem,
     )
-    # Retire after backfill, not before: retirement is gated on the aged
-    # tier already covering the stale span, and it's this same cycle's
-    # backfill call above that's most likely to have just produced it.
+    # Decimate the aged tier from the recent tier before retiring anything --
+    # it's the source of the aged coverage retirement is gated on, and a
+    # cheap PIL pass, not ffmpeg (see `generate_aged_tier`). Falls back to
+    # nothing for spans `back` above just backfilled by decode instead.
+    aged = await generate_aged_tier(
+        settings, camera, frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
+        now=now, profile=profile,
+    )
+    # Retire after both backfill and aged decimation, not before: retirement
+    # is gated on the aged tier already covering the stale span, and it's
+    # this same cycle's calls above that are most likely to have just
+    # produced it.
     _retire_stale_recent_buckets(
         sidecar_conn, scrub.cache_dir, camera, scrub.recent_interval_s,
         effective_boundary, aged_interval_s=scrub.aged_interval_s,
@@ -1234,7 +1265,7 @@ async def generate_camera(
     return {
         "camera": camera,
         "segments": live["segments"] + back["segments"],
-        "new_frames": live["new_frames"] + back["new_frames"],
+        "new_frames": live["new_frames"] + back["new_frames"] + aged["new_frames"],
         "backfilled": back["backfilled"],
     }
 
@@ -1269,14 +1300,13 @@ async def generate_live_edge(
     )
     plan = tier_plan(settings, now, gop_s)
     interval_s, window_start, window_end = plan[0]
-    # Only retire when a coarser aged tier actually exists to supersede this
-    # one -- a collapsed (recent-only) plan would otherwise delete its own
-    # buckets.
-    if len(plan) > 1:
-        _retire_stale_recent_buckets(
-            sidecar_conn, scrub.cache_dir, camera, interval_s, window_start,
-            aged_interval_s=scrub.aged_interval_s,
-        )
+    # Retirement of stale recent-tier buckets does NOT happen here. It used
+    # to, gated on a coarser aged tier existing at all -- but that ran this
+    # pass *before* this same cycle's backfill/aged-decimation passes, which
+    # are what actually produce the aged coverage retirement depends on. A
+    # bucket only became retirable a full cycle later than it could have
+    # been. Callers now retire once, after the aged tier has had its own
+    # chance to run this cycle (`generate_camera`, `generate_cycle` Pass 3).
 
     # Resume from where the recent tier actually reaches, but
     #    never crawl up from further back than `live_edge_lookback_s` -- a
@@ -1537,6 +1567,127 @@ async def generate_derived_tier(
     return {"camera": camera, "interval_s": interval_s, "new_frames": new_frames}
 
 
+async def generate_aged_tier(
+    settings: Settings,
+    camera: str,
+    *,
+    frigate_conn: sqlite3.Connection,
+    sidecar_conn: sqlite3.Connection,
+    now: float,
+    profile: SourceProfile,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    """Produce aged-tier buckets/sheets by decimating the recent tier's
+    already-published sheets, rather than decoding them with ffmpeg
+    (`generate_backfill`).
+
+    The recent tier already holds every frame the aged tier needs -- the
+    live-edge pass fills it at `recent_interval_s`, finer than
+    `aged_interval_s` by construction (`tier_plan`) -- and on a box with no
+    decode headroom to spare (measured on prod: backfill reserving the aged
+    tier its own slice starved the live edge, lag climbing 20 s/cycle every
+    cycle), a PIL crop-and-retile off cells already on disk is free by
+    comparison. Reuses `_decimate_source`, the same machinery
+    `generate_derived_tier` uses for `scrub.derived_intervals_s`.
+
+    Only spans that are (a) inside the aged window (`retention_cutoff` to
+    the aged boundary), (b) covered by a recent-tier bucket row, and (c) not
+    yet covered by an existing aged bucket are decimated -- matched against
+    each recent-tier bucket individually rather than requiring one row to
+    cover a whole hole, since the aged window is usually far wider than
+    anything the recent tier has ever actually recorded. The remainder of a
+    hole -- genuinely no recent-tier data behind it, e.g. older than the
+    recent tier has ever reached -- is left alone entirely: there is
+    nothing here to decimate from, so `generate_backfill`'s own aged-tier
+    pass remains the only way it ever gets covered.
+
+    Registers each decimated span as an ordinary aged bucket/sheet set --
+    same `scrub_buckets`/`scrub_sheets` rows a backfill pass would have
+    written, `interval_s == aged_interval_s` -- and seals the trailing
+    bucket of each span complete (`_TierWriter.close`), since the span is
+    fully bounded and nothing more will ever arrive for it from this pass.
+    """
+    scrub = settings.scrub
+    gop_s = profile.gop_s.get(camera)
+    if gop_s is None:
+        # generate_cycle's Pass 1 always probes first, via generate_live_edge
+        # -> camera_gop_seconds; a direct caller (generate_camera, CLI,
+        # tests) can still hit this against a cold profile.
+        gop_s = await camera_gop_seconds(
+            settings, camera, frigate_conn=frigate_conn, profile=profile
+        )
+    plan = tier_plan(settings, now, gop_s)
+    if len(plan) < 2:
+        # Collapsed plan (§ tier_plan): no separate aged tier exists at all.
+        return {"camera": camera, "new_frames": 0}
+    recent_interval_s = plan[0][0]
+    aged_interval_s, retention_cutoff, boundary = plan[1]
+    if boundary <= retention_cutoff:
+        return {"camera": camera, "new_frames": 0}
+
+    holes = uncovered_spans(sidecar_conn, camera, aged_interval_s, retention_cutoff, boundary)
+    if not holes:
+        return {"camera": camera, "new_frames": 0}
+
+    # Not filtered on the bucket-row `complete` flag: that marks a bucket as
+    # sealed (never receiving more frames), which the live-edge's own
+    # trailing recent-tier bucket usually isn't -- it keeps extending toward
+    # now every cycle and would otherwise never qualify. What decimation
+    # actually needs is real cells on disk behind the span, which a bucket
+    # row's `[start_ts, end_ts)` describes regardless of the flag.
+    recent_rows = sidecar_conn.execute(
+        "SELECT start_ts, end_ts FROM scrub_buckets WHERE camera = ? AND interval_s = ? "
+        "ORDER BY start_ts",
+        (camera, recent_interval_s),
+    ).fetchall()
+    if not recent_rows:
+        return {"camera": camera, "new_frames": 0}
+
+    cell_w, cell_h = await camera_cell_size(
+        settings, camera, frigate_conn=frigate_conn, profile=profile
+    )
+    new_frames = 0
+    with tempfile.TemporaryDirectory(prefix="age-", dir=_work_root(scrub.cache_dir)) as td:
+        work_dir = Path(td)
+        for hole_start, hole_end in holes:
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            # A hole is matched against each recent-tier bucket row rather
+            # than requiring one row to cover it whole: the aged window
+            # (retention_cutoff .. boundary) is usually far wider than
+            # anything the recent tier has ever actually recorded, e.g. on a
+            # deployment still inside its first retention_days -- most of
+            # that width has no data at all (recent tier included) and must
+            # stay a genuine hole for backfill, but the sub-span that a
+            # recent bucket *does* cover should still be decimated instead
+            # of ffmpeg-decoded.
+            for r_start, r_end in recent_rows:
+                if deadline is not None and time.monotonic() >= deadline:
+                    break
+                span_start = max(hole_start, r_start)
+                span_end = min(hole_end, r_end)
+                if span_end <= span_start:
+                    continue
+                frames = await _decimate_source(
+                    sidecar_conn, scrub.cache_dir, camera,
+                    finer_interval_s=recent_interval_s, derived_interval_s=aged_interval_s,
+                    window_start=span_start, window_end=span_end, work_dir=work_dir,
+                    deadline=deadline,
+                )
+                if not frames:
+                    continue
+                writer = _TierWriter(
+                    settings, camera, interval_s=aged_interval_s,
+                    window_start=span_start, window_end=span_end,
+                    cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn,
+                )
+                writer.resume(span_start)
+                await writer.feed(frames)
+                await writer.close()
+                new_frames += len(frames)
+    return {"camera": camera, "new_frames": new_frames}
+
+
 async def generate_derived(
     settings: Settings,
     camera: str,
@@ -1734,22 +1885,46 @@ async def generate_cycle(
                 totals[camera]["error"] = True
         profile.backfill_cursor = start + served
 
-        # Pass 3: derived tiers, decimated from already-published decode-tier
-        # sheets -- no ffmpeg, so this eats whatever live-edge+backfill left of
-        # the tick's deadline, plus the floor reserved above (priority:
-        # live-edge > backfill > decimation, but decimation is guaranteed to
-        # run every cycle rather than only when backfill happens to idle).
+        # Pass 3: aged-tier decimation, then derived tiers, both decimated
+        # from already-published decode-tier sheets -- no ffmpeg, so this
+        # eats whatever live-edge+backfill left of the tick's deadline, plus
+        # the floor reserved above (priority: live-edge > backfill >
+        # decimation, but decimation is guaranteed to run every cycle rather
+        # than only when backfill happens to idle).
+        #
+        # Retirement of stale recent-tier buckets runs here too, once per
+        # camera, after this camera's own aged-tier decimation -- not in
+        # Pass 1 (`generate_live_edge` no longer retires at all). Retirement
+        # is gated on the aged tier already covering the stale span, and it's
+        # this pass's own decimation call that most often just produced it;
+        # retiring in Pass 1 would defer every retirement to the cycle after
+        # the one that actually earned it, and with `retention_days` at 7 and
+        # the recent tier at ~8 GB/day, an un-retired recent tier piles up
+        # forever.
+        retention_cutoff = now - scrub.retention_days * 86400
+        effective_boundary = max(now - scrub.aged_after_h * 3600, retention_cutoff)
         for camera in cameras:
             if _time.monotonic() >= deadline:
                 break
             try:
+                aged_result = await generate_aged_tier(
+                    settings, camera, frigate_conn=conn, sidecar_conn=conn,
+                    now=now, profile=profile, deadline=deadline,
+                )
+                totals[camera]["new_frames"] += aged_result["new_frames"]
                 derived_result = await generate_derived(
                     settings, camera, frigate_conn=conn, sidecar_conn=conn,
                     now=now, profile=profile, deadline=deadline,
                 )
                 totals[camera]["new_frames"] += derived_result["new_frames"]
+                _retire_stale_recent_buckets(
+                    conn, scrub.cache_dir, camera, scrub.recent_interval_s,
+                    effective_boundary, aged_interval_s=scrub.aged_interval_s,
+                )
             except Exception:
-                logger.exception("scrub: derived-tier generation failed for camera %s", camera)
+                logger.exception(
+                    "scrub: aged/derived-tier generation failed for camera %s", camera
+                )
                 totals[camera]["error"] = True
 
         # One line per cycle. Whether the edge is being held is otherwise only
