@@ -573,6 +573,23 @@ CREATE TABLE IF NOT EXISTS encounter_decisions (
 );
 -- 'watermark' = last reconciled reviewsegment start_time (encounters/service.py's reconcile).
 CREATE TABLE IF NOT EXISTS encounter_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+-- Camera topology (M2): learned inter-camera transition times, directed
+-- a -> b per label family (encounters/transitions.py). Read-mostly derived
+-- state, same as `encounters`/`encounter_members` -- rebuildable by re-
+-- running the learner over `encounter_members`.
+CREATE TABLE IF NOT EXISTS camera_transitions (
+    cam_a      TEXT NOT NULL,
+    cam_b      TEXT NOT NULL,
+    family     TEXT NOT NULL,
+    samples    INTEGER NOT NULL DEFAULT 0,
+    p10_s      REAL,
+    p50_s      REAL,
+    p90_s      REAL,
+    source     TEXT NOT NULL DEFAULT 'default',
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (cam_a, cam_b, family)
+);
 """
 
 # Columns added to `push_devices` / `push_handles` after those tables first

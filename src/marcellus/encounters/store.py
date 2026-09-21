@@ -742,6 +742,25 @@ def get_watermark(conn: sqlite3.Connection) -> float | None:
     return float(row["value"]) if row is not None else None
 
 
+def get_state_float(conn: sqlite3.Connection, key: str) -> float | None:
+    """Generic `encounter_state` float reader (e.g. `transitions_learned_at`,
+    same table `get_watermark`/`set_watermark` use for `watermark`)."""
+    row = conn.execute("SELECT value FROM encounter_state WHERE key = ?", (key,)).fetchone()
+    return float(row["value"]) if row is not None else None
+
+
+def set_state_float(
+    conn: sqlite3.Connection, key: str, value: float, *, commit: bool = True
+) -> None:
+    conn.execute(
+        "INSERT INTO encounter_state (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, str(value)),
+    )
+    if commit:
+        conn.commit()
+
+
 def set_watermark(conn: sqlite3.Connection, value: float) -> None:
     conn.execute(
         "INSERT INTO encounter_state (key, value) VALUES ('watermark', ?) "

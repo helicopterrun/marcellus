@@ -133,6 +133,13 @@ _LIVE_KEYS = {
     "encounters.min_copresence_s",
     "encounters.adjacency",
     "encounters.not_adjacent",
+    "encounters.transition_min_samples",
+    "encounters.transition_max_sample_s",
+    "encounters.transition_learn_interval_s",
+    "encounters.transition_learn_window_days",
+    "encounters.transition_default_s",
+    "encounters.transition_overrides",
+    "encounters.transition_slack",
     "push.delivery_urgent_resound_s",
     "push.delivery_urgent_resound_enabled",
     "push.delivery_urgent_resound_max",
@@ -181,6 +188,14 @@ _HELP_OVERRIDES: dict[str, str] = {
     "encounters.not_adjacent": (
         "Camera-pair edges removed from the zone-derived adjacency graph, "
         "one 'camera_a, camera_b' pair per line."
+    ),
+    "encounters.transition_default_s": (
+        "Fallback {p10, p50, p90} seconds written for a camera-pair/family edge "
+        "with too few samples."
+    ),
+    "encounters.transition_overrides": (
+        "Manual transition overrides, keyed 'camA>camB' or 'camA>camB:family', "
+        "each an object of {p10, p50, p90}."
     ),
     "scrub.format": "Sprite-sheet cell image format.",
     "push.transport": "Push transport: mock (log only) or relay (real APNs via the relay).",
@@ -251,6 +266,8 @@ def _field_kind(section: str, name: str, annotation: Any) -> KnobKind:
     if key in ("encounters.adjacency", "encounters.not_adjacent"):
         return "pair_list"
     if key in ("push.delivery_zone_place_map", "push.delivery_la_families"):
+        return "json"
+    if key == "encounters.transition_overrides":
         return "json"
     return _infer_kind(annotation)
 
