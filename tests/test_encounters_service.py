@@ -1063,3 +1063,39 @@ def test_reconcile_honours_split_across_two_cycles(tmp_path: Path) -> None:
         assert row["link_reason"] == "split"
     finally:
         conn.close()
+
+
+def test_linker_config_loads_transitions_only_when_use_learned_gaps(tmp_path: Path) -> None:
+    """M3: `_linker_config` (via `EncounterService.reconcile`) only loads
+    `camera_transitions` into `LinkerConfig.transitions` when
+    `encounters.use_learned_gaps` is on -- off (the default) must leave it
+    None even if rows exist in the table."""
+    frigate_db = _reviewsegment_db(tmp_path)
+    now = time.time()
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(
+        settings,
+        adjacency=Adjacency(edges=frozenset({frozenset({"alley-wide", "shed"})})),
+        now=lambda: now,
+    )
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    conn.execute(
+        "INSERT INTO camera_transitions (cam_a, cam_b, family, samples, p10_s, p50_s, "
+        "p90_s, source, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("alley-wide", "shed", "animal", 20, 10.0, 20.0, 30.0, "learned", now),
+    )
+    conn.commit()
+    conn.close()
+
+    service.reconcile()
+    assert service._cfg.transitions is None
+
+    settings.encounters.use_learned_gaps = True
+    service.reconcile()
+    assert service._cfg.transitions is not None
+    assert ("alley-wide", "shed", "animal") in service._cfg.transitions
+    stats = service._cfg.transitions[("alley-wide", "shed", "animal")]
+    assert stats.source == "learned"
+    assert stats.p90 == 30.0
+    assert service._cfg.transition_slack == settings.encounters.transition_slack

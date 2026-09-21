@@ -19,7 +19,11 @@ from marcellus.encounters import store
 from marcellus.encounters.adjacency import Adjacency
 from marcellus.encounters.linker import Atom, LinkerConfig, apply, decide, normalise_labels
 from marcellus.encounters.observations import Direction, load_direction
-from marcellus.encounters.transitions import learn, transition_config_from_settings
+from marcellus.encounters.transitions import (
+    learn,
+    load_transitions,
+    transition_config_from_settings,
+)
 from marcellus.push.models import ReviewEvent
 
 logger = logging.getLogger(__name__)
@@ -51,13 +55,25 @@ class ReconcileStats:
     removed: int = 0
 
 
-def _linker_config(settings: Settings) -> LinkerConfig:
+def _linker_config(settings: Settings, conn: sqlite3.Connection | None) -> LinkerConfig:
+    """Build the pure `LinkerConfig` a reconcile cycle/the live worker will
+    use. `conn` loads `camera_transitions` (M3) once per cycle when
+    `encounters.use_learned_gaps` is on -- the live path (`_link_review`)
+    never queries per atom, it just reuses `self._cfg`, same pattern as
+    `_refresh_adjacency`/`self.adjacency`. `conn` is None at construction
+    time (no connection open yet); `reconcile` always passes one, so the
+    live worker picks up learned transitions after the first cycle."""
     enc = settings.encounters
+    transitions = None
+    if enc.use_learned_gaps and conn is not None:
+        transitions = load_transitions(conn)
     return LinkerConfig(
         gap_s=dict(enc.gap_s),
         max_duration_s=enc.max_duration_s,
         recent_cameras=enc.recent_cameras,
         min_copresence_s=enc.min_copresence_s,
+        transitions=transitions,
+        transition_slack=enc.transition_slack,
     )
 
 
@@ -99,7 +115,7 @@ class EncounterService:
         self.settings = settings
         self.adjacency = adjacency
         self._now = now
-        self._cfg = _linker_config(settings)
+        self._cfg = _linker_config(settings, None)
         # Cache of the adjacency/not_adjacent lists `self.adjacency` was last
         # built from, so `reconcile` only re-derives zones + rebuilds the
         # graph when a tuning override actually changed one of them, not on
@@ -307,15 +323,19 @@ class EncounterService:
         """BACKFILL/repair sweep over `reviewsegment` -- the "belt" catching
         anything the MQTT path missed or saw only partially. Sync; run via
         `asyncio.to_thread` from the server's loop."""
-        # Rebuild every reconcile (cheap) so gap_s/max_duration_s/
-        # recent_cameras/min_copresence_s pick up a tuning override live,
-        # without needing a restart to recreate the service.
-        self._cfg = _linker_config(self.settings)
         self._refresh_adjacency()
         now = self._now()
         frigate_conn = db.open_frigate_ro(self.settings.frigate.db_path)
         sidecar_conn = self._conn()
         try:
+            # Rebuild every reconcile (cheap) so gap_s/max_duration_s/
+            # recent_cameras/min_copresence_s/use_learned_gaps/
+            # transition_slack pick up a tuning override live, without
+            # needing a restart to recreate the service. Loading
+            # `camera_transitions` here (once per cycle) rather than in
+            # `_link_review` keeps the live per-atom path free of any extra
+            # DB query -- it just reuses `self._cfg` set here.
+            self._cfg = _linker_config(self.settings, sidecar_conn)
             watermark = store.get_watermark(sidecar_conn)
             if watermark is None:
                 since = now - self.settings.encounters.backfill_lookback_s

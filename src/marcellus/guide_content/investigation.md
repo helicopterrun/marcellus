@@ -73,9 +73,21 @@ writes one row per directed edge x family into `camera_transitions`:
   instead, with the true (sub-threshold) sample count recorded.
 
 A sample whose gap exceeds `transition_max_sample_s` is discarded outright
-rather than skewing the percentiles. `use_learned_gaps` and
-`transition_slack` are reserved for a future linker change that reads these
-stats back into its own gap allowance -- they have no effect yet.
+rather than skewing the percentiles.
+
+Turn `encounters.use_learned_gaps` on (live -- no restart, from
+[Settings](/settings)) to have the linker's "adjacent" reason actually use
+these stats: for a directed camera-pair/family edge with enough samples
+(`source == "learned"`), the allowed gap becomes that edge's p90 times
+`encounters.transition_slack` (also live) instead of the flat
+`encounters.gap_s[family]` -- narrower or wider, whichever the observed
+handoff times say. A gap inside `[p10, p90]` links with confidence 0.65,
+outside it (but still within the slack-widened allowance) 0.55 -- both
+below same-camera/shared-zone/companion, so those still win when they also
+match. Pairs with only a "config" or "default" row (too few samples) keep
+the flat `gap_s` allowance regardless. Same-camera and shared-zone matches
+never use learned stats, only the flat allowance -- they're "still
+basically where the encounter already is," not a handoff.
 
 ## API
 

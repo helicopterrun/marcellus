@@ -140,6 +140,7 @@ _LIVE_KEYS = {
     "encounters.transition_default_s",
     "encounters.transition_overrides",
     "encounters.transition_slack",
+    "encounters.use_learned_gaps",
     "push.delivery_urgent_resound_s",
     "push.delivery_urgent_resound_enabled",
     "push.delivery_urgent_resound_max",
@@ -196,6 +197,15 @@ _HELP_OVERRIDES: dict[str, str] = {
     "encounters.transition_overrides": (
         "Manual transition overrides, keyed 'camA>camB' or 'camA>camB:family', "
         "each an object of {p10, p50, p90}."
+    ),
+    "encounters.use_learned_gaps": (
+        "Live: when on, the linker's 'adjacent' reason uses learned camera-pair "
+        "transition times (p90 x transition_slack) instead of the flat gap_s "
+        "allowance, for pairs with enough learned samples."
+    ),
+    "encounters.transition_slack": (
+        "Live: multiplier applied to a learned p90 to get the allowed gap when "
+        "use_learned_gaps is on."
     ),
     "scrub.format": "Sprite-sheet cell image format.",
     "push.transport": "Push transport: mock (log only) or relay (real APNs via the relay).",

@@ -26,19 +26,22 @@ from typing import Any
 
 from marcellus.encounters.adjacency import Adjacency
 from marcellus.encounters.linker import LABEL_FAMILIES, family_of
+from marcellus.encounters.types import TransitionStats
+
+__all__ = [
+    "TransitionStats",
+    "TransitionConfig",
+    "MemberRow",
+    "collect_samples",
+    "summarise",
+    "learn",
+    "load_transitions",
+    "transition_config_from_settings",
+]
 
 #: Samples clamp to [0, ...]; an m2 that started slightly before m1 ended
 #: (clock skew / overlapping detections) is still a same-instant handoff.
 _MIN_GAP_S = -5.0
-
-
-@dataclass(frozen=True)
-class TransitionStats:
-    p10: float
-    p50: float
-    p90: float
-    samples: int
-    source: str  # "learned" | "config" | "default"
 
 
 @dataclass(frozen=True)

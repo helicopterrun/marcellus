@@ -348,3 +348,24 @@ def test_load_settings_skips_invalid_file_entries(tmp_path, monkeypatch, caplog)
     assert s.scrub.retention_days == 9
     assert s.scrub.cell_w == 320
     assert "scrub.cell_w" in caplog.text and "nope.key" in caplog.text
+
+
+def test_encounters_learned_gap_keys_are_live_bool_and_float() -> None:
+    """M3: `use_learned_gaps` and `transition_slack` are live -- the
+    rollout plan flips them via PUT /v1/tuning without a restart."""
+    use_learned = tuning.KNOBS_BY_KEY["encounters.use_learned_gaps"]
+    slack = tuning.KNOBS_BY_KEY["encounters.transition_slack"]
+    assert use_learned.editable is True
+    assert use_learned.live is True
+    assert use_learned.kind == "bool"
+    assert slack.editable is True
+    assert slack.live is True
+    assert slack.kind == "float"
+
+
+def test_apply_use_learned_gaps_override_round_trips_as_bool() -> None:
+    settings = Settings()
+    assert settings.encounters.use_learned_gaps is False
+    tuning.apply_overrides(settings, {"encounters.use_learned_gaps": True})
+    assert settings.encounters.use_learned_gaps is True
+    assert isinstance(settings.encounters.use_learned_gaps, bool)
