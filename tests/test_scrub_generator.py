@@ -1165,6 +1165,202 @@ def test_derived_tier_gets_a_guaranteed_floor_even_when_backfill_is_hungry(
     )
 
 
+# ----- backfill_min_share_s: the live edge must not starve backfill -----
+
+
+def test_slow_live_edge_still_leaves_backfill_a_turn(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prod cycles measured 16-20s against a 20s tick -- live edge alone ate
+    the whole cycle and backfill's window had already closed by the time it
+    started, so the 1s cameras never got their aged tier ("(0 backfilled)" on
+    almost every cycle). `backfill_min_share_s` must reserve enough of the
+    tick that backfill still runs at least one tier even when live edge is
+    this slow.
+    """
+    env = long_history_env
+    conn = sqlite3.connect(env.frigate.db_path)
+    conn.executemany(
+        "INSERT INTO recordings VALUES (?, 'garden', ?, ?, ?, 10.0, 5.0)",
+        [
+            (f"g{i}", "/media/frigate/x.mp4", 1_800_000_000.0 + i * 10,
+             1_800_000_000.0 + (i + 1) * 10)
+            for i in range(100)
+        ],
+    )
+    conn.commit()
+    conn.close()
+    env = env.model_copy(
+        update={
+            "scrub": env.scrub.model_copy(
+                update={"cameras": [], "backfill_min_share_s": 5.0, "live_edge_interval_s": 20.0}
+            )
+        }
+    )
+
+    class _FakeClock:
+        def __init__(self) -> None:
+            self.t = 1_000.0
+
+        def monotonic(self) -> float:
+            return self.t
+
+    clock = _FakeClock()
+    monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
+
+    async def _slow_live(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        # Simulates a decode that burns most of the tick -- e.g. a camera
+        # whose GOP forces full-frame decoding instead of keyframe extraction.
+        clock.t += 100.0
+        return {"camera": camera, "segments": 1, "new_frames": 1}
+
+    backfilled: list[str] = []
+
+    async def _tracked_backfill(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        backfilled.append(camera)
+        return {"camera": camera, "segments": 1, "new_frames": 0, "backfilled": True}
+
+    async def _noop_derived(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "new_frames": 0, "tiers_touched": 0}
+
+    monkeypatch.setattr(generator, "generate_live_edge", _slow_live)
+    monkeypatch.setattr(generator, "generate_backfill", _tracked_backfill)
+    monkeypatch.setattr(generator, "generate_derived", _noop_derived)
+
+    profile = generator.SourceProfile()
+    asyncio.run(generator.generate_cycle(env, now=1_800_000_000.0 + 86400.0, profile=profile))
+
+    assert backfilled, (
+        "backfill got no turn at all -- backfill_min_share_s failed to "
+        "reserve time against a slow live edge"
+    )
+    # The live edge itself must never be fully starved either.
+    assert profile.live_edge_cursor >= 1
+
+
+def test_live_edge_cursor_rotates_cut_off_cameras_to_the_front(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A camera skipped by a cut-short live-edge pass must be first in line
+    next cycle -- the same fairness fix already applied to backfill's own
+    cursor (`profile.backfill_cursor`), now needed for live edge too."""
+    env = long_history_env
+    conn = sqlite3.connect(env.frigate.db_path)
+    conn.executemany(
+        "INSERT INTO recordings VALUES (?, 'garden', ?, ?, ?, 10.0, 5.0)",
+        [
+            (f"g{i}", "/media/frigate/x.mp4", 1_800_000_000.0 + i * 10,
+             1_800_000_000.0 + (i + 1) * 10)
+            for i in range(100)
+        ],
+    )
+    conn.commit()
+    conn.close()
+    env = env.model_copy(
+        update={
+            "scrub": env.scrub.model_copy(
+                update={"cameras": [], "backfill_min_share_s": 5.0, "live_edge_interval_s": 20.0}
+            )
+        }
+    )
+
+    class _FakeClock:
+        def __init__(self) -> None:
+            self.t = 1_000.0
+
+        def monotonic(self) -> float:
+            return self.t
+
+    clock = _FakeClock()
+    monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
+
+    order: list[str] = []
+
+    async def _slow_live(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        order.append(camera)
+        clock.t += 100.0
+        return {"camera": camera, "segments": 1, "new_frames": 1}
+
+    async def _noop_backfill(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "segments": 0, "new_frames": 0, "backfilled": False}
+
+    async def _noop_derived(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "new_frames": 0, "tiers_touched": 0}
+
+    monkeypatch.setattr(generator, "generate_live_edge", _slow_live)
+    monkeypatch.setattr(generator, "generate_backfill", _noop_backfill)
+    monkeypatch.setattr(generator, "generate_derived", _noop_derived)
+
+    profile = generator.SourceProfile()
+    asyncio.run(generator.generate_cycle(env, now=1_800_000_000.0 + 86400.0, profile=profile))
+    first_cycle_order = list(order)
+    order.clear()
+    asyncio.run(generator.generate_cycle(env, now=1_800_000_000.0 + 86400.0, profile=profile))
+
+    assert len(first_cycle_order) == 1, f"expected only one camera serviced: {first_cycle_order}"
+    skipped = {"doorbell", "garden"} - set(first_cycle_order)
+    assert order[0] in skipped, (
+        f"camera skipped in cycle 1 ({skipped}) must run first in cycle 2, got {order}"
+    )
+
+
+# ----- _retire_stale_recent_buckets: don't erase what nothing covers -----
+
+
+def test_retire_skips_a_span_the_aged_tier_does_not_yet_cover(env: Settings) -> None:
+    """A stale recent-tier bucket must survive until the aged tier has
+    actually regenerated its span -- backfill runs on its own budget and can
+    lag behind the boundary by cycles. Retiring early erases the recent-tier
+    data with nothing at the finer cadence to replace it."""
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        db.upsert_scrub_bucket(
+            conn, camera="doorbell", start_ts=0.0, end_ts=10.0, interval_s=1.0,
+            width=320, height=180, generated_through=10.0, complete=True,
+        )
+        conn.commit()
+
+        generator._retire_stale_recent_buckets(
+            conn, env.scrub.cache_dir, "doorbell", recent_interval_s=1.0,
+            boundary=20.0, aged_interval_s=5.0,
+        )
+        buckets = db.list_scrub_buckets(conn, "doorbell", 0, 100)
+    finally:
+        conn.close()
+
+    assert any(b["interval_s"] == 1.0 for b in buckets), (
+        "recent bucket was retired even though no aged data covers its span"
+    )
+
+
+def test_retire_removes_a_span_the_aged_tier_already_covers(env: Settings) -> None:
+    """Once the aged tier actually covers the stale bucket's span, retirement
+    must still happen -- the coverage gate isn't a permanent hold."""
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        db.upsert_scrub_bucket(
+            conn, camera="doorbell", start_ts=0.0, end_ts=10.0, interval_s=1.0,
+            width=320, height=180, generated_through=10.0, complete=True,
+        )
+        db.upsert_scrub_bucket(
+            conn, camera="doorbell", start_ts=0.0, end_ts=10.0, interval_s=5.0,
+            width=320, height=180, generated_through=10.0, complete=True,
+        )
+        conn.commit()
+
+        generator._retire_stale_recent_buckets(
+            conn, env.scrub.cache_dir, "doorbell", recent_interval_s=1.0,
+            boundary=20.0, aged_interval_s=5.0,
+        )
+        buckets = db.list_scrub_buckets(conn, "doorbell", 0, 100)
+    finally:
+        conn.close()
+
+    assert not any(b["interval_s"] == 1.0 for b in buckets), (
+        "recent bucket should have been retired once the aged tier covers its span"
+    )
+
+
 # ----- Cadence matching: don't full-decode what the source can't provide -----
 
 

@@ -95,6 +95,7 @@ The `scrub:` config section:
 - `derive_time_reserve_s` — wall-clock carved out of
   `backfill_time_budget_s` for the derived-tier decimation pass (default
   5s).
+- `backfill_min_share_s` — minimum wall-clock seconds per cycle reserved for backfill (default 6s); the live-edge pass stops early, between cameras, once the tick has less than this left, so backfill always gets a turn.
 
 ## If it goes wrong
 
