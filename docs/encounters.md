@@ -435,6 +435,38 @@ Existing rows (or ones linked while Frigate was unreachable) have
 `dir_source=''`; `marcellus encounters backfill-direction --limit N`
 rewalks and recomputes them.
 
+## Repair
+
+`marcellus encounters repair [--dry-run] [--limit N]`
+(`encounters/repair.py`) is a one-off/rerunnable fix-up for membership rows
+written before PR #67's `start_time <= 0` write guard and end_time
+no-regress -- reconcile only replays a recent window and vanished-segment
+cleanup only scans the reconciled range, so old bad rows (prod had 465:
+`start_time <= 0` with `end_time IS NULL`, which intersect every time
+window and paint a solid bar on every camera in the app) are never touched
+otherwise. It selects every `encounter_members` row with `start_time <= 0`
+OR `end_time IS NULL`, looks each atom up in Frigate's `reviewsegment` table
+by id, and:
+
+* found, with a usable `start_time > 0`: fixes the member's `start_time` (if
+  it was `<= 0`) and `end_time` (if Frigate's segment has closed) from
+  Frigate's row; a segment Frigate still shows open and younger than
+  `encounters.max_duration_s` is left with `end_time IS NULL`, untouched;
+  one still open but older than `max_duration_s` is treated as vanished
+  garbage (Frigate would have closed a real segment by then) and the member
+  is deleted -- never invented.
+* not found in Frigate (or Frigate's own `start_time` is unusable): the
+  member is deleted.
+
+Touched encounters get `store.recompute` and are dropped if left with zero
+members; `seal_stale` re-runs over the touched set afterward. Idempotent,
+batched (200 atoms/transaction, one SAVEPOINT per atom, same pattern as
+`reconcile`); `--dry-run` classifies every row and prints counts without
+writing. Output: `{"scanned","fixed_start","fixed_end","deleted_members",
+"deleted_encounters","recomputed"}`. `store.upsert_atom` also refuses
+outright to *insert* a new member with `start_time <= 0`, so this class of
+row can't reappear on the live/reconcile write paths.
+
 ## Global timeline (M4)
 
 `GET /v1/timeline` (`routes/timeline.py`) composes several cameras'

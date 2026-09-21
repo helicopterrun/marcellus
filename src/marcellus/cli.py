@@ -391,6 +391,38 @@ def encounters_backfill_direction(
     typer.echo(json.dumps({"scanned": len(rows), "updated": updated}))
 
 
+@encounters_app.command("repair")
+def encounters_repair(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report counts without writing."),
+    limit: int | None = typer.Option(
+        None, "--limit", min=1, help="Max suspect membership rows to process this run."
+    ),
+) -> None:
+    """Fix membership rows written with `start_time <= 0` and/or
+    `end_time IS NULL` before PR #67's write guard -- looks each atom up in
+    Frigate's `reviewsegment` table and repairs or deletes it, then
+    recomputes touched encounters' aggregates. Idempotent; safe to rerun.
+    See docs/encounters.md "Repair"."""
+    import time
+
+    from marcellus import db
+    from marcellus.encounters import repair as repair_mod
+    from marcellus.encounters.service import _linker_config
+
+    s = load_settings()
+    sidecar_conn = db.open_sidecar(s.sidecar.db_path)
+    frigate_conn = db.open_frigate_ro(s.frigate.db_path)
+    try:
+        cfg = _linker_config(s, sidecar_conn)
+        summary = repair_mod.repair(
+            sidecar_conn, frigate_conn, time.time(), cfg, dry_run=dry_run, limit=limit
+        )
+    finally:
+        sidecar_conn.close()
+        frigate_conn.close()
+    typer.echo(json.dumps(summary.as_dict()))
+
+
 @face_capture_app.command("stats")
 def face_capture_stats(days: int = typer.Option(7, min=1)) -> None:
     """Counts by status/review plus the last-run heartbeat."""

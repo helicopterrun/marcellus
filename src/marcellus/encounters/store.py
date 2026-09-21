@@ -349,6 +349,18 @@ def upsert_atom(
                 ),
             )
     else:
+        # Defense in depth: `service._link_review` already refuses to link a
+        # brand-new atom with start_time <= 0 (it waits for the reconciler,
+        # which always sources start_time from Frigate's NOT NULL
+        # reviewsegment column), but a member must never be *written* with
+        # start_time <= 0 regardless of caller -- that's what produced the
+        # ~465 zero-start rows `encounters repair` cleans up. See
+        # docs/encounters.md "Repair".
+        if atom.start_time <= 0:
+            raise ValueError(
+                f"upsert_atom: refusing to insert new member {atom.atom_id!r} with "
+                f"start_time={atom.start_time} <= 0"
+            )
         encounter_id = decision.encounter_id or uuid.uuid4().hex
         _ensure_encounter(conn, encounter_id, atom, now)
         conn.execute(
