@@ -141,6 +141,12 @@ _LIVE_KEYS = {
     "encounters.transition_overrides",
     "encounters.transition_slack",
     "encounters.use_learned_gaps",
+    "encounters.continuation_w_topo",
+    "encounters.continuation_w_time",
+    "encounters.continuation_w_direction",
+    "encounters.continuation_w_class",
+    "encounters.continuation_min_score",
+    "encounters.continuation_likely_score",
     "push.delivery_urgent_resound_s",
     "push.delivery_urgent_resound_enabled",
     "push.delivery_urgent_resound_max",
@@ -178,6 +184,12 @@ _RANGE_OVERRIDES: dict[str, tuple[float | None, float | None]] = {
     "push.relay_retry_attempts": (1, 10),
     "push.relay_breaker_failures": (1, 50),
     "push.relay_breaker_open_s": (1, 600),
+    "encounters.continuation_w_topo": (0, 1),
+    "encounters.continuation_w_time": (0, 1),
+    "encounters.continuation_w_direction": (0, 1),
+    "encounters.continuation_w_class": (0, 1),
+    "encounters.continuation_min_score": (0, 1),
+    "encounters.continuation_likely_score": (0, 1),
 }
 
 _HELP_OVERRIDES: dict[str, str] = {
@@ -211,6 +223,22 @@ _HELP_OVERRIDES: dict[str, str] = {
     "scrub.format": "Sprite-sheet cell image format.",
     "push.transport": "Push transport: mock (log only) or relay (real APNs via the relay).",
     "push.dwell_source": "Where a situation's loiter check gets its clock: events or reviews.",
+    "encounters.continuation_w_topo": "Suggested-continuations weight: shared/config adjacency.",
+    "encounters.continuation_w_time": (
+        "Suggested-continuations weight: elapsed time vs. learned stats."
+    ),
+    "encounters.continuation_w_direction": (
+        "Suggested-continuations weight: exit zone/direction match."
+    ),
+    "encounters.continuation_w_class": (
+        "Suggested-continuations weight: same label vs. same family."
+    ),
+    "encounters.continuation_min_score": (
+        "Suggested-continuations score floor for a 'possible' bucket."
+    ),
+    "encounters.continuation_likely_score": (
+        "Suggested-continuations score floor for a 'likely' bucket."
+    ),
 }
 
 

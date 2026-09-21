@@ -106,3 +106,10 @@ the sidecar's own knobs in one place.
 `encounters.timeline_max_window_s` (Tuning, live) caps how long a `GET
 /v1/timeline` window may be (default 21600s / 6h) -- see
 [Encounters](/guide/encounters) "Global timeline".
+
+Suggested continuations' own weights and score thresholds
+(`continuation_w_topo`, `continuation_w_time`, `continuation_w_direction`,
+`continuation_w_class`, `continuation_min_score`, `continuation_likely_score`)
+live under the tuning panel's Encounters section and are covered in
+[Investigation](/guide/investigation) — they never bucket a machine
+prediction as `confirmed`, whatever the score.

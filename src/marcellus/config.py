@@ -704,6 +704,24 @@ class EncountersSection(BaseModel):
     # tighter than any per-reel limit. Default 6h.
     timeline_max_window_s: float = 21600.0
 
+    # Suggested continuations (M5, docs/encounters.md "Suggested
+    # continuations"): `GET /v1/observations/{atom_id}/continuations` scores
+    # candidate next-camera observations against a source atom. Weights need
+    # not sum to 1 -- `score_candidate` normalises over whichever factors it
+    # actually used for a given candidate.
+    continuation_w_topo: float = 0.30
+    continuation_w_time: float = 0.30
+    continuation_w_direction: float = 0.20
+    continuation_w_class: float = 0.20
+
+    # Score thresholds bucketing a suggestion: `likely` at/above
+    # `continuation_likely_score`, `possible` at/above
+    # `continuation_min_score`, dropped below that. Machine predictions are
+    # never bucketed `confirmed` regardless of score -- see
+    # `encounters/continuations.py`.
+    continuation_min_score: float = 0.25
+    continuation_likely_score: float = 0.5
+
 
 class PushSection(BaseModel):
     """Push notifications (docs/push-notifications.md).

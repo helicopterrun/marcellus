@@ -2,8 +2,15 @@
 title: Observations
 section: sidecar
 order: 9
-routes: ["/v1/topology", "/v1/cameras/{camera}/neighbours"]
-config: []
+routes: ["/v1/topology", "/v1/cameras/{camera}/neighbours", "/v1/observations/{atom_id}/continuations"]
+config: [
+  "encounters.continuation_w_topo",
+  "encounters.continuation_w_time",
+  "encounters.continuation_w_direction",
+  "encounters.continuation_w_class",
+  "encounters.continuation_min_score",
+  "encounters.continuation_likely_score",
+]
 ---
 
 **Observations** (docs/encounters.md "Observations") is a read-only view
@@ -124,3 +131,31 @@ missing `start`/`end`/`cameras` outside the `encounter=` form, `404` for an
 unknown camera or encounter, mirroring `/v1/reel`): at most 12 cameras per
 request, and a window no longer than `timeline_max_window_s` (see
 [Encounters](/guide/encounters) "Global timeline").
+
+## Suggested continuations
+
+`GET /v1/observations/{atom_id}/continuations?limit=5` (M5) answers "where
+might this subject go next": for each neighbour camera (adjacency edge or
+camera topology's learned-only edge) and each label family the source
+observation shares, it predicts a time window from camera topology's
+p10/p90 (or a default window when nothing's been learned yet), looks for a
+candidate observation already in that window, and scores whatever it finds
+-- a real candidate or, if none exists yet, the bare prediction itself.
+
+**Machine predictions are never shown as certain.** A suggestion is bucketed
+`confirmed` ONLY when the candidate observation is already linked into the
+same encounter as the source (the linker already joined them) or carries a
+human pin decision to that encounter -- never from score alone, no matter
+how high. Everything else buckets `likely` (score >=
+`continuation_likely_score`), `possible` (score >= `continuation_min_score`),
+or is dropped. The numeric `score` is still returned on every suggestion for
+the app/debugging even when the bucket is conservative about it.
+
+The score blends four weighted factors (`continuation_w_topo`,
+`continuation_w_time`, `continuation_w_direction`, `continuation_w_class`):
+topology (is this even a real or learned edge), elapsed time against learned
+transition stats, exit-zone direction match, and same-label vs. same-family.
+A candidate with no observation yet in the window is returned as a
+prediction (`observation_id`/`encounter_id`/`start` all `null`) carrying the
+predicted `window` instead, so the app can show "expect ~shed in 10-30s"
+before anything has actually happened.
