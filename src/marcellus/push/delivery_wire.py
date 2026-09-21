@@ -60,6 +60,7 @@ from marcellus.push.ladder import (
 )
 from marcellus.push.models import ReviewEvent
 from marcellus.push.payload import pretty_label
+from marcellus.push.stats import STATS
 
 if TYPE_CHECKING:
     import sqlite3
@@ -565,6 +566,47 @@ def _media_for(
     return handle, media, warm_task
 
 
+#: Copy cap on the crossing path: a long loiter across five cameras would
+#: otherwise blow the notification body. The tail is what matters (where
+#: the subject is *now*), so the head is elided.
+_CAMERAS_PATH_MAX = 4
+
+
+def _encounter_family_compatible(
+    card_ctx: dict[str, str], *, label: str, subject_kind: str
+) -> bool:
+    """Whether this event may join an encounter-mate's existing card.
+
+    Encounters group by co-presence and topology, so one encounter can hold
+    a person AND the car they arrived in -- merging those onto one card
+    would produce a notification that lies about its subject. The gate is
+    the linker's own label family (`encounters.linker.family_of`): person
+    joins person, vehicle joins vehicle. A card with no recorded label
+    (pre-feature row, or a system card) falls back to `subject_kind`
+    equality, and an event with no label at all is never merged.
+    """
+    from marcellus.encounters.linker import family_of
+
+    card_label = card_ctx.get("label") or ""
+    if not card_label or not label:
+        return bool(subject_kind) and card_ctx.get("subject_kind") == subject_kind
+    return family_of(card_label) == family_of(label)
+
+
+def _pretty_camera(camera: str) -> str:
+    return camera.replace("_", " ").title()
+
+
+def _cameras_path_text(cameras_path: Sequence[str]) -> str:
+    """The crossing path as body copy: pretty camera names joined by an
+    arrow, capped at `_CAMERAS_PATH_MAX` entries with a leading ellipsis
+    when the story is longer than that."""
+    pretty = [_pretty_camera(c) for c in cameras_path]
+    if len(pretty) <= _CAMERAS_PATH_MAX:
+        return " \u2192 ".join(pretty)
+    return "\u2026 " + " \u2192 ".join(pretty[-_CAMERAS_PATH_MAX:])
+
+
 def _resolve_card_for_track(
     conn: sqlite3.Connection,
     *,
@@ -576,12 +618,16 @@ def _resolve_card_for_track(
     now: float,
     geo_mates: list[tuple[str, str]] | None = None,
     geo_enabled: bool = False,
-) -> tuple[str, Card | None, str, bool]:
+    encounter_id: str | None = None,
+    encounter_merge: bool = False,
+    label: str = "",
+) -> tuple[str, Card | None, str, bool, bool]:
     """Which card this (camera, track_id) evaluation belongs to, applying
     cross-camera dedup (docs/push-notifications.md "Cross-camera
     deduplication") before a fresh card key would otherwise be minted.
 
-    Returns `(card_key, existing_card_or_None, owning_camera, via_geo)`.
+    Returns `(card_key, existing_card_or_None, owning_camera, via_geo,
+    via_encounter)`.
     `owning_camera` is this track's own camera unless the track has been
     merged onto a card another camera created first, in which case it's
     that card's original camera -- callers must persist *that*, not
@@ -596,17 +642,25 @@ def _resolve_card_for_track(
        track falls through to its own natural key, per the "a fresh card if
        still detected" rule (design doc): once the merged card is gone,
        there's nothing left to enrich.
-    2. No alias, and this is a genuinely new track (no row yet under its own
+    2. This review has been linked to an encounter that already owns an
+       open card of a compatible subject family, and `push.encounter_merge`
+       is on -- route onto that card, so one crossing is one notification
+       whose body grows into the camera path. With the flag off the merge
+       is only logged (DEBUG) so real duplicates can be counted against it
+       first, same validation shape as `geometric_dedup`. A card that has
+       already resolved/closed is never a candidate: an encounter's story
+       does not reopen (`find_open_card_by_encounter`).
+    3. No alias, and this is a genuinely new track (no row yet under its own
        natural key) with a zone: look for an open card with the same
        `subject_kind`/`zone_name` created within the dedup window. If one
        exists, alias this track onto it instead of creating a sibling.
-    3. No zone match, but geometry clusters this track with another
+    4. No zone match, but geometry clusters this track with another
        camera's track that owns an open same-label card (`geo_mates`, from
        fusion.cluster) -- adopt that card WHEN the `geometric_dedup` policy
        flag is on. Flag off: log what would have been adopted
        ("geometric_dedup: would_suppress ...") so a week of logs can be
        grepped against actual duplicate cards before enabling.
-    4. Otherwise (existing card under its own key, or no zone to dedup on)
+    5. Otherwise (existing card under its own key, or no zone to dedup on)
        -- this track's own natural key, unchanged from before this feature.
     """
     alias_key = card_store.get_track_alias(conn, camera, track_id)
@@ -614,7 +668,7 @@ def _resolve_card_for_track(
         aliased = card_store.get_card(conn, alias_key)
         if aliased is not None and not aliased.closed:
             ctx = card_store.get_card_context(conn, alias_key)
-            return alias_key, aliased, (ctx or {}).get("camera") or camera, False
+            return alias_key, aliased, (ctx or {}).get("camera") or camera, False, False
         card_store.delete_track_alias(conn, camera, track_id)
 
     natural_key = build_card_key(camera=camera, subject_kind=subject_kind, subject_id=track_id)
@@ -635,7 +689,34 @@ def _resolve_card_for_track(
                     flipped_key, natural_key,
                 )
                 ctx = card_store.get_card_context(conn, flipped_key)
-                return flipped_key, flipped, (ctx or {}).get("camera") or camera, False
+                return flipped_key, flipped, (ctx or {}).get("camera") or camera, False, False
+    if existing is None and encounter_id:
+        enc_card = card_store.find_open_card_by_encounter(
+            conn, encounter_id, exclude_key=natural_key,
+        )
+        if enc_card is not None:
+            enc_ctx = card_store.get_card_context(conn, enc_card.card_key) or {}
+            if _encounter_family_compatible(enc_ctx, label=label, subject_kind=subject_kind):
+                if not encounter_merge:
+                    # Shadow mode: threading still groups the two cards in
+                    # Notification Center, but they stay separate cards.
+                    logger.debug(
+                        "encounter_merge would have routed %s onto %s",
+                        track_id, enc_card.card_key,
+                    )
+                    STATS.incr("push.encounter_merge.shadow")
+                else:
+                    card_store.set_track_alias(conn, camera, track_id, enc_card.card_key, now)
+                    logger.info(
+                        "encounter_merge: adopted card=%s for %s/%s (encounter=%s)",
+                        enc_card.card_key, camera, track_id, encounter_id,
+                    )
+                    STATS.incr("push.encounter_merge.applied")
+                    return (
+                        enc_card.card_key, enc_card,
+                        enc_ctx.get("camera") or camera, False, True,
+                    )
+
     neighbor_cameras = policy_settings.camera_neighbor_set(camera)
     if existing is None and (zone_name or neighbor_cameras):
         candidate_key = card_store.find_dedup_candidate(
@@ -648,7 +729,10 @@ def _resolve_card_for_track(
             if candidate is not None and not candidate.closed:
                 card_store.set_track_alias(conn, camera, track_id, candidate_key, now)
                 ctx = card_store.get_card_context(conn, candidate_key)
-                return candidate_key, candidate, (ctx or {}).get("camera") or camera, False
+                return (
+                    candidate_key, candidate, (ctx or {}).get("camera") or camera,
+                    False, False,
+                )
 
     # Geometric adoption: zone dedup found nothing, but fusion clustered
     # this track with another camera's track. Adopt that mate's open card
@@ -679,9 +763,9 @@ def _resolve_card_for_track(
             logger.info(
                 "geometric_dedup: adopted card=%s for %s/%s", mate_key, camera, track_id,
             )
-            return mate_key, mate_card, (ctx or {}).get("camera") or camera, True
+            return mate_key, mate_card, (ctx or {}).get("camera") or camera, True, False
 
-    return natural_key, existing, camera, False
+    return natural_key, existing, camera, False, False
 
 
 async def _deliver_live_activities(
@@ -1102,6 +1186,7 @@ def _build_aggregate_state(
         )
         state_mutation = "update"
 
+    primary_path = card_store.parse_cameras_path(primary_ctx.get("cameras_path_json", "[]"))
     return live_activities.build_content_state(
         level=primary_card.level, mutation=state_mutation, glyph=glyph,
         primary=p_primary, secondary=p_secondary, elapsed_seconds=p_elapsed,
@@ -1110,6 +1195,11 @@ def _build_aggregate_state(
         motion=p_motion, zones=p_zones, path=p_path,
         extra_stories=extra_stories, camera=camera,
         story_started_ts=round(primary_card.created_at, 1),
+        # Additive (encounter-aware push): only once the primary story has
+        # actually crossed cameras, so a single-camera activity's content
+        # state is byte-identical to before this feature.
+        cameras_path=primary_path if len(primary_path) >= 2 else None,
+        encounter_id=primary_ctx.get("encounter_id") or None,
     )
 
 
@@ -1202,6 +1292,7 @@ async def handle_delivery_event(
     nobody_home: bool = False,
     night: bool = False,
     dwell_exceeded: bool = False,
+    encounter_id: str | None = None,
 ) -> int:
     """One `frigate/reviews` message through the delivery pipeline. Returns
     the number of cards mutated (0 if `delivery_enabled` is off).
@@ -1211,6 +1302,12 @@ async def handle_delivery_event(
     so pure-logic-focused callers/tests that don't care about `media` don't
     have to construct one. Without it (or without `config.external_base_url`
     set), `media` is simply omitted, same as "nothing to show".
+
+    `encounter_id` is this review's encounter, resolved synchronously by
+    `PushEngine.handle_event` before delivery (`EncounterService.link_now`,
+    under `push.encounter_link_timeout_s`). `None` -- the default, and what
+    every caller that predates encounter-aware push passes -- behaves
+    exactly as before: per-camera cards, camera-keyed `thread-id`.
     """
     if not config.delivery_enabled:
         return 0
@@ -1371,11 +1468,14 @@ async def handle_delivery_event(
 
     mutated = 0
     for track_id in track_ids:
-        card_key, existing, owning_camera, via_geo = _resolve_card_for_track(
+        card_key, existing, owning_camera, via_geo, via_encounter = _resolve_card_for_track(
             conn, camera=event.camera, track_id=track_id, subject_kind=subject_kind,
             zone_name=zone_name, zones=event.zones, now=now,
             geo_mates=geo_members.get(track_id),
             geo_enabled=bool(policy.get("geometric_dedup")),
+            encounter_id=encounter_id,
+            encounter_merge=bool(config.encounter_merge),
+            label=snapshot.label,
         )
         card, mutation, sound = _advance_card(existing, level, card_key=card_key, now=now)
         if _zone_override_hit:
@@ -1385,6 +1485,19 @@ async def handle_delivery_event(
             card.zone_override_hit = True
         if via_geo and "geo_dedup" not in trace_reasons:
             trace_reasons.append("geo_dedup")
+        if via_encounter and "encounter_merge" not in trace_reasons:
+            trace_reasons.append("encounter_merge")
+        # What the card's camera path becomes once this mutation is
+        # persisted -- computed here because the copy and the payload below
+        # are both built before `send_card_mutation` does the upsert, which
+        # is then handed this same list so the two can't disagree.
+        # Only an encounter-stamped story records a path (see
+        # `card_store.upsert_card`): an ordinary zone/geo dedup merge keeps
+        # its " · also on X" copy instead.
+        cameras_path = (
+            card_store.next_cameras_path(conn, card_key, event.camera)
+            if encounter_id else []
+        )
 
         mutation_name = {
             CREATE: "create", ESCALATE: "escalate", DEESCALATE: "deescalate",
@@ -1467,7 +1580,13 @@ async def handle_delivery_event(
             0.0 if mutation == RESOLVE else elapsed,
             identity=identity, story=story,
         )
-        if owning_camera != event.camera:
+        if len(cameras_path) >= 2:
+            # An encounter (or any multi-camera story) reads as a path:
+            # "Alley Wide → Stairway Wide → Gate Walkway". This REPLACES the
+            # body rather than decorating it -- the crossing IS the news --
+            # and supersedes the " · also on X" suffix below.
+            secondary = _cameras_path_text(cameras_path)
+        elif owning_camera != event.camera:
             # A second camera is now contributing to a card it didn't
             # create -- surface that in the copy rather than silently
             # merging (docs "Cross-camera deduplication" §2). The card's
@@ -1656,6 +1775,9 @@ async def handle_delivery_event(
                 glyph=_glyph_for(subject_kind, snapshot.label),
                 primary=primary, secondary=secondary, event_ts=now, media=media,
                 la_active=la_only, escalation_sound=escalation_sound,
+                encounter_id=encounter_id or "",
+                cameras_path=cameras_path if len(cameras_path) >= 2 else None,
+                thread_by_encounter=bool(config.encounter_threading),
             )
 
         sent_count = await send_card_mutation(
@@ -1666,6 +1788,9 @@ async def handle_delivery_event(
             label=snapshot.label, family=family or "",
             demote_tokens=demote_tokens,
             suppress_demoted=delivery_mode == "la_first" and not la_only,
+            encounter_id=encounter_id or "",
+            event_camera=event.camera,
+            cameras_path=cameras_path or None,
         )
         if mutation in (CREATE, ESCALATE, DEESCALATE):
             decision_trace.annotate(
