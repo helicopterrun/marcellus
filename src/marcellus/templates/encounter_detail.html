@@ -14,6 +14,8 @@
     </span>
   </div>
 
+  {% if msg %}<p class="badge ok">{{ msg }}</p>{% endif %}
+
   <section class="capture-visit">
     <header>
       <b class="id-title">{{ encounter.cameras|join(' → ') }}</b>
@@ -28,7 +30,7 @@
   <section class="capture-visit">
     <header><b class="id-title">Members</b></header>
     <table class="enc-member-table">
-      <thead><tr><th>Camera</th><th>Span</th><th>Labels</th><th>Zones</th><th>Reason</th><th>Conf.</th><th>Related events</th></tr></thead>
+      <thead><tr><th>Camera</th><th>Span</th><th>Labels</th><th>Zones</th><th>Reason</th><th>Conf.</th><th>Related events</th><th>Decisions</th><th>Actions</th></tr></thead>
       <tbody>
       {% for m in members %}
         <tr>
@@ -41,10 +43,38 @@
           <td>
             {% for eid in m.event_ids %}<a href="/event/{{ eid }}">{{ eid }}</a>{% if not loop.last %}, {% endif %}{% endfor %}
           </td>
+          <td>
+            {% set atom_decisions = decisions.get(m.atom_id, []) if decisions else [] %}
+            {% for d in atom_decisions %}
+              <div class="mode">{{ d.action }} &rarr; {{ d.encounter_id }}{% if d.note %} ({{ d.note }}){% endif %}</div>
+            {% endfor %}
+          </td>
+          <td>
+            <form method="post" action="/encounters/{{ encounter.id }}/atoms/{{ m.atom_id }}/split" class="inline-form">
+              <button type="submit">Split out</button>
+            </form>
+            <form method="post" action="/encounters/{{ encounter.id }}/atoms/{{ m.atom_id }}/pin" class="inline-form">
+              <input type="text" name="target" placeholder="target encounter id" required>
+              <button type="submit">Move to</button>
+            </form>
+            {% if decisions.get(m.atom_id) %}
+            <form method="post" action="/encounters/{{ encounter.id }}/atoms/{{ m.atom_id }}/undo" class="inline-form">
+              <button type="submit">Undo decisions</button>
+            </form>
+            {% endif %}
+          </td>
         </tr>
       {% endfor %}
       </tbody>
     </table>
+  </section>
+
+  <section class="capture-visit">
+    <header><b class="id-title">Merge another encounter into this one</b></header>
+    <form method="post" action="/encounters/{{ encounter.id }}/merge" class="inline-form">
+      <input type="text" name="source" placeholder="source encounter id" required>
+      <button type="submit">Merge</button>
+    </form>
   </section>
 </main>
 {% endblock %}

@@ -367,3 +367,179 @@ def test_watermark_roundtrip(sidecar_db_path: Path) -> None:
         assert store.get_watermark(conn) == 12400.0
     finally:
         conn.close()
+
+
+def test_split_atom_moves_to_fresh_encounter_and_donor_recomputes(sidecar_db_path: Path) -> None:
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        enc_id = store.upsert_atom(
+            conn, _atom("a1", start=now), LinkDecision(None, "new", 1.0), now
+        )
+        store.upsert_atom(
+            conn, _atom("a2", start=now + 5), LinkDecision(enc_id, "same_camera", 0.9), now
+        )
+
+        new_id = store.split_atom(conn, "a1", now + 10)
+        assert new_id != enc_id
+
+        row = store.member_row(conn, "a1")
+        assert row is not None
+        assert row["encounter_id"] == new_id
+        assert row["link_reason"] == "split"
+
+        # donor still exists (a2 remains) and its aggregates recomputed
+        donor = store.get(conn, enc_id)
+        assert donor is not None
+        assert donor["atom_count"] == 1
+
+        decisions = store.decisions_for(conn, "a1")
+        assert any(d["action"] == "split" and d["encounter_id"] == enc_id for d in decisions)
+    finally:
+        conn.close()
+
+
+def test_split_atom_deletes_donor_when_empty(sidecar_db_path: Path) -> None:
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        enc_id = store.upsert_atom(
+            conn, _atom("a1", start=now), LinkDecision(None, "new", 1.0), now
+        )
+        store.split_atom(conn, "a1", now + 10)
+        assert store.get(conn, enc_id) is None
+    finally:
+        conn.close()
+
+
+def test_pin_atom_moves_and_records_decision(sidecar_db_path: Path) -> None:
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        enc_a = store.upsert_atom(conn, _atom("a1", start=now), LinkDecision(None, "new", 1.0), now)
+        enc_b = store.upsert_atom(
+            conn, _atom("a2", start=now + 100), LinkDecision(None, "new", 1.0), now
+        )
+
+        result = store.pin_atom(conn, "a2", enc_a, now + 10)
+        assert result == enc_a
+
+        row = store.member_row(conn, "a2")
+        assert row is not None
+        assert row["encounter_id"] == enc_a
+        assert row["link_reason"] == "pinned"
+
+        assert store.get(conn, enc_b) is None  # donor emptied out
+
+        decisions = store.decisions_for(conn, "a2")
+        assert any(d["action"] == "pin" and d["encounter_id"] == enc_a for d in decisions)
+    finally:
+        conn.close()
+
+
+def test_pin_into_sealed_target_keeps_it_sealed(sidecar_db_path: Path) -> None:
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        enc_a = store.upsert_atom(conn, _atom("a1", start=now), LinkDecision(None, "new", 1.0), now)
+        conn.execute("UPDATE encounters SET sealed_at = ? WHERE id = ?", (now, enc_a))
+        enc_b = store.upsert_atom(
+            conn, _atom("a2", start=now + 100), LinkDecision(None, "new", 1.0), now
+        )
+
+        store.pin_atom(conn, "a2", enc_a, now + 10)
+        row = store.get(conn, enc_a)
+        assert row is not None
+        assert row["sealed_at"] is not None
+        assert store.get(conn, enc_b) is None
+    finally:
+        conn.close()
+
+
+def test_pin_atom_unknown_target_raises(sidecar_db_path: Path) -> None:
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        store.upsert_atom(conn, _atom("a1", start=now), LinkDecision(None, "new", 1.0), now)
+        try:
+            store.pin_atom(conn, "a1", "no-such-encounter", now)
+            raise AssertionError("expected ValueError")
+        except ValueError:
+            pass
+    finally:
+        conn.close()
+
+
+def test_merge_encounters_folds_all_members_and_deletes_source(sidecar_db_path: Path) -> None:
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        enc_a = store.upsert_atom(conn, _atom("a1", start=now), LinkDecision(None, "new", 1.0), now)
+        enc_b = store.upsert_atom(
+            conn, _atom("b1", start=now + 100), LinkDecision(None, "new", 1.0), now
+        )
+        store.upsert_atom(
+            conn, _atom("b2", start=now + 110), LinkDecision(enc_b, "same_camera", 0.9), now
+        )
+
+        count = store.merge_encounters(conn, enc_b, enc_a, now + 10)
+        assert count == 2
+        assert store.get(conn, enc_b) is None
+
+        for atom_id in ("b1", "b2"):
+            row = store.member_row(conn, atom_id)
+            assert row is not None
+            assert row["encounter_id"] == enc_a
+            assert row["link_reason"] == "pinned"
+
+        target = store.get(conn, enc_a)
+        assert target is not None
+        assert target["atom_count"] == 3
+    finally:
+        conn.close()
+
+
+def test_founder_singleton_returns_none_for_split_or_pinned(sidecar_db_path: Path) -> None:
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        enc_a = store.upsert_atom(conn, _atom("a1", start=now), LinkDecision(None, "new", 1.0), now)
+        new_id = store.split_atom(conn, "a1", now + 10)
+        assert store.founder_singleton(conn, "a1") is None
+
+        enc_b = store.upsert_atom(
+            conn, _atom("b1", start=now + 200), LinkDecision(None, "new", 1.0), now
+        )
+        store.pin_atom(conn, "b1", new_id, now + 20)
+        assert store.founder_singleton(conn, "b1") is None
+        assert enc_a or enc_b  # silence unused warnings if branches change
+    finally:
+        conn.close()
+
+
+def test_upsert_atom_never_moves_pinned_or_split_atom(sidecar_db_path: Path) -> None:
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        enc_a = store.upsert_atom(conn, _atom("a1", start=now), LinkDecision(None, "new", 1.0), now)
+        enc_b = store.upsert_atom(
+            conn, _atom("b1", start=now + 200), LinkDecision(None, "new", 1.0), now
+        )
+        store.pin_atom(conn, "a1", enc_b, now + 5)  # a1 now pinned into enc_b
+
+        # seal enc_b so a sealed-donor rehome would normally trigger
+        conn.execute("UPDATE encounters SET sealed_at = ? WHERE id = ?", (now, enc_b))
+
+        # decide() names a different encounter (enc_a) for a1 -- must be ignored
+        decision = LinkDecision(enc_a, "same_camera", 0.95)
+        result_id = store.upsert_atom(
+            conn, _atom("a1", start=now, end_time=now + 30), decision, now + 40
+        )
+        assert result_id == enc_b  # unchanged despite decision naming enc_a
+
+        row = store.member_row(conn, "a1")
+        assert row is not None
+        assert row["encounter_id"] == enc_b
+        assert row["link_reason"] == "pinned"
+    finally:
+        conn.close()

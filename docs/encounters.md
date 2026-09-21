@@ -309,8 +309,10 @@ util.js helpers; phone-first):
 * `GET /encounters/{id}` — same detail for one encounter, plus a "Related
   events" list linking to existing event detail/clip URLs already used by
   the triage pages.
-* No pin/split UI yet (slice 2); decisions table exists so the linker logic
-  is complete.
+* Per-member row also gets "Split out", a "Move to" (target encounter id)
+  form, and (when the atom has any decisions) "Undo decisions"; a
+  page-level "Merge another encounter into this one" form. See
+  "Correcting encounters" below.
 
 JSON (`/v1`, wire models with `extra="forbid"` in `models/wire.py`):
 * `GET /v1/encounters?since=<epoch>&limit=<int≤500>&camera=` →
@@ -318,6 +320,45 @@ JSON (`/v1`, wire models with `extra="forbid"` in `models/wire.py`):
 * `GET /v1/encounters/{id}` → `EncounterResponse{encounter: EncounterSummary, members: list[EncounterMember]}`
 * `GET /v1/encounters/adjacency` → `Adjacency.to_json()` (registered before
   the `{id}` route).
+* `POST /v1/encounters/{id}/atoms/{atom_id}/split`,
+  `POST /v1/encounters/{id}/atoms/{atom_id}/pin {"target": "<encounter_id>"}`,
+  `POST /v1/encounters/{id}/merge {"source": "<encounter_id>"}`,
+  `POST /v1/encounters/{id}/atoms/{atom_id}/undo` — JSON twins of the HTML
+  forms below, same auth, returning `EncounterResponse` for the resulting
+  encounter.
+
+## Correcting encounters
+
+A human can override the linker per atom, via the encounter detail page or
+the `/v1` routes above:
+
+* **Split** (`store.split_atom`) — moves one atom out of its encounter into
+  a brand new encounter of its own (`link_reason='split'`, confidence 1.0),
+  records a `split` decision naming the encounter it left, and recomputes
+  (or deletes) the donor. A later `decide()` pass for this atom always
+  excludes that donor (`split_from`), and its membership row is now locked
+  — no automatic re-home ever moves it again (see `store.upsert_atom`'s
+  `human_locked` guard), sealed donor or not.
+* **Move / pin** (`store.pin_atom`, form field `target`) — moves one atom
+  into a specific encounter by id (`link_reason='pinned'`, confidence 1.0),
+  records a `pin` decision, and clears any earlier `split` decision that
+  named the same target. The target may already be sealed — a human
+  override is allowed to add to a sealed encounter, and it stays sealed.
+  Like split, a pinned atom's membership is locked against future
+  automatic moves.
+* **Merge** (`store.merge_encounters`, form field `source`) — pins every
+  member of `source` into the current encounter (one `pin` decision per
+  atom); `source` is deleted once it's empty.
+* **Undo** (`store.undo_decisions`) — clears every decision recorded for an
+  atom. This does not itself move the atom back anywhere; it only lifts the
+  `pinned`/`split` candidate-exclusion bias on *future* `decide()` calls for
+  that atom (see `service._pin_split`). Its membership row (and the
+  automatic-rehome lock that comes with a `pinned`/`split` `link_reason`)
+  is unchanged.
+* A pinned/split atom is never treated as a lone founder by
+  `founder_singleton` (which already requires `link_reason == 'new'`), and
+  `service.reconcile`'s skip-unchanged fast path never has to reconsider it
+  either way.
 
 ```python
 class EncounterMember(_Wire):
