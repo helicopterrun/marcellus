@@ -1,6 +1,6 @@
 ---
 title: Motion & zone analysis
-section: analysis
+section: tuning
 order: 2
 routes: ["/motion", "/zone-hits"]
 ---

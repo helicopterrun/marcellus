@@ -1,7 +1,7 @@
 ---
 title: Deployment & upgrades
-section: operations
-order: 1
+section: getting-started
+order: 2
 ---
 
 The sidecar runs as a single Python service beside Frigate — bare metal

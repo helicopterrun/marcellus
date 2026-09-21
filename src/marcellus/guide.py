@@ -35,10 +35,11 @@ GUIDE_DIR = Path(__file__).parent / "guide_content"
 # this order; frontmatter `section` must be one of these.
 SECTIONS: tuple[tuple[str, str], ...] = (
     ("getting-started", "Getting started"),
-    ("sidecar", "Sidecar pages"),
-    ("faces", "Face pipeline"),
-    ("analysis", "Analysis & tuning"),
+    ("daily-review", "Daily review"),
     ("notifications", "Notifications"),
+    ("people", "People"),
+    ("encounters", "Encounters"),
+    ("tuning", "Tuning"),
     ("elsinore", "Elsinore app"),
     ("operations", "Operations"),
 )

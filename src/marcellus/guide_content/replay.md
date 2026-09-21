@@ -1,7 +1,7 @@
 ---
 title: Replay
-section: sidecar
-order: 6
+section: notifications
+order: 3
 routes: ["/replay"]
 ---
 

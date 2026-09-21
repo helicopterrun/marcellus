@@ -1,6 +1,6 @@
 ---
 title: Map & calibration
-section: sidecar
+section: daily-review
 order: 4
 routes: ["/map"]
 ---

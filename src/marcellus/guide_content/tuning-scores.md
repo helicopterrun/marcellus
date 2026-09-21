@@ -1,6 +1,6 @@
 ---
 title: Tuning detection thresholds
-section: analysis
+section: tuning
 order: 1
 routes: ["/score-histogram"]
 ---

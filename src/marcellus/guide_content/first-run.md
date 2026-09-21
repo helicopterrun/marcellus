@@ -1,7 +1,7 @@
 ---
 title: First run
 section: getting-started
-order: 2
+order: 3
 config: ["frigate", "sidecar", "log_level"]
 ---
 

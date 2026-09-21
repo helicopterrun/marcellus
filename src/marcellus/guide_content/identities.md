@@ -1,6 +1,6 @@
 ---
 title: Identities
-section: faces
+section: people
 order: 2
 routes: ["/enrich/clusters"]
 config: ["face_enrich"]
