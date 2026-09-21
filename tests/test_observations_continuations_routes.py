@@ -143,6 +143,55 @@ def test_linked_sibling_on_adjacent_camera_is_confirmed(
     assert confirmed[0]["encounter_id"] == enc_id
 
 
+def test_overlapping_sibling_on_adjacent_camera_is_confirmed_no_duplicate_prediction(
+    settings: Settings, client: TestClient
+) -> None:
+    """Overlapping hand-off: alley-wide starts seeing the same person ~2s
+    after stairway-wide (source, 30s long) STARTED, while stairway-wide is
+    still seeing them, and the linker already joined both atoms onto the
+    same encounter. The old candidate search only started at the source's
+    END, so this candidate -- and the whole overlap case -- was invisible
+    to it and it would fall back to a pure prediction for that camera. The
+    wider `candidate_search_window` (source start onward) must find it as a
+    real candidate: exactly one row for the shed camera, bucketed
+    `confirmed`, `observation_id` set, and no separate prediction row for
+    that same camera."""
+    now = time.time()
+    enc_id, _s0, _e0 = _seed_atom(
+        settings,
+        "src",
+        camera="alley-wide",
+        start_offset=-100.0,
+        end_offset=-70.0,
+        direction=Direction("front_garden", "back_walkway", "out:shed", None, "zones"),
+        now=now,
+    )
+    _seed_atom(
+        settings,
+        "sib",
+        camera="shed",
+        start_offset=-98.0,
+        end_offset=-90.0,
+        encounter_id=enc_id,
+        reason="adjacent",
+        now=now,
+    )
+    _seed_transition(
+        settings, cam_a="alley-wide", cam_b="shed", family="person", p10=5.0, p50=10.0, p90=20.0
+    )
+
+    resp = client.get("/v1/observations/src/continuations")
+    assert resp.status_code == 200
+    body = resp.json()
+    shed_rows = [s for s in body["suggestions"] if s["camera"] == "shed"]
+    assert len(shed_rows) == 1
+    row = shed_rows[0]
+    assert row["bucket"] == "confirmed"
+    assert row["observation_id"] == "sib"
+    assert row["encounter_id"] == enc_id
+    assert any("overlapped" in w for w in row["why"])
+
+
 def test_member_on_different_encounter_is_likely_or_possible_with_ids(
     settings: Settings, client: TestClient
 ) -> None:

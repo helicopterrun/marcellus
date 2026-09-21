@@ -20,6 +20,7 @@ from marcellus.encounters.continuations import (
     ContinuationConfig,
     Source,
     bucket,
+    candidate_search_window,
     continuation_config_from_settings,
     predict_window,
     score_candidate,
@@ -157,6 +158,7 @@ def _raw_candidates(
     conn: Any,
     *,
     source_camera: str,
+    source_start: float,
     source_end: float,
     source_encounter_id: str,
     families: set[str],
@@ -164,8 +166,13 @@ def _raw_candidates(
     cfg: ContinuationConfig,
 ) -> list[dict[str, Any]]:
     """One dict per (neighbour camera, shared family): either a real
-    candidate member found in the predicted window, or a pure prediction
-    (`atom_id=None`) when none exists. Runs inside `db.with_sidecar`."""
+    candidate member found by `candidate_search_window` (which, unlike
+    `predict_window`, starts at the source's own start -- catching
+    overlapping hand-offs where the next camera already sees the entity
+    while the source is still seeing it too), or a pure prediction
+    (`atom_id=None`) when none exists in that search window. The narrower
+    `predict_window` is still what's reported as `window` on a pure
+    prediction. Runs inside `db.with_sidecar`."""
     transitions = load_transitions(conn)
     neighbour_cameras = adjacency.neighbours(source_camera) | store.cameras_with_learned_transition(
         conn, source_camera
@@ -177,7 +184,10 @@ def _raw_candidates(
         for family in sorted(families):
             stats = transitions.get((source_camera, cam, family))
             window = predict_window(source_end, stats, cfg)
-            members = store.members_in_window(conn, cam, window[0], window[1], limit=20)
+            search_window = candidate_search_window(source_start, source_end, stats, cfg)
+            members = store.members_in_window(
+                conn, cam, search_window[0], search_window[1], limit=20
+            )
             matched = [
                 m for m in members if family in {family_of(lb) for lb in _cand_labels(m)}
             ]
@@ -237,6 +247,7 @@ async def observation_continuations(
         raw = _raw_candidates(
             conn,
             source_camera=row["camera"],
+            source_start=row["start_time"],
             source_end=row["end_time"] if row["end_time"] is not None else row["start_time"],
             source_encounter_id=row["encounter_id"],
             families=families,

@@ -137,10 +137,15 @@ request, and a window no longer than `timeline_max_window_s` (see
 `GET /v1/observations/{atom_id}/continuations?limit=5` (M5) answers "where
 might this subject go next": for each neighbour camera (adjacency edge or
 camera topology's learned-only edge) and each label family the source
-observation shares, it predicts a time window from camera topology's
-p10/p90 (or a default window when nothing's been learned yet), looks for a
-candidate observation already in that window, and scores whatever it finds
--- a real candidate or, if none exists yet, the bare prediction itself.
+observation shares, it searches for a candidate observation already on that
+camera from the source's own start time through p90 (times a max-window
+factor) past the source's end -- wide enough to catch an overlapping
+hand-off where the next camera already sees the entity while the source is
+still seeing it too, not just one that starts after the source ends -- and
+scores whatever it finds. If nothing turns up in that search, it falls back
+to the narrower predicted window (from camera topology's p10/p90, or a
+default when nothing's been learned yet) and returns the bare prediction
+itself instead.
 
 **Machine predictions are never shown as certain.** A suggestion is bucketed
 `confirmed` ONLY when the candidate observation is already linked into the
