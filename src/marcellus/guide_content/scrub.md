@@ -1,7 +1,7 @@
 ---
 title: Scrub
-section: sidecar
-order: 2
+section: daily-review
+order: 1
 routes: ["/scrub"]
 config: ["scrub"]
 ---

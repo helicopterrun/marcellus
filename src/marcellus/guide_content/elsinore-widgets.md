@@ -1,7 +1,7 @@
 ---
 title: Widgets & Live Activities
-section: elsinore
-order: 3
+section: notifications
+order: 4
 ---
 
 ## Home-screen widgets

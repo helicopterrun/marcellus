@@ -1,7 +1,7 @@
 ---
 title: Elsinore setup
 section: elsinore
-order: 2
+order: 1
 ---
 
 ## Onboarding

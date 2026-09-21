@@ -1,7 +1,7 @@
 ---
 title: Status & live view
-section: sidecar
-order: 1
+section: getting-started
+order: 4
 routes: ["/", "/cameras", "/live/{camera}"]
 ---
 

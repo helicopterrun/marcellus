@@ -1,6 +1,6 @@
 ---
 title: Camera & detector health
-section: analysis
+section: tuning
 order: 3
 routes: ["/fps-budget", "/placement"]
 ---

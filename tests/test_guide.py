@@ -35,10 +35,282 @@ UNDOCUMENTED_OK = {
     "/guide/{slug}",
 }
 
-# Settings fields with no honest one-line effect to document (internal
-# wiring, not something a deployer tunes) — each entry names the section and
-# field it excuses, with a reason.
-UNDOCUMENTED_OK_FIELDS: set[str] = set()
+# Fields the tightened `test_every_config_field_is_documented` still can't
+# see real documentation for: `"section.field" -> reason`. Every entry is a
+# pre-existing prose-only mention, not a newly undocumented knob -- the
+# encounters and push.encounter_* families are deliberately empty here.
+UNDOCUMENTED_OK_FIELDS: dict[str, str] = {
+    "face_capture.apply_annotation_offset": (
+        "pre-existing gap: faces-pipeline.md is prose, per-knob defaults untabulated"
+    ),
+    "face_capture.capture_delay_s": (
+        "pre-existing gap: faces-pipeline.md is prose, per-knob defaults untabulated"
+    ),
+    "face_capture.crop_pad": (
+        "pre-existing gap: faces-pipeline.md is prose, per-knob defaults untabulated"
+    ),
+    "face_capture.crop_to_bbox": (
+        "pre-existing gap: faces-pipeline.md is prose, per-knob defaults untabulated"
+    ),
+    "face_capture.dedup_window_s": (
+        "pre-existing gap: faces-pipeline.md is prose, per-knob defaults untabulated"
+    ),
+    "face_capture.head_fraction": (
+        "pre-existing gap: faces-pipeline.md is prose, per-knob defaults untabulated"
+    ),
+    "face_capture.http_timeout_s": (
+        "pre-existing gap: faces-pipeline.md is prose, per-knob defaults untabulated"
+    ),
+    "face_capture.lookback_s": (
+        "pre-existing gap: faces-pipeline.md is prose, per-knob defaults untabulated"
+    ),
+    "face_capture.max_attempts": (
+        "pre-existing gap: faces-pipeline.md is prose, per-knob defaults untabulated"
+    ),
+    "face_capture.max_captures_per_run": (
+        "pre-existing gap: faces-pipeline.md is prose, per-knob defaults untabulated"
+    ),
+    "face_capture.max_visit_s": (
+        "pre-existing gap: faces-pipeline.md is prose, per-knob defaults untabulated"
+    ),
+    "face_capture.retention_days": (
+        "pre-existing gap: faces-pipeline.md is prose, per-knob defaults untabulated"
+    ),
+    "face_capture.thumb_max_edge": (
+        "pre-existing gap: faces-pipeline.md is prose, per-knob defaults untabulated"
+    ),
+    "face_capture.thumb_quality": (
+        "pre-existing gap: faces-pipeline.md is prose, per-knob defaults untabulated"
+    ),
+    "face_enrich.best_n": (
+        "pre-existing gap: identities.md is prose, per-knob defaults untabulated"
+    ),
+    "face_enrich.cameras": (
+        "pre-existing gap: identities.md is prose, per-knob defaults untabulated"
+    ),
+    "face_enrich.cluster_threshold": (
+        "pre-existing gap: identities.md is prose, per-knob defaults untabulated"
+    ),
+    "face_enrich.cluster_ttl_days": (
+        "pre-existing gap: identities.md is prose, per-knob defaults untabulated"
+    ),
+    "face_enrich.enabled": (
+        "pre-existing gap: identities.md is prose, per-knob defaults untabulated"
+    ),
+    "face_enrich.http_timeout_s": (
+        "pre-existing gap: identities.md is prose, per-knob defaults untabulated"
+    ),
+    "face_enrich.lookback_s": (
+        "pre-existing gap: identities.md is prose, per-knob defaults untabulated"
+    ),
+    "face_enrich.match_threshold": (
+        "pre-existing gap: identities.md is prose, per-knob defaults untabulated"
+    ),
+    "face_enrich.max_attempts": (
+        "pre-existing gap: identities.md is prose, per-knob defaults untabulated"
+    ),
+    "face_enrich.max_frames": (
+        "pre-existing gap: identities.md is prose, per-knob defaults untabulated"
+    ),
+    "face_enrich.min_face_area_px": (
+        "pre-existing gap: identities.md is prose, per-knob defaults untabulated"
+    ),
+    "face_enrich.min_quality": (
+        "pre-existing gap: identities.md is prose, per-knob defaults untabulated"
+    ),
+    "face_enrich.min_sample_gap_s": (
+        "pre-existing gap: identities.md is prose, per-knob defaults untabulated"
+    ),
+    "face_enrich.process_delay_s": (
+        "pre-existing gap: identities.md is prose, per-knob defaults untabulated"
+    ),
+    "frigate.config_refresh_enabled": (
+        "pre-existing gap: first-run.md covers this in prose, no stated default"
+    ),
+    "push.activity_dismissal_tail_s": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.activity_reap_after_s": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.activity_resolution_s": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.activity_sweep_interval_s": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.capture_enabled": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.capture_max_bytes": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.delivery_backfill_staleness_s": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.delivery_enabled": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.delivery_la_enabled": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.delivery_resound_sweep_interval_s": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.delivery_urgent_resound_enabled": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.delivery_urgent_resound_max": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.delivery_urgent_resound_s": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.enabled": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.mqtt_client_id": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.mqtt_password": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.mqtt_port": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.mqtt_topic_events": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.mqtt_username": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.offline_silence_s": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.reconnect_backoff_max_s": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.reconnect_backoff_s": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.relay_base_url": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.relay_breaker_failures": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.relay_breaker_open_s": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.relay_retry_attempts": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.relay_timeout_s": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.situation_handle_ttl_s": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.thumbnail_max_edge": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.thumbnail_quality": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "push.thumbnail_timeout_s": (
+        "pre-existing gap: push-notifications.md covers the pipeline, not this knob"
+    ),
+    "scrub.aged_after_h": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "scrub.aged_interval_s": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "scrub.backfill_segments_per_cycle": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "scrub.backfill_time_budget_s": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "scrub.cell_h": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "scrub.derive_time_reserve_s": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "scrub.enabled": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "scrub.generate_interval_s": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "scrub.live_edge_interval_s": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "scrub.live_edge_lookback_s": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "scrub.live_edge_segments": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "scrub.match_keyframe_cadence": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "scrub.min_free_bytes": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "scrub.preserve_source_aspect": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "scrub.prune_interval_s": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "scrub.recent_interval_s": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "scrub.retention_days": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "scrub.sheet_version_grace_s": (
+        "pre-existing gap: scrub.md is conceptual, per-knob defaults untabulated"
+    ),
+    "sidecar.auth_cache_max_entries": (
+        "pre-existing gap: first-run/troubleshooting give behaviour, not defaults"
+    ),
+    "sidecar.auth_cache_ttl_s": (
+        "pre-existing gap: first-run/troubleshooting give behaviour, not defaults"
+    ),
+    "sidecar.login_rate_limit_attempts": (
+        "pre-existing gap: first-run/troubleshooting give behaviour, not defaults"
+    ),
+    "sidecar.login_rate_limit_window_s": (
+        "pre-existing gap: first-run/troubleshooting give behaviour, not defaults"
+    ),
+    "sidecar.remember_cache_ttl_s": (
+        "pre-existing gap: first-run/troubleshooting give behaviour, not defaults"
+    ),
+    "sidecar.remember_ttl_s": (
+        "pre-existing gap: first-run/troubleshooting give behaviour, not defaults"
+    ),
+    "sidecar.require_frigate_auth": (
+        "pre-existing gap: first-run/troubleshooting give behaviour, not defaults"
+    ),
+    "watchdog.cooldown_s": (
+        "pre-existing gap: settings.md gives behaviour, per-knob defaults untabulated"
+    ),
+    "watchdog.failures_before_restart": (
+        "pre-existing gap: settings.md gives behaviour, per-knob defaults untabulated"
+    ),
+    "watchdog.interval_s": (
+        "pre-existing gap: settings.md gives behaviour, per-knob defaults untabulated"
+    ),
+    "watchdog.max_restarts_per_hour": (
+        "pre-existing gap: settings.md gives behaviour, per-knob defaults untabulated"
+    ),
+    "watchdog.timeout_s": (
+        "pre-existing gap: settings.md gives behaviour, per-knob defaults untabulated"
+    ),
+}
 
 _FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n(.*)", re.DOTALL)
 
@@ -146,38 +418,92 @@ def test_every_config_section_is_documented(registry: GuideRegistry) -> None:
     )
 
 
-def test_every_config_field_is_documented() -> None:
-    """Every field of every (flat, non-nested) `Settings` section model must
-    be individually documented, not just its section.
+_NUMERIC_OR_BOOL = (int, float, bool)
+_BULLET_PREFIXES = ("- ", "* ", "+ ")
 
-    A field counts as documented if EITHER form appears (whichever a topic
-    already uses is fine — `config:` frontmatter today only ever lists bare
-    section names, never `section.field`, so in practice every field so far
-    is documented the second way):
-      1. `section.field` appears in some topic's `config:` frontmatter list, or
-      2. a literal `` `field` `` code-span appears in the markdown body of a
-         topic whose `config:` list already includes `section`.
+
+def _is_documenting_line(line: str, field_name: str) -> tuple[bool, bool]:
+    """(is a real documenting line, line is a table row) for one field.
+
+    A bare `` `field` `` mention anywhere in a body no longer counts: the
+    line must be a bullet or a table row, must name the field in backticks,
+    and must carry at least 25 characters of prose after that mention.
+    """
+    stripped = line.strip()
+    is_row = stripped.startswith("|")
+    if not is_row and not stripped.startswith(_BULLET_PREFIXES):
+        return False, False
+    token = f"`{field_name}`"
+    idx = stripped.find(token)
+    if idx < 0:
+        return False, is_row
+    rest = stripped[idx + len(token) :].strip(" |-\t")
+    return len(rest) >= 25, is_row
+
+
+def _table_has_default_column(lines: list[str], index: int) -> bool:
+    """Walk up from a table row to its header row and look for a Default column."""
+    for i in range(index - 1, -1, -1):
+        stripped = lines[i].strip()
+        if not stripped.startswith("|"):
+            return False
+        if "default" in stripped.lower():
+            return True
+    return False
+
+
+def test_every_config_field_is_documented() -> None:
+    """Every field of every nested `Settings` section model must be really
+    documented, not merely mentioned.
+
+    A field counts as documented when some topic whose `config:` frontmatter
+    lists the field's section has a body line that is a bullet or a table
+    row, names the field in backticks, and follows it with at least 25
+    characters of prose. Numeric and boolean fields additionally need the
+    word "default" on that line, or a Default column on that table -- a knob
+    with no stated default is not documented for an operator's purposes.
+
+    Frontmatter alone never counts: a `section.field` entry in `config:`
+    documents nothing a reader can see.
 
     `UNDOCUMENTED_OK_FIELDS` (as `"section.field"` strings) excuses fields
     with no honest one-line effect to document.
     """
     topics = _topic_sources()
-    dotted_documented = {c for _slug, cfg, _body in topics for c in cfg if "." in c}
     missing: list[str] = []
     for section, model in _section_models().items():
-        bodies_for_section = [body for _slug, cfg, body in topics if section in cfg]
-        for field_name in model.model_fields:
+        bodies = [body for _slug, cfg, body in topics if section in cfg]
+        for field_name, info in model.model_fields.items():
             dotted = f"{section}.{field_name}"
-            if dotted in UNDOCUMENTED_OK_FIELDS or dotted in dotted_documented:
+            if dotted in UNDOCUMENTED_OK_FIELDS:
                 continue
-            if any(f"`{field_name}`" in body for body in bodies_for_section):
-                continue
-            missing.append(dotted)
+            needs_default = isinstance(info.annotation, type) and issubclass(
+                info.annotation, _NUMERIC_OR_BOOL
+            )
+            found = False
+            for body in bodies:
+                lines = body.splitlines()
+                for i, line in enumerate(lines):
+                    ok, is_row = _is_documenting_line(line, field_name)
+                    if not ok:
+                        continue
+                    stated_default = "default" in line.lower() or (
+                        is_row and _table_has_default_column(lines, i)
+                    )
+                    if needs_default and not stated_default:
+                        continue
+                    found = True
+                    break
+                if found:
+                    break
+            if not found:
+                missing.append(dotted)
     assert not missing, (
-        f"config fields without a guide mention: {sorted(missing)} — add a "
-        "`section.field` entry to some topic's `config:` frontmatter, or a "
-        "literal `field` code-span to the body of a topic that already lists "
-        "`section`, or excuse it in UNDOCUMENTED_OK_FIELDS with a reason"
+        f"config fields without real guide documentation: {sorted(missing)} -- "
+        "add a bullet or table row naming the field in backticks, with its "
+        "effect (and its default, for a number or a flag), to the body of a "
+        "topic that lists the section in `config:`, or excuse it in "
+        "UNDOCUMENTED_OK_FIELDS with a reason"
     )
 
 
@@ -313,7 +639,7 @@ def test_loader_rejects_empty_walkthrough(tmp_path: Path) -> None:
     _write_topic(
         tmp_path,
         "bad.md",
-        "---\ntitle: X\nsection: sidecar\norder: 1\n---\n```walkthrough\nnothing\n```\n",
+        "---\ntitle: X\nsection: daily-review\norder: 1\n---\n```walkthrough\nnothing\n```\n",
     )
     with pytest.raises(GuideError, match="walkthrough"):
         load_guide(tmp_path)
@@ -323,7 +649,7 @@ def test_loader_renders_stats_and_walkthroughs(tmp_path: Path) -> None:
     _write_topic(
         tmp_path,
         "ok.md",
-        "---\ntitle: X\nsection: sidecar\norder: 1\n---\n"
+        "---\ntitle: X\nsection: daily-review\norder: 1\n---\n"
         "Count: {{stat:clusters_total}}\n\n"
         "```walkthrough\n- step one\n- step <two>\n```\n"
         "[link](/triage)\n",
@@ -340,7 +666,7 @@ def test_loader_extracts_headings_and_search_text(tmp_path: Path) -> None:
     _write_topic(
         tmp_path,
         "ok.md",
-        "---\ntitle: X\nsection: sidecar\norder: 1\n---\n"
+        "---\ntitle: X\nsection: daily-review\norder: 1\n---\n"
         "intro words\n\n## Using it\n\nbody\n\n## Using it\n\nagain\n",
     )
     topic = load_guide(tmp_path).topics["ok"]
@@ -352,7 +678,7 @@ def test_loader_extracts_headings_and_search_text(tmp_path: Path) -> None:
 def test_neighbors_follow_section_order(tmp_path: Path) -> None:
     for i, name in enumerate(["a.md", "b.md"]):
         _write_topic(
-            tmp_path, name, f"---\ntitle: T{i}\nsection: sidecar\norder: {i}\n---\nbody\n"
+            tmp_path, name, f"---\ntitle: T{i}\nsection: daily-review\norder: {i}\n---\nbody\n"
         )
     reg = load_guide(tmp_path)
     prev_t, next_t = reg.neighbors("a")

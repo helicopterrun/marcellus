@@ -71,6 +71,9 @@ device count — used by the Status page and the app's own health strip.
 
 ## Encounter-aware notifications
 
+Design specs: the repo's `docs/push-notifications.md` for the push
+pipeline, `docs/encounters.md` for the crossings it threads on.
+
 When one person walks past three cameras, that is one thing happening — not
 three. The sidecar's encounters feature already groups those reviews into a
 single crossing, and notifications use it.
@@ -78,7 +81,7 @@ single crossing, and notifications use it.
 By default (`encounter_threading`) every notification from one crossing
 lands in the **same Notification Center group**, whichever camera saw it, and
 the notification carries the encounter so tapping through opens the
-Investigation screen on that crossing rather than on one camera's clip.
+Observations screen on that crossing rather than on one camera's clip.
 
 Turn on `encounter_merge` and it goes further: instead of one notification
 per camera, you get **one notification that updates as the subject moves**.
@@ -86,6 +89,14 @@ The title stays put; the body becomes the path — "Alley Wide → Stairway
 Wide → Gate Walkway" — and there is no second buzz for the same walk. It is
 off by default so you can watch the logs first; with it off, the sidecar
 simply records which notifications it *would* have merged.
+
+| Field | Default | Effect |
+|---|---|---|
+| `encounter_threading` | `true` | Every notification from one crossing lands in the same Notification Center group, whichever camera saw it, and carries the encounter id so a tap opens the crossing. Presentation only. |
+| `encounter_merge` | `false` | One notification that updates as the subject moves, instead of one per camera. With it off the sidecar only records what it would have merged. |
+| `encounter_link_timeout_s` | `0.25` | How long, in seconds, a notification waits for its encounter link before sending unthreaded rather than delaying the buzz. |
+
+All three are live-tunable from [Settings](/settings).
 
 Two safeguards: a person and a vehicle in the same crossing never merge onto
 one notification (they are different subjects), and a crossing whose

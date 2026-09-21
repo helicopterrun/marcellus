@@ -1,6 +1,6 @@
 ---
 title: Face captures
-section: faces
+section: people
 order: 1
 routes: ["/faces/captures"]
 config: ["face_capture"]

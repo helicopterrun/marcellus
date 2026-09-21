@@ -1,7 +1,7 @@
 ---
 title: Elsinore app tour
 section: elsinore
-order: 1
+order: 2
 ---
 
 Elsinore is the native iOS app for this system — a fast, dark, monospaced
