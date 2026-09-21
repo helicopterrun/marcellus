@@ -552,7 +552,15 @@ CREATE TABLE IF NOT EXISTS encounter_members (
     sub_labels_json TEXT NOT NULL DEFAULT '[]',
     link_reason     TEXT NOT NULL,
     confidence      REAL NOT NULL,
-    joined_at       REAL NOT NULL
+    joined_at       REAL NOT NULL,
+    -- Observations (M1): direction derived once at link time from the
+    -- atom's Frigate event rows (encounters/observations.py). Additive --
+    -- also present in _ADDED_COLUMNS below for existing deployments.
+    first_zone      TEXT NOT NULL DEFAULT '',
+    last_zone       TEXT NOT NULL DEFAULT '',
+    direction       TEXT NOT NULL DEFAULT '',
+    heading_deg     REAL,
+    dir_source      TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_encounter_members_enc ON encounter_members(encounter_id, start_time);
 CREATE TABLE IF NOT EXISTS encounter_decisions (
@@ -629,6 +637,17 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "face_enrichments": [
         # Soft-exclude (Wave 6B-2): added after face_enrichments first shipped.
         ("excluded_at", "TEXT"),
+    ],
+    "encounter_members": [
+        # Observations (M1): direction derived from the atom's Frigate event
+        # rows at link time (encounters/observations.py). Also present in the
+        # CREATE TABLE literal above for fresh installs -- both must list
+        # these columns, see the hazard comment above _ADDED_COLUMNS.
+        ("first_zone", "TEXT NOT NULL DEFAULT ''"),
+        ("last_zone", "TEXT NOT NULL DEFAULT ''"),
+        ("direction", "TEXT NOT NULL DEFAULT ''"),
+        ("heading_deg", "REAL"),
+        ("dir_source", "TEXT NOT NULL DEFAULT ''"),
     ],
 }
 

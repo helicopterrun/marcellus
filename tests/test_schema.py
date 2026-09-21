@@ -12,10 +12,11 @@ TABLE text is brittle here: several of those columns are the LAST column in
 their table (no trailing comma to also strip) and a couple of the CREATE
 TABLE bodies contain inline `CHECK(x IN (...))` constraints with their own
 commas, so a naive comma-split misparses them. Per the migration-schema
-spec, this test instead keeps a frozen, hand-written copy of the five
-affected tables (`push_devices`, `push_handles`, `push_activities`,
-`push_cards`, `face_enrichments`) as they existed before their `_ADDED_COLUMNS` entries were
-added, confirmed against git history / the comments in db.py at write time.
+spec, this test instead keeps a frozen, hand-written copy of the affected
+tables (`push_devices`, `push_handles`, `push_activities`, `push_cards`,
+`face_enrichments`, `encounter_members`) as they existed before their
+`_ADDED_COLUMNS` entries were added, confirmed against git history / the
+comments in db.py at write time.
 Every other table is reused verbatim from the current `SIDECAR_SCHEMA`.
 """
 
@@ -26,7 +27,7 @@ import sqlite3
 
 from marcellus import db
 
-# Frozen pre-migration CREATE TABLE text for the five tables that have
+# Frozen pre-migration CREATE TABLE text for the tables that have
 # `_ADDED_COLUMNS` entries, exactly as they were before those columns
 # existed (indexes on these tables are unaffected and are NOT duplicated
 # here -- they're left in place from the current SIDECAR_SCHEMA text).
@@ -112,6 +113,23 @@ CREATE TABLE IF NOT EXISTS face_enrichments (
     attempts          INTEGER NOT NULL DEFAULT 0,
     detail            TEXT,
     processed_at      TEXT NOT NULL
+);
+""",
+    "encounter_members": """
+CREATE TABLE IF NOT EXISTS encounter_members (
+    atom_id         TEXT PRIMARY KEY,
+    encounter_id    TEXT NOT NULL,
+    camera          TEXT NOT NULL,
+    start_time      REAL NOT NULL,
+    end_time        REAL,
+    severity        TEXT NOT NULL,
+    labels_json     TEXT NOT NULL DEFAULT '[]',
+    zones_json      TEXT NOT NULL DEFAULT '[]',
+    event_ids_json  TEXT NOT NULL DEFAULT '[]',
+    sub_labels_json TEXT NOT NULL DEFAULT '[]',
+    link_reason     TEXT NOT NULL,
+    confidence      REAL NOT NULL,
+    joined_at       REAL NOT NULL
 );
 """,
 }

@@ -13,6 +13,9 @@ import uuid
 from typing import Any
 
 from marcellus.encounters.linker import Atom, LinkDecision, LinkerConfig, OpenEncounter
+from marcellus.encounters.observations import Direction
+
+_EMPTY_DIRECTION = Direction("", "", "", None, "")
 
 
 def _loads_list(value: Any) -> list[str]:
@@ -235,6 +238,7 @@ def upsert_atom(
     now: float,
     *,
     commit: bool = True,
+    direction: Direction | None = None,
 ) -> str:
     """Insert or update one atom's membership row, then refresh its
     encounter's aggregates. Returns the encounter id the atom ends up in.
@@ -247,12 +251,19 @@ def upsert_atom(
     `decision` (re-decided with that singleton excluded from candidates,
     see `founder_singleton`) found a real link elsewhere. Only lone founders
     move this way; an atom already grouped with others never churns.
+
+    `direction` is the caller's best-effort `observations.Direction` for this
+    atom (computed from the Frigate RO connection, which this module never
+    opens itself -- see `observations.load_direction`). Omitted/None writes
+    the empty Direction, same as a genuinely undeterminable one; this upsert
+    must never fail because direction derivation couldn't.
     """
     existing = _member_row(conn, atom.atom_id)
     labels_json = json.dumps(list(atom.labels))
     zones_json = json.dumps(list(atom.zones))
     event_ids_json = json.dumps(list(atom.event_ids))
     sub_labels_json = json.dumps(list(atom.sub_labels))
+    dir_ = direction if direction is not None else _EMPTY_DIRECTION
 
     if existing is not None:
         current_encounter_id = str(existing["encounter_id"])
@@ -287,7 +298,8 @@ def upsert_atom(
                 "UPDATE encounter_members SET encounter_id = ?, camera = ?, start_time = ?, "
                 "end_time = ?, severity = ?, labels_json = ?, zones_json = ?, "
                 "event_ids_json = ?, sub_labels_json = ?, link_reason = ?, confidence = ?, "
-                "joined_at = ? WHERE atom_id = ?",
+                "joined_at = ?, first_zone = ?, last_zone = ?, direction = ?, "
+                "heading_deg = ?, dir_source = ? WHERE atom_id = ?",
                 (
                     encounter_id,
                     atom.camera,
@@ -301,6 +313,11 @@ def upsert_atom(
                     decision.reason,
                     decision.confidence,
                     now,
+                    dir_.first_zone,
+                    dir_.last_zone,
+                    dir_.direction,
+                    dir_.heading_deg,
+                    dir_.source,
                     atom.atom_id,
                 ),
             )
@@ -312,7 +329,8 @@ def upsert_atom(
             conn.execute(
                 "UPDATE encounter_members SET camera = ?, start_time = ?, end_time = ?, "
                 "severity = ?, labels_json = ?, zones_json = ?, event_ids_json = ?, "
-                "sub_labels_json = ? WHERE atom_id = ?",
+                "sub_labels_json = ?, first_zone = ?, last_zone = ?, direction = ?, "
+                "heading_deg = ?, dir_source = ? WHERE atom_id = ?",
                 (
                     atom.camera,
                     atom.start_time,
@@ -322,6 +340,11 @@ def upsert_atom(
                     zones_json,
                     event_ids_json,
                     sub_labels_json,
+                    dir_.first_zone,
+                    dir_.last_zone,
+                    dir_.direction,
+                    dir_.heading_deg,
+                    dir_.source,
                     atom.atom_id,
                 ),
             )
@@ -331,7 +354,9 @@ def upsert_atom(
         conn.execute(
             "INSERT INTO encounter_members (atom_id, encounter_id, camera, start_time, "
             "end_time, severity, labels_json, zones_json, event_ids_json, sub_labels_json, "
-            "link_reason, confidence, joined_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "link_reason, confidence, joined_at, first_zone, last_zone, direction, "
+            "heading_deg, dir_source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 atom.atom_id,
                 encounter_id,
@@ -346,6 +371,11 @@ def upsert_atom(
                 decision.reason,
                 decision.confidence,
                 now,
+                dir_.first_zone,
+                dir_.last_zone,
+                dir_.direction,
+                dir_.heading_deg,
+                dir_.source,
             ),
         )
 
@@ -613,6 +643,96 @@ def undo_decisions(
     membership row still says 'pinned'/'split', which `undo_decisions` does
     not change -- see docs/encounters.md)."""
     clear_decisions(conn, atom_id)
+    if commit:
+        conn.commit()
+
+
+def list_observations(
+    conn: sqlite3.Connection,
+    *,
+    start: float,
+    end: float,
+    cameras: list[str] | None = None,
+    labels: list[str] | None = None,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    """Membership rows (docs/encounters.md "Observations") whose span
+    overlaps [start, end], newest first. An open member (`end_time IS NULL`)
+    always overlaps a window ending in the future, same "still active"
+    treatment as `_row_to_open`. `labels` matches if ANY requested label is
+    in the row's `labels_json` (python-side, since it's a JSON column)."""
+    sql = (
+        "SELECT * FROM encounter_members WHERE start_time <= ? "
+        "AND (end_time IS NULL OR end_time >= ?)"
+    )
+    params: list[Any] = [end, start]
+    if cameras:
+        placeholders = ",".join("?" for _ in cameras)
+        sql += f" AND camera IN ({placeholders})"
+        params.extend(cameras)
+    sql += " ORDER BY start_time DESC LIMIT ?"
+    params.append(max(limit * 4, limit))  # over-fetch a bit to survive label filtering
+    rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+    if labels:
+        wanted = set(labels)
+        rows = [r for r in rows if wanted & set(_loads_list(r["labels_json"]))]
+    return rows[:limit]
+
+
+def observation(conn: sqlite3.Connection, atom_id: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM encounter_members WHERE atom_id = ?", (atom_id,)).fetchone()
+    return dict(row) if row is not None else None
+
+
+def observation_neighbours(
+    conn: sqlite3.Connection, atom_id: str
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """(prev, next) sibling membership rows in the same encounter, ordered by
+    start_time -- None on either side when `atom_id` is first/last (or the
+    only member)."""
+    row = observation(conn, atom_id)
+    if row is None:
+        return None, None
+    siblings = members(conn, row["encounter_id"])
+    idx = next((i for i, m in enumerate(siblings) if m["atom_id"] == atom_id), None)
+    if idx is None:
+        return None, None
+    prev = siblings[idx - 1] if idx > 0 else None
+    nxt = siblings[idx + 1] if idx + 1 < len(siblings) else None
+    return prev, nxt
+
+
+def members_missing_direction(
+    conn: sqlite3.Connection, limit: int | None = None
+) -> list[dict[str, Any]]:
+    """Membership rows with no direction yet computed (`dir_source == ''`) --
+    the backfill CLI's rewalk set (`marcellus encounters backfill-direction`).
+    Oldest first, so a limited run makes steady progress across restarts."""
+    sql = "SELECT * FROM encounter_members WHERE dir_source = '' ORDER BY start_time"
+    params: list[Any] = []
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def set_direction(
+    conn: sqlite3.Connection, atom_id: str, direction: Direction, *, commit: bool = True
+) -> None:
+    """Rewrite just the direction columns for one membership row (backfill
+    CLI) -- everything else about the row is left untouched."""
+    conn.execute(
+        "UPDATE encounter_members SET first_zone = ?, last_zone = ?, direction = ?, "
+        "heading_deg = ?, dir_source = ? WHERE atom_id = ?",
+        (
+            direction.first_zone,
+            direction.last_zone,
+            direction.direction,
+            direction.heading_deg,
+            direction.source,
+            atom_id,
+        ),
+    )
     if commit:
         conn.commit()
 

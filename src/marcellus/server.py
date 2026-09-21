@@ -43,6 +43,7 @@ from marcellus.routes import health as health_routes
 from marcellus.routes import login_page as login_page_routes
 from marcellus.routes import map_page as map_page_routes
 from marcellus.routes import motion as motion_routes
+from marcellus.routes import observations as observations_routes
 from marcellus.routes import placement as placement_routes
 from marcellus.routes import proxy as proxy_routes
 from marcellus.routes import push as push_routes
@@ -662,6 +663,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(triage_routes.router)
     app.include_router(encounters_routes.router)
     app.include_router(encounters_routes.v1_router)
+    app.include_router(observations_routes.v1_router)
     app.include_router(motion_routes.router)
     app.include_router(score_histogram_routes.router)
     app.include_router(fps_budget_routes.router)
