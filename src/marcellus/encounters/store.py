@@ -629,3 +629,49 @@ def set_watermark(conn: sqlite3.Connection, value: float) -> None:
         (str(value),),
     )
     conn.commit()
+
+
+def purge_phantoms(
+    sidecar_conn: sqlite3.Connection,
+    frigate_conn: sqlite3.Connection,
+    now: float,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    """Remove member rows synthesized by the pre-fix push backfill bug
+    (`push/mqtt.py`'s `/api/events` backfill used to hand phantom
+    `ReviewEvent`s straight to `EncounterService.observe_review`): a member
+    with `start_time <= 0` whose `atom_id` has no matching row in Frigate's
+    `reviewsegment` table is not a real review segment and is dropped via
+    `remove_member` (donor recompute/delete, same as a vanished-segment
+    cleanup). A zero-start member that DOES have a `reviewsegment` row is
+    left alone -- it may be a legitimate open atom that just hasn't been
+    given a real start_time yet.
+
+    One transaction for the whole sweep: committed at the end unless
+    `dry_run`, in which case everything is rolled back and the counts
+    reflect what *would* have been removed.
+    """
+    candidate_rows = sidecar_conn.execute(
+        "SELECT atom_id, encounter_id FROM encounter_members WHERE start_time <= 0"
+    ).fetchall()
+    out = {"candidates": len(candidate_rows), "removed": 0, "encounters_deleted": 0}
+    for row in candidate_rows:
+        atom_id = str(row["atom_id"])
+        exists = frigate_conn.execute(
+            "SELECT 1 FROM reviewsegment WHERE id = ?", (atom_id,)
+        ).fetchone()
+        if exists is not None:
+            continue
+        encounter_id = remove_member(sidecar_conn, atom_id, now)
+        out["removed"] += 1
+        if encounter_id is not None:
+            still_there = sidecar_conn.execute(
+                "SELECT 1 FROM encounters WHERE id = ?", (encounter_id,)
+            ).fetchone()
+            if still_there is None:
+                out["encounters_deleted"] += 1
+    if dry_run:
+        sidecar_conn.rollback()
+    else:
+        sidecar_conn.commit()
+    return out

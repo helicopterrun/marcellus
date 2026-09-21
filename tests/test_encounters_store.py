@@ -543,3 +543,67 @@ def test_upsert_atom_never_moves_pinned_or_split_atom(sidecar_db_path: Path) -> 
         assert row["link_reason"] == "pinned"
     finally:
         conn.close()
+
+
+def _frigate_conn(tmp_path: Path):
+    import sqlite3
+
+    from tests.test_scrub import REVIEWSEGMENT_SCHEMA
+
+    conn = sqlite3.connect(tmp_path / "frigate.db")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(REVIEWSEGMENT_SCHEMA)
+    conn.commit()
+    return conn
+
+
+def test_purge_phantoms_removes_only_unmatched_zero_start_members(
+    sidecar_db_path: Path, tmp_path: Path
+) -> None:
+    """A `start_time <= 0` member with no matching Frigate `reviewsegment`
+    row is a phantom from the push backfill bug and gets removed; a
+    zero-start member that DOES exist in `reviewsegment` is left alone."""
+    conn = db.open_sidecar(sidecar_db_path)
+    now = time.time()
+
+    phantom = _atom("phantom1", start=0.0)
+    real_zero = _atom("real-zero", start=0.0)
+    store.upsert_atom(conn, phantom, LinkDecision(None, "new", 1.0), now)
+    store.upsert_atom(conn, real_zero, LinkDecision(None, "new", 1.0), now)
+    conn.commit()
+
+    frigate_conn = _frigate_conn(tmp_path)
+    frigate_conn.execute(
+        "INSERT INTO reviewsegment (id, camera, start_time, end_time, severity, data) "
+        "VALUES ('real-zero', 'alley-wide', 0.0, 10.0, 'detection', '{}')"
+    )
+    frigate_conn.commit()
+
+    try:
+        result = store.purge_phantoms(conn, frigate_conn, now)
+    finally:
+        frigate_conn.close()
+
+    assert result == {"candidates": 2, "removed": 1, "encounters_deleted": 1}
+    assert store.member_row(conn, "phantom1") is None
+    assert store.member_row(conn, "real-zero") is not None
+    conn.close()
+
+
+def test_purge_phantoms_dry_run_changes_nothing(sidecar_db_path: Path, tmp_path: Path) -> None:
+    conn = db.open_sidecar(sidecar_db_path)
+    now = time.time()
+
+    phantom = _atom("phantom2", start=0.0)
+    store.upsert_atom(conn, phantom, LinkDecision(None, "new", 1.0), now)
+    conn.commit()
+
+    frigate_conn = _frigate_conn(tmp_path)
+    try:
+        result = store.purge_phantoms(conn, frigate_conn, now, dry_run=True)
+    finally:
+        frigate_conn.close()
+
+    assert result == {"candidates": 1, "removed": 1, "encounters_deleted": 1}
+    assert store.member_row(conn, "phantom2") is not None
+    conn.close()

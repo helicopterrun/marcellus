@@ -95,4 +95,6 @@ JSON routes for scripting.
 Sealed encounters (and their members and decisions) older than
 `retention_days` (default 30) are dropped by an hourly prune folded into the
 reconciler; unsealed encounters are never pruned regardless of age. Run it
-by hand with `marcellus encounters prune`.
+by hand with `marcellus encounters prune`. Zero-start members left behind by
+the (now-fixed) push-backfill phantom bug can be swept out with
+`marcellus encounters purge-phantoms [--dry-run]`.

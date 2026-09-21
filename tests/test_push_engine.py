@@ -12,7 +12,9 @@ from marcellus.push.transport import LogTransport
 
 def _make_engine(db_path: Path, transport=None) -> PushEngine:
     engine = PushEngine(
-        db_path=str(db_path), transport=transport or LogTransport(), server_id="s1",
+        db_path=str(db_path),
+        transport=transport or LogTransport(),
+        server_id="s1",
     )
     engine.push_config = PushSection(delivery_enabled=True)
     return engine
@@ -20,8 +22,9 @@ def _make_engine(db_path: Path, transport=None) -> PushEngine:
 
 def _register(db_path: Path, apns_token: str, **kwargs) -> None:
     conn = db.open_sidecar(db_path)
-    store.upsert_device(conn, apns_token=apns_token, bundle_id="com.x", environment="sandbox",
-                         **kwargs)
+    store.upsert_device(
+        conn, apns_token=apns_token, bundle_id="com.x", environment="sandbox", **kwargs
+    )
     conn.commit()
     conn.close()
 
@@ -35,7 +38,10 @@ def test_handle_event_card_pipeline_creates_card(tmp_path: Path) -> None:
     engine = _make_engine(db_path, transport)
 
     event = ReviewEvent(
-        review_id="r1", camera="doorbell", severity="alert", labels=("person",),
+        review_id="r1",
+        camera="doorbell",
+        severity="alert",
+        labels=("person",),
         zones=("front_door",),
     )
     import asyncio
@@ -45,6 +51,39 @@ def test_handle_event_card_pipeline_creates_card(tmp_path: Path) -> None:
     assert len(transport.sent) >= 1
     payload = transport.sent[0]["payload"]
     assert payload["mutation"] == "create"
+
+
+def test_handle_event_skips_on_review_hook_for_synthetic_events(tmp_path: Path) -> None:
+    """Backfilled events synthesized from Frigate's /api/events (object
+    tracking, not review segments) must never reach encounters' on_review
+    hook -- push behaviour itself is unchanged."""
+    db_path = tmp_path / "sidecar.db"
+    _register(db_path, "tok1", cameras=["doorbell"], min_severity="detection")
+    engine = _make_engine(db_path)
+    seen: list[ReviewEvent] = []
+    engine.on_review = seen.append
+
+    synthetic = ReviewEvent(
+        review_id="r1",
+        camera="doorbell",
+        severity="alert",
+        labels=("person",),
+        zones=("front_door",),
+        synthetic=True,
+    )
+    normal = ReviewEvent(
+        review_id="r2",
+        camera="doorbell",
+        severity="alert",
+        labels=("person",),
+        zones=("front_door",),
+    )
+    import asyncio
+
+    asyncio.run(engine.handle_event(synthetic))
+    assert seen == []
+    asyncio.run(engine.handle_event(normal))
+    assert seen == [normal]
 
 
 def test_handle_event_no_match_sends_nothing(tmp_path: Path) -> None:
@@ -71,7 +110,9 @@ def test_handle_review_payload_end_to_end(tmp_path: Path) -> None:
     payload = {
         "type": "new",
         "after": {
-            "id": "r1", "camera": "doorbell", "severity": "alert",
+            "id": "r1",
+            "camera": "doorbell",
+            "severity": "alert",
             "data": {"objects": ["person"], "detections": ["ev-1"]},
         },
     }
@@ -92,8 +133,12 @@ def test_concurrent_delivery_serializes_la_start(tmp_path: Path) -> None:
 
     db_path = tmp_path / "sidecar.db"
     _register(
-        db_path, "tok1", cameras=["doorbell"], min_severity="detection",
-        push_to_start_token="pts-1", la_capable=True,
+        db_path,
+        "tok1",
+        cameras=["doorbell"],
+        min_severity="detection",
+        push_to_start_token="pts-1",
+        la_capable=True,
     )
     inner = LogTransport()
     release = asyncio.Event()
@@ -123,7 +168,10 @@ def test_concurrent_delivery_serializes_la_start(tmp_path: Path) -> None:
 
     engine = _make_engine(db_path, GatedTransport())
     event = ReviewEvent(
-        review_id="r1", camera="doorbell", severity="alert", labels=("person",),
+        review_id="r1",
+        camera="doorbell",
+        severity="alert",
+        labels=("person",),
         zones=("front_door",),
     )
 

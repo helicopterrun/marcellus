@@ -124,6 +124,7 @@ async def backfill_since(
                 labels=(str(label),) if label else (),
                 msg_type="new",
                 event_id=str(event_id),
+                synthetic=True,
             )
             notified += await engine.handle_event(event)
         return notified
