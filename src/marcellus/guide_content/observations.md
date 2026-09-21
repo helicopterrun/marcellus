@@ -28,7 +28,12 @@ never recomputed unless the atom itself changes:
   path or bounding-box heading, or `''` when nothing usable was found.
 - `heading_deg` -- a numeric heading (0-360) when a path or box fit produced
   one; `null` for a zone-only or empty verdict.
-- `dir_source` -- which tier won: `zones`, `path`, `box`, or `''`.
+- `dir_source` -- which tier won: `zones`, `path`, `box`, `none`, or `''`.
+  `none` means direction derivation actually ran against Frigate's event
+  rows and found nothing usable in any of the three tiers -- attempted and
+  empty, done. `''` means it hasn't been attempted yet (a row written before
+  M1) or the attempt couldn't even run (Frigate's DB was unreachable, or no
+  matching event rows were found) -- still eligible for backfill.
 
 Zones win when they're available (cheapest, most reliable); path beats box
 because a box's centroid is a much coarser motion signal. None of the three
@@ -57,4 +62,8 @@ and stay empty until backfilled. Run
 `fsc encounters backfill-direction --limit N` (see the
 [CLI reference](/guide/cli)), which rewalks exactly those rows and
 recomputes them against Frigate. Rows whose Frigate DB was unreachable at
-link time are repaired the same way.
+link time are repaired the same way -- as long as Frigate is reachable on
+the rerun. A row where Frigate answered but nothing was derivable gets
+`dir_source="none"` instead and is not rewalked again: the CLI's `none`
+count in its JSON summary is how many rows this run marked that way, versus
+`updated` (all rows touched) and `scanned` (all rows read).

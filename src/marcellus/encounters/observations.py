@@ -49,6 +49,15 @@ class Direction:
 
 _EMPTY = Direction("", "", "", None, "")
 
+#: `Direction.source` marker meaning "we looked -- Frigate had event rows
+#: for this atom -- but none of the three tiers (zones/path/box) could
+#: derive an actual direction from them." Distinct from the empty string
+#: `""`, which means "not attempted yet, or the lookup itself failed" (no
+#: event rows found, or the Frigate DB was unreachable) -- those cases must
+#: stay retryable by `fsc encounters backfill-direction`, while `"none"`
+#: rows are done and should not be rewalked again.
+DIR_SOURCE_NONE = "none"
+
 
 def _row_get(row: Any, key: str) -> Any:
     """Read one field off either a `sqlite3.Row` or a plain mapping."""
@@ -250,7 +259,9 @@ def derive_direction(event_rows: Sequence[sqlite3.Row | Mapping[str, Any]]) -> D
 
     if first_zone or last_zone:
         return Direction(first_zone, last_zone, "", None, "zones")
-    return _EMPTY
+    # We had event rows (checked above) but none of the three tiers found
+    # anything usable in them -- attempted and empty, not "not attempted".
+    return Direction("", "", "", None, DIR_SOURCE_NONE)
 
 
 def load_direction(
