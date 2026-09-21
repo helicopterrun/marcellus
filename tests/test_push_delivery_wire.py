@@ -751,7 +751,7 @@ async def test_geo_adoption_respects_the_flag(sidecar_db_path: Path):
     a_key = conn.execute("SELECT card_key FROM push_cards").fetchone()["card_key"]
 
     # Flag OFF (default): geometry only logs; camera B keeps its own key.
-    key, existing, owner, via_geo = _resolve_card_for_track(
+    key, existing, owner, via_geo, _via_enc = _resolve_card_for_track(
         conn, camera="street", track_id="trkB", subject_kind="vehicle",
         zone_name="", zones=(), now=1.0,
         geo_mates=[("gate-face", "trkA")], geo_enabled=False,
@@ -759,7 +759,7 @@ async def test_geo_adoption_respects_the_flag(sidecar_db_path: Path):
     assert (key, existing, via_geo) == ("street:vehicle:trkB", None, False)
 
     # Flag ON: adopt camera A's open card.
-    key, existing, owner, via_geo = _resolve_card_for_track(
+    key, existing, owner, via_geo, _via_enc = _resolve_card_for_track(
         conn, camera="street", track_id="trkB", subject_kind="vehicle",
         zone_name="", zones=(), now=1.0,
         geo_mates=[("gate-face", "trkA")], geo_enabled=True,
@@ -769,7 +769,7 @@ async def test_geo_adoption_respects_the_flag(sidecar_db_path: Path):
     assert existing is not None and not existing.closed
     assert owner == "gate-face"
     # The alias persists: the next evaluation takes path 1, not geometry.
-    key2, _, _, via_geo2 = _resolve_card_for_track(
+    key2, _, _, via_geo2, _ = _resolve_card_for_track(
         conn, camera="street", track_id="trkB", subject_kind="vehicle",
         zone_name="", zones=(), now=2.0, geo_mates=None, geo_enabled=True,
     )
@@ -784,7 +784,7 @@ async def test_geo_adoption_skips_closed_and_unknown_mates(sidecar_db_path: Path
 
     conn = db.open_sidecar(sidecar_db_path)
     # No card exists for the mate at all: natural key, no adoption.
-    key, existing, owner, via_geo = _resolve_card_for_track(
+    key, existing, owner, via_geo, _via_enc = _resolve_card_for_track(
         conn, camera="street", track_id="trkB", subject_kind="vehicle",
         zone_name="", zones=(), now=1.0,
         geo_mates=[("gate-face", "ghost")], geo_enabled=True,
