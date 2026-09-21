@@ -506,6 +506,9 @@ class ScrubSection(BaseModel):
     # extraction) never got their aged tier at all. Live-edge now stops
     # early, at its per-camera boundary (never mid-segment), once the tick
     # has less than this much time left, so backfill always gets a turn.
+    # 0 (or less) turns the live-edge deadline off entirely: the edge runs
+    # every camera each tick as before #85. Use it on a box with no decode
+    # headroom, where any backfill slice only starves the edge.
     backfill_min_share_s: float = 6.0
 
     @field_validator("format")
