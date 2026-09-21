@@ -15,6 +15,7 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from marcellus.encounters.adjacency import Adjacency
+from marcellus.encounters.types import TransitionStats
 from marcellus.push.live_activities import BIN_LABELS, OPENING_LABELS
 
 LABEL_FAMILIES: dict[str, frozenset[str]] = {
@@ -147,6 +148,17 @@ class LinkerConfig:
     max_duration_s: float
     recent_cameras: int
     min_copresence_s: float
+    # Camera topology (M2/M3, docs/encounters.md "Camera topology"): learned
+    # per-(from_camera, to_camera, family) transition stats, or None when
+    # `encounters.use_learned_gaps` is off. Only the "adjacent" reason in
+    # `_candidate_decision` ever consults this -- see that function's
+    # docstring for why same_camera/shared_zone stay on the flat `gap_s`
+    # allowance regardless.
+    transitions: Mapping[tuple[str, str, str], TransitionStats] | None = None
+    # Multiplier applied to a learned row's p90 to get the allowed gap for
+    # the "adjacent" reason (identity_match still multiplies that result by
+    # 3, same as the flat-gap path).
+    transition_slack: float = 1.5
 
 
 def _allowed_gap(families: Collection[str], cfg: LinkerConfig, *, identity_match: bool) -> float:
@@ -179,11 +191,76 @@ def _span_overlap_s(atom: Atom, enc: OpenEncounter, now: float) -> float:
     return hi - lo
 
 
+def _learned_adjacent_decision(
+    atom: Atom,
+    enc: OpenEncounter,
+    recent: list[str],
+    shared_families: set[str],
+    cfg: LinkerConfig,
+    gap: float,
+    *,
+    identity_match: bool,
+) -> tuple[bool, LinkDecision | None]:
+    """The "adjacent" reason's learned-gap path (M3): for each recent camera
+    the atom is adjacent to, look up `(recent_cam, atom.camera, family)` for
+    each shared family and use the best (most permissive, but still correct)
+    learned row's p90 -- scaled by `transition_slack` -- as the allowed gap,
+    instead of the flat `gap_s[family]`. Only a `source == "learned"` row
+    counts; a "config"/"default" row is treated the same as no row at all.
+
+    Returns `(found, decision)`: `found` is False when no learned row
+    matched any (recent camera, shared family) pair -- the caller should
+    fall back to the flat `gap_s` allowance. `found` is True when a learned
+    row *did* match; `decision` is then either the "adjacent" LinkDecision
+    (gap within the learned allowance) or None (gap exceeds it) -- and in
+    the None case the caller must NOT also fall back to the flat allowance,
+    since a learned row narrowing the gap below `gap_s` is exactly the
+    "narrows" case the spec calls out.
+    """
+    assert cfg.transitions is not None
+    best_stats: TransitionStats | None = None
+    for cam in recent:
+        if cam == atom.camera:
+            continue
+        for family in shared_families:
+            stats = cfg.transitions.get((cam, atom.camera, family))
+            if stats is None or stats.source != "learned":
+                continue
+            if best_stats is None or stats.p90 > best_stats.p90:
+                best_stats = stats
+    if best_stats is None:
+        return False, None
+    allowed = best_stats.p90 * cfg.transition_slack
+    if identity_match:
+        allowed *= 3.0
+    if gap > allowed:
+        return True, None
+    confidence = 0.65 if best_stats.p10 <= gap <= best_stats.p90 else 0.55
+    return True, LinkDecision(enc.encounter_id, "adjacent", confidence)
+
+
 def _candidate_decision(
     atom: Atom, enc: OpenEncounter, adjacency: Adjacency, cfg: LinkerConfig, now: float
 ) -> LinkDecision | None:
     """Best decision linking `atom` onto `enc`, or None if `enc` isn't a
-    candidate at all (hard-rejected or no rule matches)."""
+    candidate at all (hard-rejected or no rule matches).
+
+    M3 learned-gap note: today's shape gates the *entire* continuity block
+    on `gap <= allowed_gap` computed once from the flat `gap_s` table, then
+    picks a reason. Learned transition stats (`cfg.transitions`) only ever
+    apply to the "adjacent" reason -- same_camera and shared_zone are both
+    "this atom is basically still where the encounter already is", which
+    isn't what a learned *handoff* time measures, so folding the learned
+    gap into the single shared `allowed_gap` would let a tight learned
+    p90 wrongly reject a same-camera/shared-zone match the flat allowance
+    would have accepted (or a loose one wrongly accept a same-camera atom
+    that's actually a new encounter). So the flat gate below only decides
+    same_camera/shared_zone; the adjacent branch is tried separately (both
+    when the flat gate passes AND, when `cfg.transitions` is set, even when
+    it doesn't -- a learned row can widen the gap beyond `gap_s` too, per
+    spec) via `_learned_adjacent_decision`, falling back to the flat
+    allowance when there's no matching learned row.
+    """
     # -- Hard rejects --
     if atom.start_time - enc.start_time > cfg.max_duration_s:
         return None
@@ -204,16 +281,27 @@ def _candidate_decision(
     enc_families = {family_of(label) for label in enc.labels}
     shared_families = atom_families & enc_families
     allowed_gap = _allowed_gap(shared_families, cfg, identity_match=identity_match)
-    if shared_families and gap <= allowed_gap:
-        recent = _recent_cameras(enc, cfg)
-        if identity_match:
-            best = LinkDecision(enc.encounter_id, "identity", 0.95)
-        elif atom.camera in recent:
-            best = LinkDecision(enc.encounter_id, "same_camera", 0.9)
-        elif set(atom.zones) & enc.zones:
-            best = LinkDecision(enc.encounter_id, "shared_zone", 0.8)
-        elif any(adjacency.adjacent(atom.camera, cam) for cam in recent):
-            best = LinkDecision(enc.encounter_id, "adjacent", 0.6)
+    recent = _recent_cameras(enc, cfg)
+    if shared_families:
+        if gap <= allowed_gap:
+            if identity_match:
+                best = LinkDecision(enc.encounter_id, "identity", 0.95)
+            elif atom.camera in recent:
+                best = LinkDecision(enc.encounter_id, "same_camera", 0.9)
+            elif set(atom.zones) & enc.zones:
+                best = LinkDecision(enc.encounter_id, "shared_zone", 0.8)
+        if best is None and cfg.transitions is not None:
+            adjacent_recent = [cam for cam in recent if adjacency.adjacent(atom.camera, cam)]
+            found, learned = _learned_adjacent_decision(
+                atom, enc, adjacent_recent, shared_families, cfg, gap, identity_match=identity_match
+            )
+            if found:
+                best = learned  # None here means "reject" -- no flat fallback, see docstring.
+            elif gap <= allowed_gap and adjacent_recent:
+                best = LinkDecision(enc.encounter_id, "adjacent", 0.6)
+        elif best is None and gap <= allowed_gap:
+            if any(adjacency.adjacent(atom.camera, cam) for cam in recent):
+                best = LinkDecision(enc.encounter_id, "adjacent", 0.6)
 
     # -- Companionship: no shared family required. --
     recent = _recent_cameras(enc, cfg)

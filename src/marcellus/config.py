@@ -650,8 +650,8 @@ class EncountersSection(BaseModel):
     # Camera topology (M2, docs/encounters.md "Camera topology"): learn
     # per-camera-pair, per-label-family transition times from linked
     # encounters and store them in `camera_transitions`. Off by default --
-    # this only writes `camera_transitions`, nothing downstream reads it yet
-    # (see `use_learned_gaps`).
+    # `use_learned_gaps` below controls whether the linker actually reads
+    # what this writes.
     transitions_enabled: bool = False
 
     # Minimum number of samples a camera-pair/family edge needs before the
@@ -684,13 +684,17 @@ class EncountersSection(BaseModel):
     # Written with `source='config'`, taking precedence over learned stats.
     transition_overrides: dict[str, dict[str, float]] = Field(default_factory=dict)
 
-    # Whether the linker reads `camera_transitions` when deciding adjacency
-    # gaps. No effect yet -- added now so the schema/learner can ship ahead
-    # of the linker change that will consume it (M3).
+    # Whether the linker's "adjacent" reason reads `camera_transitions`
+    # (M3): when on, a directed camera-pair/family edge with a `source ==
+    # "learned"` row uses `p90 * transition_slack` as its allowed gap
+    # instead of the flat `gap_s[family]` -- narrower or wider, whichever
+    # the learned data says. A "config"/"default" row, or no row at all,
+    # falls back to the flat allowance unchanged. Live -- toggling this
+    # takes effect on the next reconcile cycle, no restart needed.
     use_learned_gaps: bool = False
 
     # Multiplier applied to a learned p90 when `use_learned_gaps` is on, to
-    # allow slack beyond the observed 90th percentile. No effect yet -- see
+    # allow slack beyond the observed 90th percentile. Live, same as
     # `use_learned_gaps`.
     transition_slack: float = 1.5
 

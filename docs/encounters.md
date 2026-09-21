@@ -115,7 +115,10 @@ class LinkDecision:
     confidence: float           # 0..1
 
 @dataclass(frozen=True)
-class LinkerConfig: gap_s: dict[str, float]; max_duration_s: float; recent_cameras: int; min_copresence_s: float
+class LinkerConfig:
+    gap_s: dict[str, float]; max_duration_s: float; recent_cameras: int; min_copresence_s: float
+    transitions: Mapping[tuple[str, str, str], TransitionStats] | None = None  # (from_cam, to_cam, family) -> stats, M3
+    transition_slack: float = 1.5
 
 def decide(atom: Atom, open_encounters: Sequence[OpenEncounter], adjacency: Adjacency, cfg: LinkerConfig,
            *, pinned_to: str | None = None, split_from: frozenset[str] = frozenset()) -> LinkDecision
@@ -141,7 +144,17 @@ if `pinned_to` is given and that encounter is open, return it with reason
    * identity match → reason "identity", conf 0.95 (spatial test skipped)
    * same camera → "same_camera", 0.9
    * shared zone name (atom.zones ∩ enc.zones) → "shared_zone", 0.8
-   * adjacency edge → "adjacent", 0.6
+   * adjacency edge → "adjacent", 0.6 -- **or**, when
+     `encounters.use_learned_gaps` is on (M3, `LinkerConfig.transitions`,
+     loaded from `camera_transitions` -- see "Camera topology" below) and a
+     `source == "learned"` row exists for `(recent_cam, atom.camera,
+     family)`, the allowed gap for this pairing is that row's `p90 *
+     transition_slack` instead of the flat `gap_s[family]`, and confidence
+     is 0.65 inside `[p10, p90]` else 0.55 -- narrower or wider than the
+     flat allowance, whichever the learned data says. No matching learned
+     row (missing, or `source` "config"/"default") keeps today's flat-gap,
+     0.6 behaviour exactly. Same-camera/shared-zone above never consult
+     learned stats, only the flat allowance.
 4. **Companionship** (no shared family required): the atom's time span
    overlaps the encounter's span by ≥ min_copresence_s AND atom.camera is
    the same as, or adjacent to, one of the recent cameras → "companion",
