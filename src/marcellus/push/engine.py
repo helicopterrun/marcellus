@@ -114,6 +114,20 @@ class PushEngine:
     #: affect push, hence the isolated try/except rather than just letting it
     #: propagate.
     on_review: Callable[[ReviewEvent], None] | None = None
+    #: Encounters *synchronous* link (`EncounterService.link_now`), wired
+    #: alongside `on_review` in server.py. Passed as a callable rather than
+    #: the service object so `push` keeps no import on `encounters` (the
+    #: dependency runs the other way: encounters imports `push.models`).
+    #: When set and `push.encounter_threading`/`encounter_merge` is on,
+    #: `handle_event` awaits this (off-thread, under
+    #: `push.encounter_link_timeout_s`) before delivery so the payload can
+    #: carry the encounter id. The fire-and-forget `on_review` queue path is
+    #: unchanged and still runs for every review.
+    encounter_link: Callable[[ReviewEvent], str | None] | None = None
+    #: Rate limiter for the "link failed/timed out" log (once per minute).
+    #: `-inf` rather than 0.0 so the very first failure always logs, even
+    #: under a test clock that starts at 0.
+    _last_link_warn_at: float = float("-inf")
 
     _http: httpx.AsyncClient | None = None
     _last_gc: float = 0.0
@@ -306,6 +320,8 @@ class PushEngine:
         finally:
             conn.close()
 
+        encounter_id = await self._encounter_id_for(event, now=now)
+
         sent = 0
         # Phase 5 §1: the card pipeline is now the only alert path for all
         # devices. The situations pipeline is retired (its dispatch code is
@@ -319,12 +335,44 @@ class PushEngine:
                     sent = await delivery_wire.handle_delivery_event(
                         event, conn=conn, devices=devices, transport=self.transport,
                         config=self.push_config, engine=self, now=now,
+                        encounter_id=encounter_id,
                     )
                 finally:
                     conn.close()
 
         self._maybe_gc(now)
         return sent
+
+    async def _encounter_id_for(
+        self, event: ReviewEvent, *, now: float
+    ) -> str | None:
+        """Resolve this review's encounter id synchronously, within the
+        configured budget, so the delivery pipeline can thread/merge on it.
+
+        Failure is never fatal: a timeout or an exception logs at most once
+        a minute and returns None, and delivery runs exactly as it did
+        before this feature (per-camera cards, camera thread-id). The
+        queued worker links the review a moment later either way.
+        """
+        cfg = self.push_config
+        if self.encounter_link is None or cfg is None:
+            return None
+        if not (cfg.encounter_threading or cfg.encounter_merge):
+            return None
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self.encounter_link, event),
+                timeout=cfg.encounter_link_timeout_s,
+            )
+        except Exception as exc:  # noqa: BLE001 -- encounters must never break push
+            if now - self._last_link_warn_at >= 60.0:
+                self._last_link_warn_at = now
+                logger.warning(
+                    "push: encounter link unavailable for review %s (%s: %s) -- "
+                    "delivering without an encounter id",
+                    event.review_id, type(exc).__name__, exc,
+                )
+            return None
 
     async def _end_activity(
         self,

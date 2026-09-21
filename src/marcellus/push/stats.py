@@ -20,6 +20,9 @@ Counters
   mqtt.dropped.overflow           non-terminal frames dropped, queue full
   mqtt.reconnect                  broker (re)connects
   mqtt.consumer.errors            handler exceptions swallowed by the consumer
+  push.encounter_merge.shadow     merges `push.encounter_merge` would have
+                                  made, counted with the flag OFF
+  push.encounter_merge.applied    merges actually made, flag ON
   pipeline.sweep.ended            activities ended by the sweep
   db.locked.retry                 SQLITE_BUSY retries (see db.read_with_retry)
 

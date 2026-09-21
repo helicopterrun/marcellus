@@ -208,6 +208,9 @@ def build_card_payload(
     deep_link: str | None = None,
     la_active: bool = False,
     escalation_sound: str = "urgent",
+    encounter_id: str = "",
+    cameras_path: list[str] | None = None,
+    thread_by_encounter: bool = False,
 ) -> dict[str, Any]:
     """The full APNs body for one card mutation (`docs/apns-payload-spec.md`).
 
@@ -238,7 +241,10 @@ def build_card_payload(
     if sound:
         aps["sound"] = sound_name_for_card(card.level, subject_kind, label,
                                           escalation_sound=escalation_sound)
-    aps["thread-id"] = camera
+    # Notification-center grouping. By encounter when one is known and
+    # `push.encounter_threading` is on (every camera of one crossing lands
+    # in a single thread); otherwise by camera, exactly as before.
+    aps["thread-id"] = encounter_id if (encounter_id and thread_by_encounter) else camera
     aps["category"] = f"card.{card.level}"
 
     state_since_ts = round(card.state_since_at, 3)
@@ -258,6 +264,13 @@ def build_card_payload(
         "event_ts": round(event_ts, 3),
         "state_since_ts": state_since_ts,
     }
+    # Additive, optional (no `v` bump): the encounter this card belongs to
+    # and the ordered cameras its story has crossed. Absent when encounters
+    # couldn't name one in time -- older app builds ignore both.
+    if encounter_id:
+        payload["encounter_id"] = encounter_id
+    if cameras_path:
+        payload["cameras_path"] = list(cameras_path)
     if media:
         payload["media"] = media
     if deep_link:
@@ -368,6 +381,9 @@ async def send_card_mutation(
     now: float | None = None,
     demote_tokens: frozenset[str] | set[str] = frozenset(),
     suppress_demoted: bool = False,
+    encounter_id: str = "",
+    event_camera: str = "",
+    cameras_path: list[str] | None = None,
 ) -> int:
     """Persist `card` and send to eligible devices, honoring per-device
     filtering, snooze, quiet resolves, and the global sounding rate cap.
@@ -394,6 +410,8 @@ async def send_card_mutation(
     card_store.upsert_card(
         conn, card, subject_kind=subject_kind, place_class=place_class,
         camera=camera, zone_name=zone_name, zones=zones, label=label, family=family,
+        encounter_id=encounter_id, event_camera=event_camera or camera,
+        cameras_path=cameras_path,
     )
     if payload is None:
         return 0

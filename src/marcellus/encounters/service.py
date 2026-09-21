@@ -211,6 +211,25 @@ class EncounterService:
         """The actual (sync, sqlite-touching) linking work for one live
         review message -- run via `asyncio.to_thread` from `run_worker`/
         `process_pending`, never directly on the event loop."""
+        self.link_now(ev)
+
+    def link_now(self, ev: ReviewEvent) -> str | None:
+        """Link one review inline and return the encounter id it landed in
+        (None if it couldn't be linked at all).
+
+        Same work as the queued path -- `_link_review` *is* this function --
+        exposed as a return-valued call for the push pipeline, which needs
+        the encounter id BEFORE it builds a payload (`push.encounter_threading`
+        / `push.encounter_merge`). Run off the event loop by the caller
+        (`asyncio.to_thread` under a timeout), never directly on it, for the
+        same sqlite-blocking reason `observe_review` only enqueues.
+
+        Idempotent with the worker: an atom already stored keeps its
+        membership (`store.upsert_atom` only ever re-homes a sealed-donor or
+        lone-founder atom), so whichever of the two paths runs second simply
+        re-writes the same row and returns the same encounter id. Never
+        raises -- an encounters failure must never affect push.
+        """
         try:
             now = self._now()
             if ev.msg_type == "end":
@@ -241,7 +260,7 @@ class EncounterService:
                             "no stored member row yet; reconciler will backfill",
                             ev.review_id,
                         )
-                        return
+                        return None
                     start_time = float(existing_member["start_time"])
 
                 atom = Atom(
@@ -269,11 +288,12 @@ class EncounterService:
                     split_from=exclude,
                 )
                 direction = self._direction_for(atom)
-                store.upsert_atom(conn, atom, decision, now, direction=direction)
+                return store.upsert_atom(conn, atom, decision, now, direction=direction)
             finally:
                 conn.close()
         except Exception:  # noqa: BLE001 -- an encounters failure must never affect push
             logger.exception("encounters: linking failed for review %s", ev.review_id)
+            return None
 
     async def run_worker(self) -> None:
         """Consume `observe_review`'s queue forever, one review at a time (in
