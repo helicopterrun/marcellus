@@ -260,6 +260,8 @@ def build_content_state(
     extra_stories: int = 0,
     camera: str | None = None,
     story_started_ts: float | None = None,
+    cameras_path: list[str] | None = None,
+    encounter_id: str | None = None,
 ) -> dict[str, Any]:
     """The dynamic half of the activity, snake_case to match the Swift
     type's `CodingKeys` exactly -- these field names are load-bearing wire
@@ -271,6 +273,11 @@ def build_content_state(
     camera. Both omitted when there is nothing to add -- `extra_stories`
     stays off the wire at 0 (the common single-story case looks exactly like
     before), `camera` only when the caller has one to report.
+
+    `cameras_path`/`encounter_id` are additive in the same way
+    (encounter-aware push): the ordered cameras this story has crossed and
+    the encounter grouping them. Both stay off the wire when absent, so a
+    single-camera story's content state is byte-identical to before.
 
     `story_started_ts` (additive) is when the story's card was CREATED, as
     opposed to `state_since_ts`, which resets on every escalation. The
@@ -303,6 +310,10 @@ def build_content_state(
         state["camera"] = camera
     if story_started_ts is not None:
         state["story_started_ts"] = story_started_ts
+    if cameras_path:
+        state["cameras_path"] = list(cameras_path)
+    if encounter_id:
+        state["encounter_id"] = encounter_id
     encoded_size = len(json.dumps(state, separators=(",", ":")).encode())
     assert encoded_size <= _CONTENT_STATE_BUDGET, (
         f"content-state {encoded_size} bytes exceeds {_CONTENT_STATE_BUDGET} byte budget"

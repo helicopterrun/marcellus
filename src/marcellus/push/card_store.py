@@ -9,6 +9,7 @@ turns a `Card` into rows and back.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from typing import cast
@@ -58,6 +59,9 @@ def upsert_card(
     zones: tuple[str, ...] = (),
     label: str = "",
     family: str = "",
+    encounter_id: str = "",
+    event_camera: str = "",
+    cameras_path: list[str] | None = None,
 ) -> None:
     """Insert or fully overwrite the row for `card.card_key`.
 
@@ -72,8 +76,8 @@ def upsert_card(
     if zone_name:
         zone_set.add(zone_name)
     existing = conn.execute(
-        "SELECT zones_csv, zone_override_hit, media_handle FROM push_cards "
-        "WHERE card_key = ?",
+        "SELECT zones_csv, zone_override_hit, media_handle, encounter_id, "
+        "cameras_path_json FROM push_cards WHERE card_key = ?",
         (card.card_key,),
     ).fetchone()
     if existing is not None and existing["zones_csv"]:
@@ -91,14 +95,28 @@ def upsert_card(
     media_handle = card.media_handle
     if not media_handle and existing is not None:
         media_handle = existing["media_handle"] or ""
+    # Encounter id is sticky once known: a later mutation that couldn't
+    # resolve one (link timeout) must not blank the card's grouping key.
+    if not encounter_id and existing is not None:
+        encounter_id = existing["encounter_id"] or ""
+    # Ordered distinct cameras, first-seen order. Append only when this
+    # mutation's own camera differs from the last entry -- a story bouncing
+    # back to a camera it already crossed records the bounce, a run of
+    # updates on one camera records nothing.
+    if cameras_path is None:
+        stored = parse_cameras_path(existing["cameras_path_json"]) if existing is not None else []
+        # Only an encounter-stamped card grows a path: without an encounter
+        # there is nothing asserting the cameras are one story, and the
+        # ordinary zone/geo dedup merge keeps its " · also on X" copy.
+        cameras_path = _append_camera(stored, event_camera or camera) if encounter_id else stored
     conn.execute(
         "INSERT INTO push_cards "
         "(card_key, level, peak_level, subject_kind, place_class, camera, zone_name, "
         " zones_csv, "
         " created_at, updated_at, state_since_at, sound_count, handled, handled_at, "
         " last_sound_at, resound_count, resolved, closed, zone_override_hit, "
-        " label, family, media_handle) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " label, family, media_handle, encounter_id, cameras_path_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(card_key) DO UPDATE SET "
         "level=excluded.level, peak_level=excluded.peak_level, "
         "subject_kind=excluded.subject_kind, "
@@ -111,17 +129,86 @@ def upsert_card(
         "resound_count=excluded.resound_count, resolved=excluded.resolved, "
         "closed=excluded.closed, zone_override_hit=excluded.zone_override_hit, "
         "label=excluded.label, family=excluded.family, "
-        "media_handle=excluded.media_handle",
+        "media_handle=excluded.media_handle, "
+        "encounter_id=excluded.encounter_id, "
+        "cameras_path_json=excluded.cameras_path_json",
         (
             card.card_key, card.level, card.peak_level, subject_kind, place_class,
             camera, zone_name, zones_csv,
             card.created_at, card.updated_at, card.state_since_at, card.sound_count,
             int(card.handled), card.handled_at, card.last_sound_at, card.resound_count,
             int(card.resolved), int(card.closed), int(zone_override_hit),
-            label, family, media_handle,
+            label, family, media_handle, encounter_id, json.dumps(cameras_path),
         ),
     )
     conn.commit()
+
+
+def parse_cameras_path(raw: object) -> list[str]:
+    """`cameras_path_json` -> list of camera names; anything unparseable (an
+    old row, a hand-edited DB) reads as an empty path rather than raising on
+    the delivery hot path."""
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw if isinstance(raw, (str, bytes)) else "[]")
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [str(v) for v in value if v]
+
+
+def _append_camera(path: list[str], camera: str) -> list[str]:
+    """`path` with `camera` appended unless it is already the last entry --
+    a run of updates on one camera adds nothing, a genuine crossing (or a
+    bounce back to an earlier camera) adds one entry."""
+    if camera and (not path or path[-1] != camera):
+        return [*path, camera]
+    return list(path)
+
+
+def next_cameras_path(
+    conn: sqlite3.Connection, card_key: str, camera: str
+) -> list[str]:
+    """What `card_key`'s camera path will be once this mutation on `camera`
+    is persisted. The delivery pipeline needs it *before* the upsert (the
+    push body and payload are built first), then hands the same list back
+    to `upsert_card` so the two can never disagree."""
+    return _append_camera(cameras_path(conn, card_key), camera)
+
+
+def cameras_path(conn: sqlite3.Connection, card_key: str) -> list[str]:
+    """Ordered distinct cameras this card's story has crossed."""
+    row = conn.execute(
+        "SELECT cameras_path_json FROM push_cards WHERE card_key = ?", (card_key,)
+    ).fetchone()
+    return parse_cameras_path(row["cameras_path_json"]) if row is not None else []
+
+
+def find_open_card_by_encounter(
+    conn: sqlite3.Connection, encounter_id: str, *, exclude_key: str = ""
+) -> Card | None:
+    """The oldest open (not resolved, not closed) card stamped with this
+    encounter -- the merge target for a later camera's review of the same
+    encounter (`push.encounter_merge`). Oldest, not newest, for the same
+    reason `find_dedup_candidate` picks the oldest: with three cameras in
+    one encounter every later camera should land on the first one's card,
+    not on whichever was touched last.
+
+    A resolved/closed card is deliberately NOT a candidate: an encounter
+    whose card already ended never reopens (docs/push-notifications.md
+    "Encounter-aware push"), the new review just mints its own card and is
+    grouped by `thread-id` instead.
+    """
+    if not encounter_id:
+        return None
+    row = conn.execute(
+        "SELECT * FROM push_cards WHERE encounter_id = ? AND closed = 0 "
+        "AND resolved = 0 AND card_key != ? ORDER BY created_at ASC LIMIT 1",
+        (encounter_id, exclude_key),
+    ).fetchone()
+    return _row_to_card(row) if row is not None else None
 
 
 def mark_handled(conn: sqlite3.Connection, card_key: str, *, now: float) -> None:
@@ -237,8 +324,8 @@ def get_card_context(conn: sqlite3.Connection, card_key: str) -> dict[str, str] 
     first created it (`docs/push-notifications.md` "Cross-camera
     deduplication")."""
     row = conn.execute(
-        "SELECT subject_kind, place_class, camera, zone_name, label, family "
-        "FROM push_cards WHERE card_key = ?",
+        "SELECT subject_kind, place_class, camera, zone_name, label, family, "
+        "encounter_id, cameras_path_json FROM push_cards WHERE card_key = ?",
         (card_key,),
     ).fetchone()
     return dict(row) if row is not None else None
@@ -480,6 +567,12 @@ def _row_to_ctx(row: sqlite3.Row) -> dict[str, str]:
         ctx["media_handle"] = row["media_handle"]
     except (IndexError, KeyError):
         ctx["media_handle"] = ""
+    try:
+        ctx["encounter_id"] = row["encounter_id"]
+        ctx["cameras_path_json"] = row["cameras_path_json"] or "[]"
+    except (IndexError, KeyError):
+        ctx["encounter_id"] = ""
+        ctx["cameras_path_json"] = "[]"
     return ctx
 
 

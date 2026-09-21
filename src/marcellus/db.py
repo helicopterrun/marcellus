@@ -301,7 +301,17 @@ CREATE TABLE IF NOT EXISTS push_cards (
     -- fresh handle; ESCALATE/RESOLVE mint none, so the content-state builder
     -- falls back to this persisted value instead of losing the thumbnail
     -- mid-story. '' means "no media ever minted" -- treated as absent.
-    media_handle  TEXT NOT NULL DEFAULT ''
+    media_handle  TEXT NOT NULL DEFAULT '',
+    -- Encounter-aware push (docs/encounters.md "Encounter-aware push"): the
+    -- encounter this card's story belongs to, stamped on every mutation once
+    -- the synchronous link (`EncounterService.link_now`) has resolved one.
+    -- Drives the APNs `thread-id` (notification-center grouping) and, with
+    -- `push.encounter_merge` on, cross-camera routing onto one card.
+    encounter_id  TEXT NOT NULL DEFAULT '',
+    -- Ordered, distinct cameras this card's story has been seen on, in
+    -- first-seen order, as a JSON list. Two or more entries turn the push
+    -- body into the crossing path ("Alley Wide -> Stairway Wide").
+    cameras_path_json TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_push_cards_open
     ON push_cards(closed, level, last_sound_at);
@@ -620,6 +630,11 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # RESOLVE mutation (which mints no fresh media) can still surface the
         # card's last-known thumbnail instead of blanking it in the widget.
         ("media_handle", "TEXT NOT NULL DEFAULT ''"),
+        # Encounter-aware push (2026-09-20): the encounter this card belongs
+        # to (APNs thread-id / cross-camera routing) and the ordered list of
+        # cameras the story has crossed, as JSON.
+        ("encounter_id", "TEXT NOT NULL DEFAULT ''"),
+        ("cameras_path_json", "TEXT NOT NULL DEFAULT '[]'"),
     ],
     "push_devices": [
         # v2 registration shape (notification-experience plan §8). Everything
