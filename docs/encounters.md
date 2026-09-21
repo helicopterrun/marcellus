@@ -401,6 +401,27 @@ model, add `v1_encounters.json` / `v1_encounter.json` via
   ["encounters"]`; body explains the feature and mentions every config
   field in backticks).
 
+## Observations (M1)
+
+`encounter_members` doubles as an atom-level read view: `first_zone`,
+`last_zone`, `direction` (`out:<zone>` / `l2r` / `r2l` / `toward` / `away` /
+`''`), `heading_deg` (nullable), and `dir_source` (`zones` / `path` / `box` /
+`''`) are computed once per atom at link time by
+`encounters/observations.derive_direction`, from the atom's Frigate `event`
+rows -- zones first (cheapest, most reliable), then a path-data heading fit,
+then a bounding-box centroid/area fallback. Never raises; missing/malformed
+input just yields the empty `Direction`.
+
+`GET /v1/observations` and `GET /v1/observations/{atom_id}`
+(`routes/observations.py`) expose these rows directly, filtered by
+start/end/cameras/labels, with `neighbours.prev`/`next` on the detail route
+for walking an encounter atom-by-atom. Read-only, additive-only: no linking
+decision changes, no existing response shape loses or changes a field.
+
+Existing rows (or ones linked while Frigate was unreachable) have
+`dir_source=''`; `marcellus encounters backfill-direction --limit N`
+rewalks and recomputes them.
+
 ## Verification bar
 
 `ruff check`, `ruff format --check`, `mypy`, `pytest` all green. Do not

@@ -299,6 +299,11 @@ class EncounterMember(_Wire):
     sub_labels: list[str]
     link_reason: str
     confidence: float
+    first_zone: str = ""
+    last_zone: str = ""
+    direction: str = ""
+    heading_deg: float | None = None
+    dir_source: str = ""
 
 
 class EncounterSummary(_Wire):
@@ -322,3 +327,46 @@ class EncountersResponse(_Wire):
 class EncounterResponse(_Wire):
     encounter: EncounterSummary
     members: list[EncounterMember]
+
+
+# --------------------------------------------------------------------------
+# /v1/observations (docs/encounters.md "Observations"): a read-only view
+# over encounter_members, one row per atom, for callers that want atoms
+# directly rather than grouped by encounter.
+# --------------------------------------------------------------------------
+
+
+class Observation(_Wire):
+    id: str
+    encounter_id: str
+    camera: str
+    start: float
+    end: float | None
+    labels: list[str]
+    zones: list[str]
+    first_zone: str
+    last_zone: str
+    direction: str
+    heading_deg: float | None
+    dir_source: str
+    severity: str
+    event_ids: list[str]
+    sub_labels: list[str]
+    link_reason: str
+    confidence: float
+
+
+class ObservationsResponse(_Wire):
+    t: float
+    observations: list[Observation]
+
+
+class ObservationNeighbours(_Wire):
+    prev: Observation | None
+    next: Observation | None
+
+
+class ObservationDetailResponse(_Wire):
+    observation: Observation
+    encounter: EncounterSummary
+    neighbours: ObservationNeighbours

@@ -18,6 +18,7 @@ from marcellus.config import Settings
 from marcellus.encounters import store
 from marcellus.encounters.adjacency import Adjacency
 from marcellus.encounters.linker import Atom, LinkerConfig, apply, decide, normalise_labels
+from marcellus.encounters.observations import Direction, load_direction
 from marcellus.push.models import ReviewEvent
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,23 @@ class EncounterService:
 
     def _conn(self) -> sqlite3.Connection:
         return db.open_sidecar(self.settings.sidecar.db_path)
+
+    def _direction_for(self, atom: Atom) -> Direction | None:
+        """Best-effort `Direction` for one atom's `event_ids`, opening its own
+        short-lived Frigate RO connection -- the live hook (`_link_review`)
+        has no Frigate connection open otherwise. Never raises: a missing/
+        unreadable Frigate DB just means no direction this cycle, same as any
+        other undeterminable case (`observations.load_direction`)."""
+        try:
+            frigate_conn = db.open_frigate_ro(self.settings.frigate.db_path)
+        except Exception:  # noqa: BLE001 -- direction is best-effort, never fatal
+            return None
+        try:
+            return load_direction(frigate_conn, atom.event_ids)
+        except Exception:  # noqa: BLE001
+            return None
+        finally:
+            frigate_conn.close()
 
     def _refresh_adjacency(self) -> None:
         """Rebuild `self.adjacency` when the effective `encounters.adjacency`/
@@ -233,7 +251,8 @@ class EncounterService:
                     pinned_to=pinned_to,
                     split_from=exclude,
                 )
-                store.upsert_atom(conn, atom, decision, now)
+                direction = self._direction_for(atom)
+                store.upsert_atom(conn, atom, decision, now, direction=direction)
             finally:
                 conn.close()
         except Exception:  # noqa: BLE001 -- an encounters failure must never affect push
@@ -365,8 +384,12 @@ class EncounterService:
                         pinned_to=pinned_to,
                         split_from=exclude,
                     )
+                    try:
+                        direction = load_direction(frigate_conn, atom.event_ids)
+                    except Exception:  # noqa: BLE001 -- direction is best-effort
+                        direction = None
                     encounter_id = store.upsert_atom(
-                        sidecar_conn, atom, decision, now, commit=False
+                        sidecar_conn, atom, decision, now, commit=False, direction=direction
                     )
 
                     # Keep the in-memory `by_id` view consistent with what the

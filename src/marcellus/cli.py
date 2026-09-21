@@ -360,6 +360,37 @@ def encounters_prune() -> None:
     typer.echo(json.dumps(result))
 
 
+@encounters_app.command("backfill-direction")
+def encounters_backfill_direction(
+    limit: int = typer.Option(500, min=1, help="Max membership rows to rewalk this run."),
+) -> None:
+    """Recompute direction (first_zone/last_zone/direction/heading_deg/
+    dir_source) for membership rows that don't have one yet
+    (`dir_source == ''`) -- for existing rows written before M1, or ones
+    whose Frigate DB was unreachable when they linked."""
+    from marcellus import db
+    from marcellus.encounters import store
+    from marcellus.encounters.observations import load_direction
+
+    s = load_settings()
+    sidecar_conn = db.open_sidecar(s.sidecar.db_path)
+    frigate_conn = db.open_frigate_ro(s.frigate.db_path)
+    updated = 0
+    rows = []
+    try:
+        rows = store.members_missing_direction(sidecar_conn, limit)
+        for row in rows:
+            event_ids = json.loads(row["event_ids_json"] or "[]")
+            direction = load_direction(frigate_conn, event_ids)
+            store.set_direction(sidecar_conn, row["atom_id"], direction, commit=False)
+            updated += 1
+        sidecar_conn.commit()
+    finally:
+        sidecar_conn.close()
+        frigate_conn.close()
+    typer.echo(json.dumps({"scanned": len(rows), "updated": updated}))
+
+
 @face_capture_app.command("stats")
 def face_capture_stats(days: int = typer.Option(7, min=1)) -> None:
     """Counts by status/review plus the last-run heartbeat."""

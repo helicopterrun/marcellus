@@ -96,3 +96,10 @@ Sealed encounters (and their members and decisions) older than
 `retention_days` (default 30) are dropped by an hourly prune folded into the
 reconciler; unsealed encounters are never pruned regardless of age. Run it
 by hand with `marcellus encounters prune`.
+
+## Observations
+
+Each member also carries a best-effort direction guess -- see
+[Observations](/guide/investigation) for the `first_zone`/`last_zone`/
+`direction`/`heading_deg`/`dir_source` fields and the `/v1/observations`
+read API that surfaces atoms directly instead of grouped by encounter.

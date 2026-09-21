@@ -80,6 +80,11 @@ def _member(row: dict[str, Any]) -> dict[str, Any]:
         "sub_labels": json.loads(row["sub_labels_json"]),
         "link_reason": row["link_reason"],
         "confidence": row["confidence"],
+        "first_zone": row.get("first_zone", ""),
+        "last_zone": row.get("last_zone", ""),
+        "direction": row.get("direction", ""),
+        "heading_deg": row.get("heading_deg"),
+        "dir_source": row.get("dir_source", ""),
     }
 
 

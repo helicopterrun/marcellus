@@ -543,3 +543,61 @@ def test_upsert_atom_never_moves_pinned_or_split_atom(sidecar_db_path: Path) -> 
         assert row["link_reason"] == "pinned"
     finally:
         conn.close()
+
+
+def test_upsert_persists_direction(sidecar_db_path: Path) -> None:
+    from marcellus.encounters.observations import Direction
+
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        atom = _atom("d1", start=now, end_time=None)
+        direction = Direction("front_garden", "shed", "out:shed", None, "zones")
+        store.upsert_atom(conn, atom, LinkDecision(None, "new", 1.0), now, direction=direction)
+
+        row = store.observation(conn, "d1")
+        assert row is not None
+        assert row["first_zone"] == "front_garden"
+        assert row["last_zone"] == "shed"
+        assert row["direction"] == "out:shed"
+        assert row["heading_deg"] is None
+        assert row["dir_source"] == "zones"
+    finally:
+        conn.close()
+
+
+def test_upsert_with_no_direction_defaults_empty(sidecar_db_path: Path) -> None:
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        atom = _atom("d2", start=now, end_time=None)
+        store.upsert_atom(conn, atom, LinkDecision(None, "new", 1.0), now)
+
+        row = store.observation(conn, "d2")
+        assert row is not None
+        assert row["dir_source"] == ""
+        assert row["direction"] == ""
+        assert row["heading_deg"] is None
+    finally:
+        conn.close()
+
+
+def test_upsert_missing_event_rows_still_works(sidecar_db_path: Path) -> None:
+    """`upsert_atom` must never fail just because direction couldn't be
+    derived (e.g. the atom's Frigate event rows are gone)."""
+    from marcellus.encounters.observations import derive_direction
+
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        atom = _atom("d3", start=now, end_time=None, event_ids=("missing-ev",))
+        direction = derive_direction([])  # simulates "no matching event rows"
+        enc_id = store.upsert_atom(
+            conn, atom, LinkDecision(None, "new", 1.0), now, direction=direction
+        )
+        assert enc_id
+        row = store.observation(conn, "d3")
+        assert row is not None
+        assert row["dir_source"] == ""
+    finally:
+        conn.close()

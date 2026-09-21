@@ -37,7 +37,7 @@
           <td>{{ m.camera }}</td>
           <td>{{ fmt_ts(m.start) }}{% if m.end %} &ndash; {{ fmt_duration(m.start, m.end) }}{% endif %}</td>
           <td>{{ m.labels|join(', ') }}</td>
-          <td>{{ m.zones|join(', ') }}</td>
+          <td>{{ m.zones|join(', ') }}{% if m.direction %} <span class="badge">{{ m.direction }}</span>{% endif %}</td>
           <td>{{ m.link_reason }}</td>
           <td>{{ '%.2f'|format(m.confidence) }}</td>
           <td>
