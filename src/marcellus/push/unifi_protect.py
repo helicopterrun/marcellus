@@ -193,7 +193,15 @@ class ProtectRingSubscriber:
         if isinstance(cameras, list):
             self._status.cameras_seen = len(cameras)
             for cam in cameras:
-                if isinstance(cam, dict):
+                if not isinstance(cam, dict):
+                    continue
+                mapped = self.settings.cameras.get(str(cam.get("id")))
+                if mapped:
+                    logger.info(
+                        "unifi_protect: camera id=%s name=%r -> Frigate camera %r",
+                        cam.get("id"), cam.get("name"), mapped,
+                    )
+                else:
                     logger.info(
                         "unifi_protect: camera id=%s name=%r -- add to unifi_protect.cameras "
                         "to map it to a Frigate camera",
