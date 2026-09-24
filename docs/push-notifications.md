@@ -68,6 +68,19 @@ loiter, and resolution come from there. Backfilled events have no
 `severity`; they are treated as `severity="alert"` (the conservative
 choice) with the event's own `label` used for label filtering.
 
+### A second source: UniFi Protect doorbell rings
+
+`push/unifi_protect.py` owns a second, independent event source: a
+websocket subscription to a UniFi OS console's Protect Integration API
+(`/proxy/protect/integration/v1/subscribe/events`), turning "ring" events
+into calls into `push/doorbell.py`. It does not feed the attention ladder
+above -- a doorbell ring skips the card pipeline, the outcomes table, and
+the rate limiter entirely and goes straight to a `doorbell.ring` payload
+(`docs/apns-payload-spec.md` § "A fourth family"), because a ring is a
+person at the door, not a detection to weigh subject×place odds on. See
+[the UniFi Protect guide](../src/marcellus/guide_content/unifi-protect.md)
+for setup and troubleshooting.
+
 ## The attention ladder (evaluation)
 
 `push/ladder.py` answers one question, statelessly: given a detection

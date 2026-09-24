@@ -68,3 +68,31 @@ still mute rings, same as everything else.
 connection state, last-ring timestamp, and last error, the same way the
 `mqtt_connected`/`frigate_available` fields report the Frigate MQTT
 subscriber.
+
+## Troubleshooting
+
+There is no per-ring INFO log line -- a successful ring is silent in the
+logs by design, so absence of a log entry does not mean a ring was missed.
+Check these instead, in order:
+
+1. **Push Doctor** (Settings → Push → Push Doctor, or `GET
+   /v1/push/status`) -- the `unifi_protect` block shows whether the
+   websocket is currently connected, the last ring timestamp it saw, and
+   the last connection error if any.
+2. **Sent-push history** -- query the sidecar's own SQLite DB for rows
+   with `mutation = 'ring'`: `sqlite3 marcellus.db "SELECT * FROM
+   push_card_sends WHERE mutation='ring' ORDER BY rowid DESC LIMIT 10;"`.
+   The `card_key` column reads `doorbell:<camera>`; a missing row for a
+   ring you know happened means it never reached the sidecar at all.
+3. **journalctl** -- `journalctl -u marcellus -g
+   marcellus.push.unifi_protect` surfaces the websocket's connect,
+   reconnect, and error lines (backoff attempts, auth failures, TLS
+   errors) even though ring delivery itself logs nothing.
+
+**Known limitation:** UniFi Protect itself occasionally fails to emit a
+ring event over the Integration API even though the doorbell was pressed
+(a known upstream gap, not specific to this sidecar). There is also no
+backfill -- a ring that arrives while the websocket is reconnecting is
+simply missed, with no server-side history to replay it from afterward.
+If rings go missing in a pattern (not just the occasional drop), check
+step 3 above for reconnect churn before assuming a dropped upstream event.
