@@ -29,6 +29,9 @@ It adds:
   goes through a pluggable transport (log-only mock for development, or a
   minimal relay-client transport — see
   [`docs/push-notifications.md`](docs/push-notifications.md)). Off by default.
+  A UniFi Protect doorbell also sends its own ring events straight to
+  registered devices, bypassing the attention ladder — see the in-app
+  "UniFi Protect doorbell" guide topic.
 
 Runs as a single Docker container next to Frigate, bind-mounting Frigate's
 `config.yml` and `frigate.db` read-only and writing its own SQLite DB.

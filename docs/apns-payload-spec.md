@@ -147,3 +147,54 @@ combinations follow:
 
 If a card's level is ever `log` or the evaluation is `suppressed`, no
 payload of this shape (or any shape) is sent for that mutation.
+
+## A fourth family: `doorbell.ring` (`push/doorbell.py`)
+
+A UniFi Protect doorbell ring is **not** a card-pipeline payload -- it
+bypasses the attention ladder, `card_key`/`mutation` vocabulary, and the
+sound-accounting budget above entirely (see
+[the UniFi Protect guide](../src/marcellus/guide_content/unifi-protect.md)
+and `docs/push-notifications.md` § "Event sources" for why). It is
+distinguished on the wire by `aps.category == "doorbell.ring"`.
+
+```json
+{
+  "aps": {
+    "alert": {"title": "Someone's at the door", "body": "Front Door · 6:42 PM"},
+    "sound": "default",
+    "interruption-level": "time-sensitive",
+    "category": "doorbell.ring",
+    "thread-id": "doorbell",
+    "mutable-content": 1
+  },
+  "media": "https://sidecar.local/v1/push/thumbnail/h_9f3a",
+  "doorbell": {
+    "camera": "front_door",
+    "protect_event_id": "6183a1b200f1234500005678",
+    "ts": 1785952622.704
+  }
+}
+```
+
+- `aps.sound` is always `"default"` and always present -- unlike card
+  pushes, a ring is never silent; there is no `quiet`-equivalent level.
+- `aps.category` is `"doorbell.ring"` and `aps.thread-id` is always
+  `"doorbell"` -- both deliberately used here (unlike the card family
+  above), so the app can group all rings in one thread and offer
+  ring-specific notification actions by category.
+- `media`, when present, is the same top-level handle-URL mechanism the
+  card family uses (`push/delivery.py`'s NSE-fetched snapshot) -- here it
+  is Frigate's `latest.jpg` for the mapped camera, not an event-specific
+  crop, since a ring has no Frigate tracked-object event to snapshot.
+- `doorbell.camera` is the Frigate camera name (from `unifi_protect.cameras`
+  mapping), `doorbell.protect_event_id` is Protect's own event id (useful
+  for correlating with Protect's own UI/logs), and `doorbell.ts` is the
+  same unix-epoch-seconds-with-subsecond-precision convention as
+  `event_ts` above.
+- No `v`, `card_key`, `mutation`, `level`, or any other card-family field
+  is present -- this is a separate contract, not an extension of `v: 1`.
+- Delivery is recorded in `push_card_sends` like any other send, with
+  `card_key = "doorbell:<camera>"` and `mutation = "ring"`, so Push Doctor
+  and the receipts table can report on it the same way -- but it is a
+  record of the send, not evidence this payload has `card_key`/`mutation`
+  keys on the wire.
