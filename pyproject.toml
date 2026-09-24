@@ -41,6 +41,11 @@ enrich = [
     "opencv-python-headless>=4.10",
     "numpy>=1.26",
 ]
+unifi_protect = [
+    # push.unifi_protect: websocket client for the Protect Integration API's
+    # ring-event subscription. Only needed when unifi_protect.enabled=true.
+    "websockets>=13",
+]
 http2 = [
     # Lets push.transport.RelayTransport hold one long-lived HTTP/2
     # connection to the relay. Optional: without it the client falls back to

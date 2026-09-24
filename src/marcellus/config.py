@@ -957,6 +957,44 @@ class PushSection(BaseModel):
         return t
 
 
+class UnifiProtectSection(BaseModel):
+    """UniFi Protect doorbell-ring -> push notification (guide_content's
+    `unifi-protect.md`).
+
+    Entirely separate from `PushSection`'s Frigate-review pipeline: a ring
+    bypasses the card/attention-ladder/rate-limiter path outright (a person
+    at the door is never something to route through the ladder) and this
+    section's `enabled` is its own switch, independent of `push.enabled` --
+    though a ring send still goes out through the same registered devices
+    and the same transport (`push/unifi_protect.py`, `push/doorbell.py`).
+
+    Off by default: this is an optional integration against a UniFi OS
+    console most deployments don't have.
+    """
+
+    enabled: bool = False
+    # Base URL of the UniFi OS console hosting Protect, e.g.
+    # "https://192.168.1.1" (no trailing /proxy/protect/...).
+    console_url: str = ""
+    # UniFi OS "Integration" API key (Settings -> Control Plane ->
+    # Integrations -> Create API Key). Env-overridable
+    # (MARCELLUS_UNIFI_PROTECT__API_KEY) and never logged.
+    api_key: str = ""
+    # Most UniFi OS consoles present a self-signed cert; default matches the
+    # console_url:443 expectation of a LAN appliance nobody's issued a real
+    # cert for.
+    verify_tls: bool = False
+    # Protect camera id -> Frigate camera name. A ring from an id not in
+    # this map is logged (debug) and dropped -- there is no Frigate camera
+    # to attribute the snapshot/send to.
+    cameras: dict[str, str] = Field(default_factory=dict)
+    # Server-side de-dup: a second ring event for the same (mapped) camera
+    # within this many seconds of the first is dropped rather than sent
+    # again -- the Protect integration API has been observed to occasionally
+    # deliver a duplicate "add" event for one physical press.
+    ring_dedup_seconds: float = 20.0
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix=_ENV_PREFIX,
@@ -973,6 +1011,7 @@ class Settings(BaseSettings):
     proxy: ProxySection = Field(default_factory=ProxySection)
     push: PushSection = Field(default_factory=PushSection)
     encounters: EncountersSection = Field(default_factory=EncountersSection)
+    unifi_protect: UnifiProtectSection = Field(default_factory=UnifiProtectSection)
     log_level: str = "INFO"
 
     @model_validator(mode="after")

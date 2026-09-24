@@ -110,6 +110,13 @@ class DeviceRegistration(BaseModel):
     morning_digest: dict[str, Any] | None = None
     llm: dict[str, Any] | None = None
 
+    # UniFi Protect doorbell ring -> push (push/doorbell.py). `None` means
+    # "the client didn't mention it" and leaves whatever is already stored
+    # (default `True` for a brand-new device) alone -- same reasoning as
+    # `snoozes` above: a relaunch PUT must not silently flip a user's
+    # opt-out back on.
+    doorbell_rings: bool | None = None
+
 
 class ReceiptEntry(BaseModel):
     """One entry of `POST /v1/push/receipts`' batch body (alerts-slice2 §A)."""
@@ -211,6 +218,11 @@ async def register_device(
 
     def _persist(conn: Any) -> tuple[Any, Any, Any]:
         previous = store.get_device(conn, apns_token)
+        doorbell_rings = (
+            body.doorbell_rings
+            if body.doorbell_rings is not None
+            else (previous.doorbell_rings if previous is not None else True)
+        )
         device_id = store.upsert_device(
             conn,
             apns_token=apns_token,
@@ -230,6 +242,7 @@ async def register_device(
             push_to_start_token=body.push_to_start_token,
             la_capable=body.la_capable,
             frequent_pushes_enabled=body.frequent_pushes_enabled,
+            doorbell_rings=doorbell_rings,
         )
         if body.snoozes is not None:
             store.replace_snoozes(conn, apns_token=apns_token, snoozes=body.snoozes)
@@ -276,6 +289,7 @@ async def register_device(
         "situations_accepted": len(parsed),
         "la_capable": bool(stored.la_capable) if stored else True,
         "live_activities": bool(stored and stored.can_live_activity),
+        "doorbell_rings": bool(stored.doorbell_rings) if stored else True,
     }
 
 
@@ -844,6 +858,7 @@ async def get_device_detail(
         "registered_at": device_row["registered_at"],
         "updated_at": device_row["updated_at"],
         "la_capable": bool(device_row["la_capable"]),
+        "doorbell_rings": bool(device_row["doorbell_rings"]),
         "relay": device_relay,
         **stats,
     }
@@ -906,6 +921,13 @@ async def get_push_status(request: Request) -> dict[str, Any]:
         # Alerts-slice2 §C: in-memory, process-lifetime relay health, updated
         # by `push/transport.py`'s `RelayTransport` on every relay response.
         "relay": RELAY_HEALTH.as_dict(),
+        # UniFi Protect doorbell-ring subscriber (push/unifi_protect.py),
+        # present only when `unifi_protect.enabled`.
+        "unifi_protect": (
+            request.app.state.protect_subscriber.status()
+            if getattr(request.app.state, "protect_subscriber", None) is not None
+            else None
+        ),
     }
 
 

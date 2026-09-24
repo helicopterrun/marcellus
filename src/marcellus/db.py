@@ -132,7 +132,12 @@ CREATE TABLE IF NOT EXISTS push_devices (
     la_capable INTEGER NOT NULL DEFAULT 1,
     -- Phase A: opts this device into the fast (3s) Live Activity update
     -- cadence instead of the default slow (15s) one.
-    frequent_pushes_enabled INTEGER NOT NULL DEFAULT 0
+    frequent_pushes_enabled INTEGER NOT NULL DEFAULT 0,
+    -- UniFi Protect doorbell ring -> push (push/doorbell.py). On by
+    -- default: a ring is a person at the door, and a device that never
+    -- opted in still expects to hear about that unless it explicitly
+    -- turns it off.
+    doorbell_rings INTEGER NOT NULL DEFAULT 1
 );
 
 -- Opaque, sidecar-minted, short-lived handles standing in for
@@ -651,6 +656,8 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("la_capable", "INTEGER NOT NULL DEFAULT 1"),
         # Phase A: fast (3s) vs default (15s) Live Activity update cadence.
         ("frequent_pushes_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        # UniFi Protect doorbell ring -> push opt-out (push/doorbell.py).
+        ("doorbell_rings", "INTEGER NOT NULL DEFAULT 1"),
     ],
     "push_handles": [
         ("situation_id", "TEXT NOT NULL DEFAULT ''"),

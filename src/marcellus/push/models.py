@@ -115,6 +115,8 @@ class Device:
     la_capable: bool = True
     #: Phase A: fast (3s) vs default (15s) Live Activity update cadence.
     frequent_pushes_enabled: bool = False
+    #: UniFi Protect doorbell ring -> push opt-out. On by default.
+    doorbell_rings: bool = True
 
     @property
     def can_live_activity(self) -> bool:
