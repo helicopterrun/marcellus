@@ -8,8 +8,9 @@ import logging
 import os
 import shutil
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -32,6 +33,7 @@ from marcellus.push.engine import PushEngine
 from marcellus.push.log_context import PushContextFilter
 from marcellus.push.mqtt import MqttReviewSubscriber, compute_backoff
 from marcellus.push.transport import LogTransport, PushTransport, RelayTransport
+from marcellus.push.unifi_protect import ProtectRingSubscriber
 from marcellus.routes import analysis as analysis_routes
 from marcellus.routes import debug as debug_routes
 from marcellus.routes import encounters as encounters_routes
@@ -290,6 +292,63 @@ async def _push_subscriber_loop(app: FastAPI) -> None:
             await asyncio.sleep(delay)
 
 
+async def _protect_ring_loop(app: FastAPI) -> None:
+    """Keep the UniFi Protect websocket subscriber alive, same outer-retry
+    shape as `_push_subscriber_loop` -- `run_forever` already retries
+    connect failures internally; this is only for an exception escaping it
+    entirely."""
+    subscriber: ProtectRingSubscriber = app.state.protect_subscriber
+    attempt = 0
+    while True:
+        try:
+            await subscriber.run_forever()
+            return
+        except Exception:
+            delay = compute_backoff(attempt, base=5.0, cap=300.0)
+            attempt += 1
+            logger.exception(
+                "unifi_protect: websocket subscriber loop crashed, restarting in %.0fs", delay
+            )
+            await asyncio.sleep(delay)
+
+
+def _make_on_ring(app: FastAPI) -> Callable[[Any], Awaitable[None]]:
+    from marcellus import db
+    from marcellus.push import doorbell
+    from marcellus.push.unifi_protect import RingEvent
+
+    settings: Settings = app.state.settings
+
+    async def _on_ring(ring: RingEvent) -> None:
+        transport = app.state.push_transport
+
+        # `doorbell.handle_ring` is itself a coroutine (it awaits the
+        # transport), so -- unlike `db.with_sidecar`'s sync-callback-in-a-
+        # -thread shape -- the connection is opened directly here and
+        # committed/closed around the whole call.
+        conn = db.open_sidecar(str(settings.sidecar.db_path))
+        try:
+            outcome = await doorbell.handle_ring(
+                protect_camera_id=ring.protect_camera_id,
+                protect_event_id=ring.protect_event_id,
+                cameras=settings.unifi_protect.cameras,
+                conn=conn,
+                transport=transport,
+                frigate_base_url=settings.frigate.base_url,
+                external_base_url=settings.push.external_base_url,
+                situation_handle_ttl_s=settings.push.situation_handle_ttl_s,
+                ring_dedup_seconds=settings.unifi_protect.ring_dedup_seconds,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        logger.info(
+            "unifi_protect: ring camera=%s sent=%d", outcome.frigate_camera, outcome.sent
+        )
+
+    return _on_ring
+
+
 async def _activity_sweep_loop(app: FastAPI) -> None:
     """End Live Activities whose situation has gone quiet.
 
@@ -476,6 +535,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     push_task: asyncio.Task[None] | None = None
     sweep_task: asyncio.Task[None] | None = None
     delivery_sweep_task: asyncio.Task[None] | None = None
+    protect_task: asyncio.Task[None] | None = None
     if settings.push.enabled:
         from marcellus import db
         from marcellus.push import card_store, policy_settings
@@ -541,6 +601,18 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         sweep_task = asyncio.create_task(_activity_sweep_loop(app))
         delivery_sweep_task = asyncio.create_task(_delivery_resound_sweep_loop(app))
 
+        if settings.unifi_protect.enabled:
+            protect_subscriber = ProtectRingSubscriber(
+                settings.unifi_protect, _make_on_ring(app)
+            )
+            app.state.protect_subscriber = protect_subscriber
+            protect_task = asyncio.create_task(_protect_ring_loop(app))
+    elif settings.unifi_protect.enabled:
+        logger.warning(
+            "unifi_protect.enabled is true but push.enabled is false -- doorbell "
+            "rings need registered push devices, which requires push.enabled"
+        )
+
     enrich_task: asyncio.Task[None] | None = None
     if settings.face_enrich.enabled:
         from marcellus.faces import enrich as _enrich
@@ -562,6 +634,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             push_task,
             sweep_task,
             delivery_sweep_task,
+            protect_task,
             enrich_task,
             encounters_task,
             encounters_worker_task,
@@ -576,6 +649,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         running_subscriber = getattr(app.state, "push_subscriber", None)
         if running_subscriber is not None:
             running_subscriber.stop()
+        running_protect_subscriber = getattr(app.state, "protect_subscriber", None)
+        if running_protect_subscriber is not None:
+            await running_protect_subscriber.aclose()
         running_engine = getattr(app.state, "push_engine", None)
         if running_engine is not None:
             await running_engine.aclose()

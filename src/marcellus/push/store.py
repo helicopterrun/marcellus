@@ -83,6 +83,9 @@ def _row_to_device(row: sqlite3.Row) -> Device:
             int(_col(row, "la_capable", 1) if _col(row, "la_capable", 1) is not None else 1)
         ),
         frequent_pushes_enabled=bool(int(_col(row, "frequent_pushes_enabled", 0) or 0)),
+        doorbell_rings=bool(
+            int(_col(row, "doorbell_rings", 1) if _col(row, "doorbell_rings", 1) is not None else 1)
+        ),
     )
 
 
@@ -111,6 +114,7 @@ def upsert_device(
     push_to_start_token: str = "",
     la_capable: bool = True,
     frequent_pushes_enabled: bool = False,
+    doorbell_rings: bool = True,
 ) -> str:
     """Idempotent PUT on the token (spec §1) -- overwrites filter state in
     place rather than accumulating duplicate rows that would double-fire
@@ -127,8 +131,8 @@ def upsert_device(
         "(apns_token, device_id, bundle_id, environment, app_version, cameras, labels, "
         " min_severity, registered_at, updated_at, schema_version, timezone, location, "
         " situations, live_activity_token, morning_digest, llm, push_to_start_token, "
-        " la_capable, frequent_pushes_enabled) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " la_capable, frequent_pushes_enabled, doorbell_rings) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(apns_token) DO UPDATE SET "
         "bundle_id=excluded.bundle_id, environment=excluded.environment, "
         "app_version=excluded.app_version, cameras=excluded.cameras, labels=excluded.labels, "
@@ -139,6 +143,7 @@ def upsert_device(
         "morning_digest=excluded.morning_digest, llm=excluded.llm, "
         "la_capable=excluded.la_capable, "
         "frequent_pushes_enabled=excluded.frequent_pushes_enabled, "
+        "doorbell_rings=excluded.doorbell_rings, "
         # A re-registration that omits the token must not blank a working one:
         # the app uploads it from an async token stream, so the first PUT after
         # launch can legitimately race ahead of the token arriving.
@@ -153,6 +158,7 @@ def upsert_device(
             json.dumps(morning_digest) if morning_digest is not None else None,
             json.dumps(llm) if llm is not None else None,
             push_to_start_token, int(la_capable), int(frequent_pushes_enabled),
+            int(doorbell_rings),
         ),
     )
     # Commits itself (spec Wave 2B §3): sqlite3's default isolation leaves

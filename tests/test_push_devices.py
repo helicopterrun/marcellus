@@ -135,6 +135,50 @@ def test_register_frequent_pushes_enabled_defaults_false(
     assert device.frequent_pushes_enabled is False
 
 
+def test_register_defaults_doorbell_rings_true(
+    client: TestClient, sidecar_db_path: Path
+) -> None:
+    r = client.put(
+        "/v1/push/devices/tok-abc123",
+        json={"bundle_id": "com.x", "environment": "sandbox"},
+    )
+    assert r.status_code == 200
+    assert r.json()["doorbell_rings"] is True
+    from marcellus import db
+
+    device = store.list_devices(db.open_sidecar(sidecar_db_path))[0]
+    assert device.doorbell_rings is True
+
+
+def test_register_doorbell_rings_false_round_trips(
+    client: TestClient, sidecar_db_path: Path
+) -> None:
+    r = client.put(
+        "/v1/push/devices/tok-abc123",
+        json={"bundle_id": "com.x", "environment": "sandbox", "doorbell_rings": False},
+    )
+    assert r.status_code == 200
+    assert r.json()["doorbell_rings"] is False
+    from marcellus import db
+
+    device = store.list_devices(db.open_sidecar(sidecar_db_path))[0]
+    assert device.doorbell_rings is False
+
+
+def test_register_omitting_doorbell_rings_keeps_previous_value(
+    client: TestClient, sidecar_db_path: Path
+) -> None:
+    client.put(
+        "/v1/push/devices/tok-abc123",
+        json={"bundle_id": "com.x", "environment": "sandbox", "doorbell_rings": False},
+    )
+    r = client.put(
+        "/v1/push/devices/tok-abc123",
+        json={"bundle_id": "com.x", "environment": "sandbox"},
+    )
+    assert r.json()["doorbell_rings"] is False
+
+
 def test_capabilities_reports_push_disabled_by_default(client: TestClient) -> None:
     r = client.get("/v1/capabilities")
     assert r.status_code == 200
