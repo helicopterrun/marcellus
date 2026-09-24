@@ -9,14 +9,15 @@ queue of its own -- ring traffic is low-volume enough (a handful a day, not
 thousands an hour) that dispatching straight from the websocket read loop is
 fine.
 
-**The exact envelope of the Integration API's ring event is not confirmed**
-against a real console as of this writing (no lab device to verify against).
-Two shapes are accepted defensively:
+The wrapper envelope was confirmed against a live Protect 7.2.105 console:
+every event arrives as `{"type": "add"|"update", "item": {"type": ...,
+"device": "<camera id>", ...}}`, with one "add" followed by several
+"update" frames for the same event (which can outlast the dedup window).
+Accepted shapes:
 
-* The documented "subscribe" wrapper: `{"type": "add", "item": {"type":
-  "ring", "device": "<camera id>", ...}}` (and, generously, `"update"` for
-  `type` as well, in case a ring is ever delivered as an update rather than
-  an add).
+* The wrapper with `type == "add"` only -- "update" frames re-describe an
+  event already announced and would re-ring the phone:
+  `{"type": "add", "item": {"type": "ring", "device": "<camera id>", ...}}`.
 * A flatter, unwrapped shape some integration examples show:
   `{"type": "ring", "device": "<camera id>", ...}`.
 
@@ -51,10 +52,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger(__name__)
 
-#: Ring events this module acts on. "update" is included defensively (see
-#: module docstring) even though "add" is what every known integration
-#: example shows.
-_RING_ITEM_TYPES = ("add", "update")
+#: Ring events this module acts on. Only "add": Protect follows each "add"
+#: with several "update" frames for the same event (see module docstring).
+_RING_ITEM_TYPES = ("add",)
 
 
 def compute_backoff(attempt: int, base: float = 2.0, cap: float = 60.0) -> float:

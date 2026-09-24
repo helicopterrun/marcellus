@@ -52,3 +52,10 @@ def test_parse_non_dict_payload() -> None:
     assert _parse_ring_event([1, 2, 3]) is None  # type: ignore[arg-type]
     assert _parse_ring_event("not a dict") is None  # type: ignore[arg-type]
     assert _parse_ring_event(None) is None  # type: ignore[arg-type]
+
+
+def test_parse_update_frame_ignored() -> None:
+    # Protect follows each "add" with several "update" frames for the same
+    # event; acting on them would re-ring the phone.
+    payload = {"type": "update", "item": {"type": "ring", "device": "cam-1"}}
+    assert _parse_ring_event(payload) is None
