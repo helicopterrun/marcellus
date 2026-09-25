@@ -65,6 +65,13 @@ class SearchCapabilities(_Wire):
     related_events: bool
 
 
+class UnifiProtectCapabilities(_Wire):
+    enabled: bool
+    cameras: list[str]
+    lcd_message: bool
+    ring_snapshot: bool
+
+
 class CapabilitiesResponse(_Wire):
     version: str
     scrub_cache: ScrubCacheCapabilities
@@ -72,6 +79,7 @@ class CapabilitiesResponse(_Wire):
     push: PushCapabilities
     decisions: DecisionsCapabilities
     search: SearchCapabilities
+    unifi_protect: UnifiProtectCapabilities
 
 
 # --------------------------------------------------------------------------

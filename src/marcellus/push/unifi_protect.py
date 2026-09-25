@@ -120,6 +120,36 @@ class _ProtectStatus:
     last_error: str | None = None
     last_error_at: float | None = None
     cameras_seen: int = 0
+    #: epoch when the websocket was last observed disconnected (set on
+    #: startup and on every disconnect, cleared on connect) -- `/healthz`
+    #: uses this to tell "briefly reconnecting" from "down for minutes".
+    disconnected_since: float | None = None
+
+
+@dataclass
+class ProtectCameraStatus:
+    """One mapped camera's most recent state, from the `device_poll_loop`
+    REST poll of `/proxy/protect/integration/v1/cameras` -- separate from
+    the ring websocket, which carries no camera health info at all."""
+
+    protect_id: str
+    frigate_camera: str
+    name: str | None
+    model: str | None
+    state: str | None
+    has_lcd: bool
+    checked_at: float
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "protect_id": self.protect_id,
+            "frigate_camera": self.frigate_camera,
+            "name": self.name,
+            "model": self.model,
+            "state": self.state,
+            "has_lcd": self.has_lcd,
+            "checked_at": self.checked_at,
+        }
 
 
 class ProtectRingSubscriber:
@@ -145,12 +175,26 @@ class ProtectRingSubscriber:
         self._own_client = client is None
         self._client = client or httpx.AsyncClient(verify=settings.verify_tls, timeout=10.0)
         self._stopped = False
-        self._status = _ProtectStatus()
+        self._status = _ProtectStatus(disconnected_since=time.time())
         self._task: asyncio.Task[None] | None = None
+        self._poll_task: asyncio.Task[None] | None = None
+        self.console_version: str | None = None
+        self.cameras: dict[str, ProtectCameraStatus] = {}
+        self.last_poll_at: float | None = None
+        self.last_poll_error: str | None = None
 
     # -- status (Push Doctor) -------------------------------------------------
 
     def status(self) -> dict[str, Any]:
+        cam_list = list(self.cameras.values())
+        mapped_ids = set(self.settings.cameras)
+        if self.last_poll_at is None or not mapped_ids:
+            mapped_cameras_connected = False
+        else:
+            seen = {c.protect_id: c for c in cam_list}
+            mapped_cameras_connected = all(
+                pid in seen and seen[pid].state == "CONNECTED" for pid in mapped_ids
+            )
         return {
             "enabled": True,
             "connected": self._status.connected,
@@ -158,7 +202,18 @@ class ProtectRingSubscriber:
             "last_error": self._status.last_error,
             "last_error_at": self._status.last_error_at,
             "cameras_configured": len(self.settings.cameras),
+            "console_version": self.console_version,
+            "last_poll_at": self.last_poll_at,
+            "last_poll_error": self.last_poll_error,
+            "cameras": [c.as_dict() for c in cam_list],
+            "mapped_cameras_connected": mapped_cameras_connected,
         }
+
+    @property
+    def disconnected_since(self) -> float | None:
+        """Epoch the websocket has been continuously disconnected since, or
+        `None` if currently connected. `/healthz` reads this."""
+        return self._status.disconnected_since
 
     # -- startup validation ----------------------------------------------------
 
@@ -209,6 +264,110 @@ class ProtectRingSubscriber:
                     )
         return True
 
+    # -- device (camera health) poll ---------------------------------------
+
+    async def _fetch_meta_info(self) -> None:
+        """`GET /meta/info` for `applicationVersion` -- called once at
+        startup and again after every websocket (re)connect (M-1 spec).
+        Non-fatal: a failure here just leaves `console_version` stale."""
+        base = self.settings.console_url.rstrip("/")
+        headers = {"X-API-KEY": self.settings.api_key}
+        try:
+            resp = await self._client.get(
+                f"{base}/proxy/protect/integration/v1/meta/info", headers=headers
+            )
+            resp.raise_for_status()
+            body = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.debug("unifi_protect: meta/info poll failed: %s", _exc_str(exc))
+            return
+        if isinstance(body, dict):
+            version = body.get("applicationVersion")
+            if isinstance(version, str):
+                self.console_version = version
+
+    async def poll_devices_once(self) -> None:
+        """One `GET /proxy/protect/integration/v1/cameras`, parsing every
+        camera present in `settings.cameras` into `self.cameras`.
+
+        On a 429 or 5xx or network error, retries once after 5s; if that
+        retry also fails, records `last_poll_error` and leaves the
+        previously-known `self.cameras` state untouched (stale data beats no
+        data for the `/healthz` "not CONNECTED" check).
+        """
+        base = self.settings.console_url.rstrip("/")
+        headers = {"X-API-KEY": self.settings.api_key}
+        url = f"{base}/proxy/protect/integration/v1/cameras"
+
+        async def _attempt() -> httpx.Response:
+            resp = await self._client.get(url, headers=headers)
+            if resp.status_code == 429 or resp.status_code >= 500:
+                resp.raise_for_status()
+            return resp
+
+        try:
+            try:
+                resp = await _attempt()
+            except httpx.HTTPError:
+                await asyncio.sleep(5.0)
+                resp = await _attempt()
+            resp.raise_for_status()
+            cameras = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            self.last_poll_error = _exc_str(exc)
+            self.last_poll_at = time.time()
+            logger.warning("unifi_protect: device poll failed: %s", _exc_str(exc))
+            return
+
+        now = time.time()
+        if isinstance(cameras, list):
+            for cam in cameras:
+                if not isinstance(cam, dict):
+                    continue
+                protect_id = str(cam.get("id"))
+                frigate_camera = self.settings.cameras.get(protect_id)
+                if not frigate_camera:
+                    continue  # unmapped camera -- not our concern here
+                self.cameras[protect_id] = ProtectCameraStatus(
+                    protect_id=protect_id,
+                    frigate_camera=frigate_camera,
+                    name=cam.get("name"),
+                    model=cam.get("modelKey") or cam.get("model"),
+                    state=cam.get("state"),
+                    # Dahua/third-party cameras report a null lcdMessage --
+                    # only a genuine Protect doorbell has an LCD to show one on.
+                    has_lcd=cam.get("lcdMessage") is not None,
+                    checked_at=now,
+                )
+        self.last_poll_error = None
+        self.last_poll_at = now
+
+    async def device_poll_loop(self) -> None:
+        """Runs `poll_devices_once` on a `settings.device_poll_seconds`
+        cadence until `stop()`. Fetches `/meta/info` once before the first
+        poll (startup) -- `_connect_once` covers every reconnect after.
+
+        `poll_devices_once`/`_fetch_meta_info` already catch httpx/JSON
+        errors, but a malformed camera dict (bad key, wrong type) would
+        raise a plain `TypeError`/`KeyError` -- same shape of risk
+        `run_forever` guards against for the websocket loop, so this loop
+        gets the same "never let one bad cycle kill the task" wrapper.
+        """
+        await self._fetch_meta_info()
+        while not self._stopped:
+            try:
+                await self.poll_devices_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - never let one bad cycle kill the loop
+                self.last_poll_error = _exc_str(exc)
+                self.last_poll_at = time.time()
+                logger.exception("unifi_protect: device poll loop error: %s", _exc_str(exc))
+            for _ in range(int(self.settings.device_poll_seconds)):
+                if self._stopped:
+                    break
+                await asyncio.sleep(1.0)
+
     # -- websocket loop ----------------------------------------------------
 
     async def run_forever(self) -> None:
@@ -222,6 +381,8 @@ class ProtectRingSubscriber:
                 raise
             except Exception as exc:  # noqa: BLE001 - never let one bad frame kill the loop
                 self._status.connected = False
+                if self._status.disconnected_since is None:
+                    self._status.disconnected_since = time.time()
                 self._status.last_error = _exc_str(exc)
                 self._status.last_error_at = time.time()
                 logger.warning("unifi_protect: websocket loop error: %s", _exc_str(exc))
@@ -249,12 +410,19 @@ class ProtectRingSubscriber:
 
         async with websockets.connect(ws_url, **connect_kwargs) as ws:
             self._status.connected = True
+            self._status.disconnected_since = None
             logger.info("unifi_protect: websocket connected")
+            # Re-check application version on every (re)connect, not just
+            # startup -- a console can be upgraded while the sidecar is
+            # already running and reconnecting.
+            await self._fetch_meta_info()
             async for message in ws:
                 if self._stopped:
                     break
                 await self._handle_message(message)
         self._status.connected = False
+        if self._status.disconnected_since is None:
+            self._status.disconnected_since = time.time()
 
     async def _handle_message(self, message: Any) -> None:
         try:
@@ -276,17 +444,34 @@ class ProtectRingSubscriber:
         self._stopped = True
         if self._task is not None:
             self._task.cancel()
+        if self._poll_task is not None:
+            self._poll_task.cancel()
 
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> asyncio.Task[None]:
         loop = loop or asyncio.get_event_loop()
         self._task = loop.create_task(self.run_forever())
         return self._task
 
+    def start_device_poll(
+        self, loop: asyncio.AbstractEventLoop | None = None
+    ) -> asyncio.Task[None]:
+        """Start `device_poll_loop` as its own task, tracked as
+        `self._poll_task` -- `stop()`/`aclose()` cancel and await it, so a
+        caller only needs this one call (no outer-retry wrapper needed the
+        way `run_forever`'s task gets one: `device_poll_loop` already
+        swallows non-cancellation exceptions itself)."""
+        loop = loop or asyncio.get_event_loop()
+        self._poll_task = loop.create_task(self.device_poll_loop())
+        return self._poll_task
+
     async def aclose(self) -> None:
         self.stop()
         if self._task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
+        if self._poll_task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._poll_task
         if self._own_client:
             await self._client.aclose()
 

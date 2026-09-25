@@ -123,6 +123,39 @@ _FRIGATE_PROBE_TIMEOUT_S = 3.0
 _PROXY_PROBE_TIMEOUT_S = 2.0
 
 
+# How long the Protect websocket may stay disconnected before /healthz
+# calls it "down" rather than "degraded" -- long enough that a normal
+# reconnect-with-backoff cycle (compute_backoff caps at 60s) isn't flagged
+# as an outage on its own.
+_PROTECT_DISCONNECT_DOWN_S = 120.0
+
+
+def _protect_health_state(subscriber: Any, now: float) -> str:
+    """ok / degraded / down for `checks["unifi_protect"]` (M-1 spec).
+
+    down: websocket disconnected for more than `_PROTECT_DISCONNECT_DOWN_S`
+    (covers both "never connected since start" -- `disconnected_since` is
+    seeded at construction -- and "dropped and hasn't come back").
+    degraded: connected, but a mapped camera isn't CONNECTED, the last
+    device poll failed, or no poll has completed yet.
+    ok: connected, every mapped camera CONNECTED, last poll succeeded.
+    """
+    disconnected_since = getattr(subscriber, "disconnected_since", None)
+    if disconnected_since is not None and (now - disconnected_since) > _PROTECT_DISCONNECT_DOWN_S:
+        return "down"
+
+    status = subscriber.status()
+    if not status.get("connected"):
+        return "degraded"
+    if status.get("last_poll_at") is None:
+        return "degraded"
+    if status.get("last_poll_error"):
+        return "degraded"
+    if not status.get("mapped_cameras_connected"):
+        return "degraded"
+    return "ok"
+
+
 async def _probe_frigate(app: Any, settings: Any, now: float) -> tuple[str, str | None]:
     """Cheap `/api/version` check through the proxy's own base URL and
     stream-client pool, rate-limited per app instance.
@@ -298,6 +331,24 @@ async def healthz(request: Request) -> JSONResponse:
             checks["encounters"] = "starting"
     else:
         checks["encounters"] = "disabled"
+
+    if settings.unifi_protect.enabled:
+        protect_subscriber = getattr(app.state, "protect_subscriber", None)
+        if protect_subscriber is None:
+            checks["unifi_protect"] = "degraded"
+            ok = False
+            if reason is None:
+                reason = "unifi_protect"
+        else:
+            protect_status = _protect_health_state(protect_subscriber, now)
+            checks["unifi_protect"] = protect_status
+            if protect_status == "down":
+                ok = False
+                if reason is None:
+                    reason = "unifi_protect"
+            protect_last_ring_at = protect_subscriber.status().get("last_ring_at")
+            if protect_last_ring_at is not None:
+                checks["unifi_protect_last_ring_age_s"] = round(now - protect_last_ring_at, 1)
 
     body: dict[str, Any] = {"status": "ok" if ok else "degraded", "checks": checks}
     if reason is not None:

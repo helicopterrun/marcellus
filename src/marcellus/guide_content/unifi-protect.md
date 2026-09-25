@@ -63,6 +63,23 @@ still mute rings, same as everything else.
 - `ring_dedup_seconds` (default `20`) -- a second ring for the same camera
   within this window is dropped rather than re-sent (the Protect API has
   been observed to occasionally deliver a duplicate event for one press).
+- `device_poll_seconds` (default `60`, minimum `15`) -- how often the
+  sidecar polls Protect for camera health (online state, LCD support)
+  independent of the ring websocket. Surfaced at `GET /v1/protect/status`
+  and in `/healthz`'s `unifi_protect` check.
+
+## Health & capabilities
+
+`GET /healthz`'s `checks.unifi_protect` reports `ok` / `degraded` / `down`:
+`down` means the ring websocket has been disconnected for over two minutes
+(and makes the top-level status `degraded`); `degraded` means it's
+connected but a mapped camera isn't reporting `CONNECTED`, or the device
+poll hasn't succeeded yet. `GET /v1/capabilities`'s `unifi_protect` block
+reports whether the feature is on, the mapped Frigate camera names, and
+whether any mapped camera has an LCD (`lcd_message`) -- both `false` until
+enabled and the first device poll completes. `GET /v1/protect/status`
+(authenticated) returns the full detail: console version, per-camera state,
+and each camera's last-ring timestamp.
 
 `GET /v1/push/status`'s `unifi_protect` block reports the websocket's own
 connection state, last-ring timestamp, and last error, the same way the

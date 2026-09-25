@@ -129,6 +129,31 @@ def _require_known_camera(request: Request, camera: str) -> None:
         )
 
 
+def _protect_capabilities(settings: Any, app_state: Any) -> dict[str, Any]:
+    """`unifi_protect` block of `/v1/capabilities` (M-1).
+
+    `lcd_message` is `False` until the device-poll loop has completed at
+    least one cycle -- `has_lcd` defaults `False` on every
+    `ProtectCameraStatus` the loop hasn't populated yet, so this naturally
+    reads `False` pre-poll without a separate "polled yet" check.
+    `ring_snapshot` is hardcoded `False`: M-2 turns it on.
+    """
+    section = settings.unifi_protect
+    if not section.enabled:
+        return {"enabled": False, "cameras": [], "lcd_message": False, "ring_snapshot": False}
+    subscriber = getattr(app_state, "protect_subscriber", None)
+    cameras = sorted(set(section.cameras.values()))
+    lcd_message = False
+    if subscriber is not None:
+        lcd_message = any(cam.has_lcd for cam in subscriber.cameras.values())
+    return {
+        "enabled": True,
+        "cameras": cameras,
+        "lcd_message": lcd_message,
+        "ring_snapshot": False,
+    }
+
+
 @router.get("/capabilities", response_model=CapabilitiesResponse)
 async def capabilities(request: Request) -> dict[str, Any]:
     """No auth required -- this is the one `/v1` endpoint the client probes
@@ -185,6 +210,7 @@ async def capabilities(request: Request) -> dict[str, Any]:
         },
         "decisions": {"enabled": True},
         "search": {"enabled": True, "related_events": True},
+        "unifi_protect": _protect_capabilities(settings, request.app.state),
     }
 
 

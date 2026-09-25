@@ -47,6 +47,7 @@ from marcellus.routes import map_page as map_page_routes
 from marcellus.routes import motion as motion_routes
 from marcellus.routes import observations as observations_routes
 from marcellus.routes import placement as placement_routes
+from marcellus.routes import protect as protect_routes
 from marcellus.routes import proxy as proxy_routes
 from marcellus.routes import push as push_routes
 from marcellus.routes import push_floorplan as push_floorplan_routes
@@ -602,11 +603,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         delivery_sweep_task = asyncio.create_task(_delivery_resound_sweep_loop(app))
 
         if settings.unifi_protect.enabled:
-            protect_subscriber = ProtectRingSubscriber(
-                settings.unifi_protect, _make_on_ring(app)
-            )
+            protect_subscriber = ProtectRingSubscriber(settings.unifi_protect, _make_on_ring(app))
             app.state.protect_subscriber = protect_subscriber
             protect_task = asyncio.create_task(_protect_ring_loop(app))
+            # The device-poll loop is owned by the subscriber itself (its
+            # `stop()`/`aclose()` already cancel `_poll_task`), unlike the
+            # ring websocket loop above which server.py wraps in its own
+            # outer-retry task -- see `start_device_poll`'s docstring.
+            protect_subscriber.start_device_poll()
     elif settings.unifi_protect.enabled:
         logger.warning(
             "unifi_protect.enabled is true but push.enabled is false -- doorbell "
@@ -764,6 +768,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(scrub_routes.router)
     app.include_router(search_routes.router)
     app.include_router(push_routes.router)
+    app.include_router(protect_routes.router)
     app.include_router(push_settings_routes.router)
     app.include_router(tuning_routes.router)
     app.include_router(push_floorplan_routes.router)
