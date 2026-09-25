@@ -537,7 +537,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     sweep_task: asyncio.Task[None] | None = None
     delivery_sweep_task: asyncio.Task[None] | None = None
     protect_task: asyncio.Task[None] | None = None
-    protect_poll_task: asyncio.Task[None] | None = None
     if settings.push.enabled:
         from marcellus import db
         from marcellus.push import card_store, policy_settings
@@ -607,7 +606,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             protect_subscriber = ProtectRingSubscriber(settings.unifi_protect, _make_on_ring(app))
             app.state.protect_subscriber = protect_subscriber
             protect_task = asyncio.create_task(_protect_ring_loop(app))
-            protect_poll_task = asyncio.create_task(protect_subscriber.device_poll_loop())
+            # The device-poll loop is owned by the subscriber itself (its
+            # `stop()`/`aclose()` already cancel `_poll_task`), unlike the
+            # ring websocket loop above which server.py wraps in its own
+            # outer-retry task -- see `start_device_poll`'s docstring.
+            protect_subscriber.start_device_poll()
     elif settings.unifi_protect.enabled:
         logger.warning(
             "unifi_protect.enabled is true but push.enabled is false -- doorbell "
@@ -636,7 +639,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             sweep_task,
             delivery_sweep_task,
             protect_task,
-            protect_poll_task,
             enrich_task,
             encounters_task,
             encounters_worker_task,

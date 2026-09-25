@@ -14,8 +14,13 @@ import httpx
 import pytest
 
 from marcellus.config import UnifiProtectSection
+from marcellus.push import unifi_protect
 from marcellus.push.unifi_protect import ProtectCameraStatus, ProtectRingSubscriber
 from marcellus.routes.health import _protect_health_state
+
+
+async def _no_sleep(_: float) -> None:
+    return None
 
 
 def _settings(**overrides: object) -> UnifiProtectSection:
@@ -87,7 +92,9 @@ async def test_poll_devices_once_parses_mapped_cameras_and_null_lcd() -> None:
 
 
 @pytest.mark.asyncio
-async def test_poll_devices_once_retries_once_on_429_then_succeeds() -> None:
+async def test_poll_devices_once_retries_once_on_429_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -102,17 +109,8 @@ async def test_poll_devices_once_retries_once_on_429_then_succeeds() -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     sub = ProtectRingSubscriber(_settings(), _noop_on_ring, client=client)
 
-    async def _no_sleep(_: float) -> None:
-        return None
-
-    import asyncio
-
-    orig_sleep = asyncio.sleep
-    asyncio.sleep = _no_sleep  # type: ignore[assignment]
-    try:
-        await sub.poll_devices_once()
-    finally:
-        asyncio.sleep = orig_sleep  # type: ignore[assignment]
+    monkeypatch.setattr(unifi_protect.asyncio, "sleep", _no_sleep)
+    await sub.poll_devices_once()
 
     assert calls["n"] == 2
     assert sub.last_poll_error is None
@@ -121,27 +119,64 @@ async def test_poll_devices_once_retries_once_on_429_then_succeeds() -> None:
 
 
 @pytest.mark.asyncio
-async def test_poll_devices_once_records_error_after_retry_fails() -> None:
+async def test_poll_devices_once_records_error_after_retry_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, json={"error": "boom"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     sub = ProtectRingSubscriber(_settings(), _noop_on_ring, client=client)
 
-    async def _no_sleep(_: float) -> None:
-        return None
-
-    import asyncio
-
-    orig_sleep = asyncio.sleep
-    asyncio.sleep = _no_sleep  # type: ignore[assignment]
-    try:
-        await sub.poll_devices_once()
-    finally:
-        asyncio.sleep = orig_sleep  # type: ignore[assignment]
+    monkeypatch.setattr(unifi_protect.asyncio, "sleep", _no_sleep)
+    await sub.poll_devices_once()
 
     assert sub.last_poll_error is not None
     assert sub.cameras == {}
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_device_poll_loop_survives_non_httpx_exception(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A malformed camera dict (or anything else non-httpx) raising out of
+    `poll_devices_once`/`_fetch_meta_info` must not kill the loop task --
+    it should be logged and the loop should keep running on schedule."""
+    monkeypatch.setattr(unifi_protect.asyncio, "sleep", _no_sleep)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[])
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+    sub = ProtectRingSubscriber(_settings(device_poll_seconds=15), _noop_on_ring, client=client)
+
+    calls = {"n": 0}
+    orig_poll = sub.poll_devices_once
+
+    async def _flaky_poll() -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TypeError("boom: malformed camera dict")
+        await orig_poll()
+        sub._stopped = True  # stop after the second (successful) iteration
+
+    async def _noop_meta_info() -> None:
+        return None
+
+    monkeypatch.setattr(sub, "poll_devices_once", _flaky_poll)
+    monkeypatch.setattr(sub, "_fetch_meta_info", _noop_meta_info)
+
+    with caplog.at_level("ERROR", logger="marcellus.push.unifi_protect"):
+        await sub.device_poll_loop()
+
+    # The loop survived the TypeError on iteration 1 (logged via
+    # `logger.exception`) and completed iteration 2, which succeeded and
+    # cleared `last_poll_error` back to `None` -- proof the task kept
+    # running rather than dying silently.
+    assert calls["n"] == 2
+    assert sub.last_poll_error is None
+    assert any("device poll loop error" in r.message for r in caplog.records)
     await client.aclose()
 
 

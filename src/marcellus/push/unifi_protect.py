@@ -345,10 +345,24 @@ class ProtectRingSubscriber:
     async def device_poll_loop(self) -> None:
         """Runs `poll_devices_once` on a `settings.device_poll_seconds`
         cadence until `stop()`. Fetches `/meta/info` once before the first
-        poll (startup) -- `_connect_once` covers every reconnect after."""
+        poll (startup) -- `_connect_once` covers every reconnect after.
+
+        `poll_devices_once`/`_fetch_meta_info` already catch httpx/JSON
+        errors, but a malformed camera dict (bad key, wrong type) would
+        raise a plain `TypeError`/`KeyError` -- same shape of risk
+        `run_forever` guards against for the websocket loop, so this loop
+        gets the same "never let one bad cycle kill the task" wrapper.
+        """
         await self._fetch_meta_info()
         while not self._stopped:
-            await self.poll_devices_once()
+            try:
+                await self.poll_devices_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - never let one bad cycle kill the loop
+                self.last_poll_error = _exc_str(exc)
+                self.last_poll_at = time.time()
+                logger.exception("unifi_protect: device poll loop error: %s", _exc_str(exc))
             for _ in range(int(self.settings.device_poll_seconds)):
                 if self._stopped:
                     break
@@ -441,6 +455,11 @@ class ProtectRingSubscriber:
     def start_device_poll(
         self, loop: asyncio.AbstractEventLoop | None = None
     ) -> asyncio.Task[None]:
+        """Start `device_poll_loop` as its own task, tracked as
+        `self._poll_task` -- `stop()`/`aclose()` cancel and await it, so a
+        caller only needs this one call (no outer-retry wrapper needed the
+        way `run_forever`'s task gets one: `device_poll_loop` already
+        swallows non-cancellation exceptions itself)."""
         loop = loop or asyncio.get_event_loop()
         self._poll_task = loop.create_task(self.device_poll_loop())
         return self._poll_task
