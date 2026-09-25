@@ -53,6 +53,10 @@ def _row_to_device(row: sqlite3.Row) -> Device:
     from marcellus.push.situations import parse_situations
 
     situations = parse_situations(_json_or(_col(row, "situations"), []))
+    slots_raw = _json_or(_col(row, "doorbell_slots"), None)
+    doorbell_slots: tuple[str, str, str] | None = None
+    if isinstance(slots_raw, list) and len(slots_raw) == 3:
+        doorbell_slots = (str(slots_raw[0]), str(slots_raw[1]), str(slots_raw[2]))
     loc = _json_or(_col(row, "location"), None)
     location: tuple[float, float] | None = None
     if isinstance(loc, dict):
@@ -86,6 +90,7 @@ def _row_to_device(row: sqlite3.Row) -> Device:
         doorbell_rings=bool(
             int(_col(row, "doorbell_rings", 1) if _col(row, "doorbell_rings", 1) is not None else 1)
         ),
+        doorbell_slots=doorbell_slots,
     )
 
 
@@ -115,6 +120,7 @@ def upsert_device(
     la_capable: bool = True,
     frequent_pushes_enabled: bool = False,
     doorbell_rings: bool = True,
+    doorbell_slots: list[str] | None = None,
 ) -> str:
     """Idempotent PUT on the token (spec §1) -- overwrites filter state in
     place rather than accumulating duplicate rows that would double-fire
@@ -131,8 +137,8 @@ def upsert_device(
         "(apns_token, device_id, bundle_id, environment, app_version, cameras, labels, "
         " min_severity, registered_at, updated_at, schema_version, timezone, location, "
         " situations, live_activity_token, morning_digest, llm, push_to_start_token, "
-        " la_capable, frequent_pushes_enabled, doorbell_rings) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " la_capable, frequent_pushes_enabled, doorbell_rings, doorbell_slots) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(apns_token) DO UPDATE SET "
         "bundle_id=excluded.bundle_id, environment=excluded.environment, "
         "app_version=excluded.app_version, cameras=excluded.cameras, labels=excluded.labels, "
@@ -144,21 +150,35 @@ def upsert_device(
         "la_capable=excluded.la_capable, "
         "frequent_pushes_enabled=excluded.frequent_pushes_enabled, "
         "doorbell_rings=excluded.doorbell_rings, "
+        "doorbell_slots=excluded.doorbell_slots, "
         # A re-registration that omits the token must not blank a working one:
         # the app uploads it from an async token stream, so the first PUT after
         # launch can legitimately race ahead of the token arriving.
         "push_to_start_token=CASE WHEN excluded.push_to_start_token != '' "
         " THEN excluded.push_to_start_token ELSE push_devices.push_to_start_token END",
         (
-            apns_token, device_id, bundle_id, environment, app_version,
-            json.dumps(cameras or []), json.dumps(labels or []), min_severity, now, now,
-            int(schema_version), timezone_name,
+            apns_token,
+            device_id,
+            bundle_id,
+            environment,
+            app_version,
+            json.dumps(cameras or []),
+            json.dumps(labels or []),
+            min_severity,
+            now,
+            now,
+            int(schema_version),
+            timezone_name,
             json.dumps(location) if location else None,
-            json.dumps(situations or []), live_activity_token,
+            json.dumps(situations or []),
+            live_activity_token,
             json.dumps(morning_digest) if morning_digest is not None else None,
             json.dumps(llm) if llm is not None else None,
-            push_to_start_token, int(la_capable), int(frequent_pushes_enabled),
+            push_to_start_token,
+            int(la_capable),
+            int(frequent_pushes_enabled),
             int(doorbell_rings),
+            json.dumps(doorbell_slots) if doorbell_slots is not None else None,
         ),
     )
     # Commits itself (spec Wave 2B §3): sqlite3's default isolation leaves
@@ -866,3 +886,28 @@ def prune_expired_handles(conn: sqlite3.Connection, *, now: float | None = None)
     cur = conn.execute("DELETE FROM push_handles WHERE expires_at <= ?", (now,))
     conn.commit()
     return cur.rowcount
+
+
+def record_doorbell_action(
+    conn: sqlite3.Connection,
+    *,
+    camera: str,
+    option_id: str | None,
+    type_: str,
+    text: str | None,
+    reset_at: int | None,
+    ok: bool,
+    status_code: int | None,
+    error: str | None,
+    now: float | None = None,
+) -> None:
+    """One row per `/v1/doorbell/{camera}/lcd` attempt (M-2), success or
+    failure -- `routes/protect.py` writes this on every attempt."""
+    now = time.time() if now is None else now
+    conn.execute(
+        "INSERT INTO doorbell_actions "
+        "(ts, camera, option_id, type, text, reset_at, ok, status_code, error) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (now, camera, option_id, type_, text, reset_at, int(ok), status_code, error),
+    )
+    conn.commit()

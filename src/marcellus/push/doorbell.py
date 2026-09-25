@@ -18,13 +18,18 @@ one physical press into a single push.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
+
 from marcellus.push import store
 from marcellus.push.models import Device
+from marcellus.push.thumbnails import fetch_thumbnail
 from marcellus.push.transport import PushTransport, TransportResult
 
 logger = logging.getLogger(__name__)
@@ -40,6 +45,16 @@ _MUTATION = "ring"
 #: restart re-arming the dedup window is fine, this only ever needs to
 #: survive within one process's uptime.
 _last_ring_sent_at: dict[str, float] = {}
+
+#: Hard ceiling on the combined Protect-then-Frigate snapshot prewarm
+#: (fix 2, review blocker): a dead console must never push the ring send
+#: itself past this. Kept well under APNs' own delivery expectations.
+DEFAULT_SNAPSHOT_PREWARM_TIMEOUT_S = 5.0
+
+#: The Frigate leg's own budget within that combined window -- must leave
+#: room for the Protect attempt (which has already run by the time this
+#: fires) rather than being able to consume the whole outer timeout itself.
+DEFAULT_FRIGATE_FALLBACK_TIMEOUT_S = 2.5
 
 
 def reset_ring_dedup_for_tests() -> None:
@@ -79,11 +94,45 @@ def _local_time_str(epoch: float, tz_name: str) -> str | None:
         return None
 
 
-def is_dedup_window_active(
-    camera: str, *, now: float, window_s: float
-) -> bool:
+def is_dedup_window_active(camera: str, *, now: float, window_s: float) -> bool:
     last = _last_ring_sent_at.get(camera)
     return last is not None and (now - last) < window_s
+
+
+#: M-2 default slot order for a device that has never set its own
+#: `doorbell_slots` -- must match `config._default_lcd_presets`' keys.
+DEFAULT_LCD_SLOT_IDS = ("leave_package", "be_right_there", "do_not_disturb")
+
+
+def resolve_lcd_slots(
+    slot_ids: tuple[str, ...],
+    *,
+    presets: dict[str, Any],
+    animations: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    """Resolve up to 3 configured option ids into the ring payload's
+    `doorbell.lcd_slots` (M-2 spec point 5).
+
+    Drops any id that no longer resolves to a known preset or image, keeping
+    the `slot` numbering as the id's original 1-based position in the
+    device's slot list -- NOT a sequential renumbering after dropping
+    unresolvable ids. A device's slot buttons are fixed physical/UI
+    positions, so if slot 2 no longer resolves, the remaining output must
+    still say `slot: 3` for what was configured third, not `slot: 2`.
+    """
+    animations_by_id = {a["id"]: a for a in animations}
+    resolved: list[dict[str, Any]] = []
+    for position, slot_id in enumerate(slot_ids, start=1):
+        title: str | None = None
+        if slot_id in presets:
+            preset = presets[slot_id]
+            title = preset.title if hasattr(preset, "title") else preset.get("title")
+        elif slot_id in animations_by_id:
+            title = animations_by_id[slot_id]["title"]
+        if title is None:
+            continue
+        resolved.append({"slot": position, "id": slot_id, "title": title})
+    return resolved
 
 
 def build_ring_payload(
@@ -93,6 +142,10 @@ def build_ring_payload(
     protect_event_id: str,
     device_timezone: str = "",
     now: float | None = None,
+    has_lcd: bool = False,
+    lcd_slots: list[dict[str, Any]] | None = None,
+    custom_reply_max_chars: int = 30,
+    custom_reply_duration_s: int = 120,
 ) -> dict[str, Any]:
     """The full APNs body for one doorbell-ring push.
 
@@ -113,14 +166,18 @@ def build_ring_payload(
         "thread-id": "doorbell",
         "mutable-content": 1,
     }
-    payload: dict[str, Any] = {
-        "aps": aps,
-        "doorbell": {
-            "camera": frigate_camera,
-            "protect_event_id": protect_event_id,
-            "ts": round(now, 3),
-        },
+    doorbell: dict[str, Any] = {
+        "camera": frigate_camera,
+        "protect_event_id": protect_event_id,
+        "ts": round(now, 3),
     }
+    if has_lcd:
+        doorbell["lcd_slots"] = lcd_slots or []
+        doorbell["custom_reply"] = {
+            "max_chars": custom_reply_max_chars,
+            "duration_s": custom_reply_duration_s,
+        }
+    payload: dict[str, Any] = {"aps": aps, "doorbell": doorbell}
     if media:
         payload["media"] = media
     return payload
@@ -148,6 +205,16 @@ async def handle_ring(
     situation_handle_ttl_s: float,
     ring_dedup_seconds: float,
     now: float | None = None,
+    has_lcd: bool = False,
+    lcd_presets: dict[str, Any] | None = None,
+    animations: list[dict[str, str]] | None = None,
+    custom_reply_max_chars: int = 30,
+    custom_reply_duration_s: int = 120,
+    ring_snapshot: str = "frigate",
+    protect_snapshot_fetcher: Callable[[str], Awaitable[bytes | None]] | None = None,
+    http_client: httpx.AsyncClient | None = None,
+    snapshot_prewarm_timeout_s: float = DEFAULT_SNAPSHOT_PREWARM_TIMEOUT_S,
+    frigate_fallback_timeout_s: float = DEFAULT_FRIGATE_FALLBACK_TIMEOUT_S,
 ) -> RingOutcome:
     """Send one ring to every eligible device. `conn` is an already-open
     sidecar DB connection (caller owns its lifecycle, same convention as
@@ -157,15 +224,16 @@ async def handle_ring(
     frigate_camera = frigate_camera_for(protect_camera_id, cameras)
     if frigate_camera is None:
         logger.debug(
-            "unifi_protect: ring for unmapped camera id=%s -- add it to "
-            "unifi_protect.cameras", protect_camera_id,
+            "unifi_protect: ring for unmapped camera id=%s -- add it to unifi_protect.cameras",
+            protect_camera_id,
         )
         return RingOutcome(frigate_camera=None, sent=0, skipped_unmapped=True)
 
     if is_dedup_window_active(frigate_camera, now=now, window_s=ring_dedup_seconds):
         logger.debug(
             "unifi_protect: dropping duplicate ring for camera=%s (dedup window %.0fs)",
-            frigate_camera, ring_dedup_seconds,
+            frigate_camera,
+            ring_dedup_seconds,
         )
         return RingOutcome(frigate_camera=frigate_camera, sent=0, skipped_dedup=True)
 
@@ -185,22 +253,81 @@ async def handle_ring(
         )
         media = f"{external_base_url.rstrip('/')}/v1/push/thumbnail/{handle}"
 
+        async def _prewarm() -> bytes | None:
+            jpeg: bytes | None = None
+            if ring_snapshot == "protect" and protect_snapshot_fetcher is not None:
+                jpeg = await protect_snapshot_fetcher(protect_camera_id)
+            if jpeg is None and frigate_base_url:
+                if http_client is not None:
+                    jpeg = await fetch_thumbnail(
+                        http_client,
+                        frigate_base_url=frigate_base_url,
+                        camera=frigate_camera,
+                        event_id="",
+                        timeout=frigate_fallback_timeout_s,
+                    )
+                else:
+                    # No shared client was supplied (e.g. a caller/test that
+                    # doesn't have one handy) -- fall back to a short-lived
+                    # client rather than require one everywhere.
+                    async with httpx.AsyncClient() as client:
+                        jpeg = await fetch_thumbnail(
+                            client,
+                            frigate_base_url=frigate_base_url,
+                            camera=frigate_camera,
+                            event_id="",
+                            timeout=frigate_fallback_timeout_s,
+                        )
+            return jpeg
+
+        # Fix 2 (review blocker): the Protect fetch (up to its own 5s
+        # timeout) plus the Frigate fallback fetch could together take up to
+        # ~10s worst case, delaying the ring push past any reasonable bound
+        # if the console is dead. Bound the combined attempt and, on
+        # timeout, fall back to the pre-this-PR behavior -- mint the handle
+        # without prewarmed bytes -- rather than let the exception propagate
+        # and block/fail the send.
+        jpeg = None
+        try:
+            jpeg = await asyncio.wait_for(_prewarm(), timeout=snapshot_prewarm_timeout_s)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "unifi_protect: snapshot prewarm for camera=%s timed out after %.1fs, "
+                "sending ring without a prewarmed thumbnail",
+                frigate_camera,
+                snapshot_prewarm_timeout_s,
+            )
+        if jpeg:
+            store.store_thumbnail(conn, handle, jpeg)
+
     collapse_id = f"ring:{frigate_camera}"
     card_key = f"{_CARD_KEY_PREFIX}{frigate_camera}"
+    presets = lcd_presets or {}
+    anims = animations or []
     sent = 0
     for device in eligible:
         snoozed = store.active_snoozes(conn, device.apns_token, now=now)
         if not _should_send(device, frigate_camera=frigate_camera, snoozed_scopes=snoozed):
             continue
+        lcd_slots: list[dict[str, Any]] | None = None
+        if has_lcd:
+            slot_ids = device.doorbell_slots or DEFAULT_LCD_SLOT_IDS
+            lcd_slots = resolve_lcd_slots(tuple(slot_ids), presets=presets, animations=anims)
         payload = build_ring_payload(
             frigate_camera=frigate_camera,
             media=media,
             protect_event_id=protect_event_id,
             device_timezone=device.timezone,
             now=now,
+            has_lcd=has_lcd,
+            lcd_slots=lcd_slots,
+            custom_reply_max_chars=custom_reply_max_chars,
+            custom_reply_duration_s=custom_reply_duration_s,
         )
         result: TransportResult = await transport.send_situation(
-            device, payload=payload, collapse_id=collapse_id,
+            device,
+            payload=payload,
+            collapse_id=collapse_id,
         )
         store.record_card_send(
             conn,
@@ -216,13 +343,15 @@ async def handle_ring(
         elif result.unregistered:
             logger.info(
                 "unifi_protect: pruning device %s after ring send (%s)",
-                device.device_id, result.error,
+                device.device_id,
+                result.error,
             )
             store.delete_device(conn, device.apns_token)
         else:
             logger.warning(
                 "unifi_protect: ring send failed for device %s: %s",
-                device.device_id, result.error,
+                device.device_id,
+                result.error,
             )
 
     if sent > 0 or eligible:

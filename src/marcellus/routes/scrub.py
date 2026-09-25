@@ -136,7 +136,8 @@ def _protect_capabilities(settings: Any, app_state: Any) -> dict[str, Any]:
     least one cycle -- `has_lcd` defaults `False` on every
     `ProtectCameraStatus` the loop hasn't populated yet, so this naturally
     reads `False` pre-poll without a separate "polled yet" check.
-    `ring_snapshot` is hardcoded `False`: M-2 turns it on.
+    `ring_snapshot` (M-2) is `True` only when the feature is enabled and
+    `unifi_protect.ring_snapshot == "protect"`.
     """
     section = settings.unifi_protect
     if not section.enabled:
@@ -150,7 +151,7 @@ def _protect_capabilities(settings: Any, app_state: Any) -> dict[str, Any]:
         "enabled": True,
         "cameras": cameras,
         "lcd_message": lcd_message,
-        "ring_snapshot": False,
+        "ring_snapshot": section.ring_snapshot == "protect",
     }
 
 

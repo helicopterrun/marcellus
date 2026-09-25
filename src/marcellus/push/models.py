@@ -117,6 +117,9 @@ class Device:
     frequent_pushes_enabled: bool = False
     #: UniFi Protect doorbell ring -> push opt-out. On by default.
     doorbell_rings: bool = True
+    #: M-2: this device's 3 doorbell-LCD quick-reply slot ids, or `None` to
+    #: use `unifi_protect.lcd_presets`' default order.
+    doorbell_slots: tuple[str, str, str] | None = None
 
     @property
     def can_live_activity(self) -> bool:

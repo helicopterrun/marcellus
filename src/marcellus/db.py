@@ -137,7 +137,13 @@ CREATE TABLE IF NOT EXISTS push_devices (
     -- default: a ring is a person at the door, and a device that never
     -- opted in still expects to hear about that unless it explicitly
     -- turns it off.
-    doorbell_rings INTEGER NOT NULL DEFAULT 1
+    doorbell_rings INTEGER NOT NULL DEFAULT 1,
+    -- M-2: this device's 3 doorbell-LCD quick-reply slot ids (JSON list of
+    -- exactly 3 strings), or NULL to use `unifi_protect.lcd_presets`'
+    -- default order. Ids are resolved lazily at send/read time, not
+    -- validated against current presets/images here -- a slot can reference
+    -- a preset that's since been removed and just gets dropped then.
+    doorbell_slots TEXT
 );
 
 -- Opaque, sidecar-minted, short-lived handles standing in for
@@ -605,6 +611,23 @@ CREATE TABLE IF NOT EXISTS camera_transitions (
     updated_at REAL NOT NULL,
     PRIMARY KEY (cam_a, cam_b, family)
 );
+
+-- M-2: one row per doorbell-LCD action attempt (preset/image/custom-text),
+-- success or failure -- the audit trail for "what did we tell the console
+-- to show" independent of push delivery.
+CREATE TABLE IF NOT EXISTS doorbell_actions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL NOT NULL,
+    camera      TEXT NOT NULL,
+    option_id   TEXT,
+    type        TEXT NOT NULL,
+    text        TEXT,
+    reset_at    INTEGER,
+    ok          INTEGER NOT NULL,
+    status_code INTEGER,
+    error       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_doorbell_actions_camera_ts ON doorbell_actions(camera, ts);
 """
 
 # Columns added to `push_devices` / `push_handles` after those tables first
@@ -658,6 +681,9 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("frequent_pushes_enabled", "INTEGER NOT NULL DEFAULT 0"),
         # UniFi Protect doorbell ring -> push opt-out (push/doorbell.py).
         ("doorbell_rings", "INTEGER NOT NULL DEFAULT 1"),
+        # M-2: this device's 3 doorbell-LCD quick-reply slot ids (JSON), or
+        # NULL for the config default order.
+        ("doorbell_slots", "TEXT"),
     ],
     "push_handles": [
         ("situation_id", "TEXT NOT NULL DEFAULT ''"),
