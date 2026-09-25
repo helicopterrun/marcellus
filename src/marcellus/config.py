@@ -994,6 +994,20 @@ class UnifiProtectSection(BaseModel):
     # deliver a duplicate "add" event for one physical press.
     ring_dedup_seconds: float = 20.0
 
+    # How often `ProtectRingSubscriber.device_poll_loop` polls
+    # `/proxy/protect/integration/v1/cameras` for camera-health (online/lcd
+    # state), independent of the ring websocket. Floored at 15s -- this is a
+    # REST poll against the same console, not worth hammering faster than
+    # that for state that changes rarely.
+    device_poll_seconds: float = 60.0
+
+    @field_validator("device_poll_seconds")
+    @classmethod
+    def _min_device_poll_seconds(cls, v: float) -> float:
+        if v < 15:
+            raise ValueError(f"unifi_protect.device_poll_seconds must be >= 15, got {v!r}")
+        return v
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(

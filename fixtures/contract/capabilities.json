@@ -36,5 +36,11 @@
     "enabled": true,
     "related_events": true
   },
+  "unifi_protect": {
+    "cameras": [],
+    "enabled": false,
+    "lcd_message": false,
+    "ring_snapshot": false
+  },
   "version": "0.3.0"
 }

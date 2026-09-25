@@ -468,6 +468,32 @@ def record_card_send(
     conn.commit()
 
 
+def last_ring_at_per_camera(
+    conn: sqlite3.Connection, *, frigate_cameras: list[str]
+) -> dict[str, float]:
+    """Most recent ring `sent_at` per Frigate camera, from `push_card_sends`
+    (`doorbell.py`'s `card_key = "doorbell:<camera>"`, `mutation = "ring"`).
+
+    Used by `GET /v1/protect/status` (M-1) -- a ring may have gone to
+    several devices, so this is `MAX(sent_at)` across all of them per
+    camera, not a single row.
+    """
+    if not frigate_cameras:
+        return {}
+    placeholders = ",".join("?" for _ in frigate_cameras)
+    card_keys = [f"doorbell:{cam}" for cam in frigate_cameras]
+    rows = conn.execute(
+        f"SELECT card_key, MAX(sent_at) AS last_sent_at FROM push_card_sends "
+        f"WHERE mutation = 'ring' AND card_key IN ({placeholders}) GROUP BY card_key",
+        card_keys,
+    ).fetchall()
+    result: dict[str, float] = {}
+    for row in rows:
+        camera = str(row["card_key"])[len("doorbell:") :]
+        result[camera] = float(row["last_sent_at"])
+    return result
+
+
 def device_stats(
     conn: sqlite3.Connection, apns_token: str, *, window_days: float = 7.0, now: float | None = None
 ) -> dict[str, Any]:

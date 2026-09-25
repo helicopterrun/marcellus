@@ -47,6 +47,7 @@ from marcellus.routes import map_page as map_page_routes
 from marcellus.routes import motion as motion_routes
 from marcellus.routes import observations as observations_routes
 from marcellus.routes import placement as placement_routes
+from marcellus.routes import protect as protect_routes
 from marcellus.routes import proxy as proxy_routes
 from marcellus.routes import push as push_routes
 from marcellus.routes import push_floorplan as push_floorplan_routes
@@ -536,6 +537,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     sweep_task: asyncio.Task[None] | None = None
     delivery_sweep_task: asyncio.Task[None] | None = None
     protect_task: asyncio.Task[None] | None = None
+    protect_poll_task: asyncio.Task[None] | None = None
     if settings.push.enabled:
         from marcellus import db
         from marcellus.push import card_store, policy_settings
@@ -602,11 +604,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         delivery_sweep_task = asyncio.create_task(_delivery_resound_sweep_loop(app))
 
         if settings.unifi_protect.enabled:
-            protect_subscriber = ProtectRingSubscriber(
-                settings.unifi_protect, _make_on_ring(app)
-            )
+            protect_subscriber = ProtectRingSubscriber(settings.unifi_protect, _make_on_ring(app))
             app.state.protect_subscriber = protect_subscriber
             protect_task = asyncio.create_task(_protect_ring_loop(app))
+            protect_poll_task = asyncio.create_task(protect_subscriber.device_poll_loop())
     elif settings.unifi_protect.enabled:
         logger.warning(
             "unifi_protect.enabled is true but push.enabled is false -- doorbell "
@@ -635,6 +636,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             sweep_task,
             delivery_sweep_task,
             protect_task,
+            protect_poll_task,
             enrich_task,
             encounters_task,
             encounters_worker_task,
@@ -764,6 +766,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(scrub_routes.router)
     app.include_router(search_routes.router)
     app.include_router(push_routes.router)
+    app.include_router(protect_routes.router)
     app.include_router(push_settings_routes.router)
     app.include_router(tuning_routes.router)
     app.include_router(push_floorplan_routes.router)
