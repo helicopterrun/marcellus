@@ -43,7 +43,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
@@ -152,6 +152,15 @@ class ProtectCameraStatus:
         }
 
 
+def _strip_sprite_title(original_name: str) -> str:
+    """Image title = `originalName` with a trailing `.gif.png`, `.png`, or
+    `.gif` suffix stripped, checked in that order (M-2, console fact)."""
+    for suffix in (".gif.png", ".png", ".gif"):
+        if original_name.endswith(suffix):
+            return original_name[: -len(suffix)]
+    return original_name
+
+
 class ProtectRingSubscriber:
     """Owns the Protect websocket connection; hands parsed `RingEvent`s to
     `on_ring`.
@@ -182,6 +191,14 @@ class ProtectRingSubscriber:
         self.cameras: dict[str, ProtectCameraStatus] = {}
         self.last_poll_at: float | None = None
         self.last_poll_error: str | None = None
+        #: M-2: `GET .../files/animations`' usable sprite entries, each
+        #: `{"id": "image:<name>", "title": <stripped originalName>}`. Kept
+        #: across a failed poll (stale beats empty, same as `self.cameras`).
+        self.animations: list[dict[str, str]] = []
+        #: Serializes `set_lcd_message` PATCH calls across every camera and
+        #: enforces the >=1s console-write spacing (M-2 console fact).
+        self._lcd_lock = asyncio.Lock()
+        self._last_lcd_write_at: float | None = None
 
     # -- status (Push Doctor) -------------------------------------------------
 
@@ -342,6 +359,37 @@ class ProtectRingSubscriber:
         self.last_poll_error = None
         self.last_poll_at = now
 
+    async def poll_animations_once(self) -> None:
+        """One `GET /proxy/protect/integration/v1/files/animations` (M-2).
+
+        Keeps only sprite entries (`name` ends `.png`, not `.png.gif`, the
+        latter being a preview). Non-fatal: on any failure, leaves the
+        previously-known `self.animations` list untouched.
+        """
+        base = self.settings.console_url.rstrip("/")
+        headers = {"X-API-KEY": self.settings.api_key}
+        url = f"{base}/proxy/protect/integration/v1/files/animations"
+        try:
+            resp = await self._client.get(url, headers=headers)
+            resp.raise_for_status()
+            files = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("unifi_protect: animations poll failed: %s", _exc_str(exc))
+            return
+        if not isinstance(files, list):
+            return
+        animations: list[dict[str, str]] = []
+        for entry in files:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if not isinstance(name, str) or not name.endswith(".png") or name.endswith(".png.gif"):
+                continue
+            original_name = entry.get("originalName")
+            title = _strip_sprite_title(original_name if isinstance(original_name, str) else name)
+            animations.append({"id": f"image:{name}", "title": title, "name": name})
+        self.animations = animations
+
     async def device_poll_loop(self) -> None:
         """Runs `poll_devices_once` on a `settings.device_poll_seconds`
         cadence until `stop()`. Fetches `/meta/info` once before the first
@@ -363,10 +411,74 @@ class ProtectRingSubscriber:
                 self.last_poll_error = _exc_str(exc)
                 self.last_poll_at = time.time()
                 logger.exception("unifi_protect: device poll loop error: %s", _exc_str(exc))
+            if self._stopped:
+                break
+            await asyncio.sleep(2.0)
+            try:
+                await self.poll_animations_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - never let one bad cycle kill the loop
+                logger.exception("unifi_protect: animations poll loop error: %s", _exc_str(exc))
             for _ in range(int(self.settings.device_poll_seconds)):
                 if self._stopped:
                     break
                 await asyncio.sleep(1.0)
+
+    # -- LCD replies (M-2) --------------------------------------------------
+
+    async def set_lcd_message(self, protect_id: str, lcd_message: dict[str, Any]) -> dict[str, Any]:
+        """`PATCH /proxy/protect/integration/v1/cameras/{id}` with
+        `{"lcdMessage": lcd_message}`.
+
+        Serialized with `self._lcd_lock` (one lock shared across every
+        camera -- the spec only requires console writes be serialized, not
+        parallelized per-camera) and spaced >=1s apart from the previous
+        console write. Raises `httpx.HTTPStatusError`/`httpx.HTTPError` on
+        failure after one retry (2s sleep) for a 429/503; the caller maps
+        that to a 502.
+        """
+        base = self.settings.console_url.rstrip("/")
+        headers = {"X-API-KEY": self.settings.api_key}
+        url = f"{base}/proxy/protect/integration/v1/cameras/{protect_id}"
+        async with self._lcd_lock:
+            if self._last_lcd_write_at is not None:
+                elapsed = time.time() - self._last_lcd_write_at
+                if elapsed < 1.0:
+                    await asyncio.sleep(1.0 - elapsed)
+
+            async def _attempt() -> httpx.Response:
+                resp = await self._client.patch(
+                    url, headers=headers, json={"lcdMessage": lcd_message}, timeout=8.0
+                )
+                return resp
+
+            resp = await _attempt()
+            if resp.status_code == 429 or resp.status_code == 503:
+                await asyncio.sleep(2.0)
+                resp = await _attempt()
+            self._last_lcd_write_at = time.time()
+            resp.raise_for_status()
+            return cast(dict[str, Any], resp.json())
+
+    async def fetch_snapshot(self, protect_id: str) -> bytes | None:
+        """`GET /cameras/{id}/snapshot?highQuality=true` (M-2). Returns
+        `None` on any failure -- the caller falls back to Frigate's own
+        `latest.jpg`."""
+        base = self.settings.console_url.rstrip("/")
+        headers = {"X-API-KEY": self.settings.api_key}
+        url = f"{base}/proxy/protect/integration/v1/cameras/{protect_id}/snapshot"
+        try:
+            resp = await self._client.get(
+                url, headers=headers, params={"highQuality": "true"}, timeout=5.0
+            )
+            resp.raise_for_status()
+            return resp.content
+        except httpx.HTTPError as exc:
+            logger.info(
+                "unifi_protect: snapshot fetch failed for %s: %s", protect_id, _exc_str(exc)
+            )
+            return None
 
     # -- websocket loop ----------------------------------------------------
 

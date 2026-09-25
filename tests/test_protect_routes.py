@@ -59,7 +59,9 @@ def test_capabilities_protect_enabled_no_poll_yet(_base_settings_kwargs: dict) -
     # on `with`), so no protect_subscriber is attached -- lcd_message stays
     # False, same as "polled yet" being False.
     assert body["lcd_message"] is False
-    assert body["ring_snapshot"] is False
+    # ring_snapshot only depends on the config switch (default "protect"),
+    # not on whether the device-poll loop has run yet.
+    assert body["ring_snapshot"] is True
 
 
 def test_protect_status_disabled_feature(_base_settings_kwargs: dict) -> None:

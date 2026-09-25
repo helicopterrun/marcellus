@@ -327,6 +327,14 @@ def _make_on_ring(app: FastAPI) -> Callable[[Any], Awaitable[None]]:
         # transport), so -- unlike `db.with_sidecar`'s sync-callback-in-a-
         # -thread shape -- the connection is opened directly here and
         # committed/closed around the whole call.
+        subscriber: ProtectRingSubscriber | None = getattr(app.state, "protect_subscriber", None)
+        has_lcd = False
+        animations: list[dict[str, str]] = []
+        if subscriber is not None:
+            cam_status = subscriber.cameras.get(ring.protect_camera_id)
+            has_lcd = bool(cam_status and cam_status.has_lcd)
+            animations = subscriber.animations
+
         conn = db.open_sidecar(str(settings.sidecar.db_path))
         try:
             outcome = await doorbell.handle_ring(
@@ -339,6 +347,13 @@ def _make_on_ring(app: FastAPI) -> Callable[[Any], Awaitable[None]]:
                 external_base_url=settings.push.external_base_url,
                 situation_handle_ttl_s=settings.push.situation_handle_ttl_s,
                 ring_dedup_seconds=settings.unifi_protect.ring_dedup_seconds,
+                has_lcd=has_lcd,
+                lcd_presets=settings.unifi_protect.lcd_presets,
+                animations=animations,
+                custom_reply_max_chars=settings.unifi_protect.custom_reply_max_chars,
+                custom_reply_duration_s=settings.unifi_protect.custom_reply_duration_s,
+                ring_snapshot=settings.unifi_protect.ring_snapshot,
+                protect_snapshot_fetcher=(subscriber.fetch_snapshot if subscriber else None),
             )
             conn.commit()
         finally:
@@ -769,6 +784,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(search_routes.router)
     app.include_router(push_routes.router)
     app.include_router(protect_routes.router)
+    app.include_router(protect_routes.doorbell_router)
     app.include_router(push_settings_routes.router)
     app.include_router(tuning_routes.router)
     app.include_router(push_floorplan_routes.router)

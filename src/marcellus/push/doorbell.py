@@ -20,11 +20,15 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
+
 from marcellus.push import store
 from marcellus.push.models import Device
+from marcellus.push.thumbnails import fetch_thumbnail
 from marcellus.push.transport import PushTransport, TransportResult
 
 logger = logging.getLogger(__name__)
@@ -86,6 +90,40 @@ def is_dedup_window_active(
     return last is not None and (now - last) < window_s
 
 
+#: M-2 default slot order for a device that has never set its own
+#: `doorbell_slots` -- must match `config._default_lcd_presets`' keys.
+DEFAULT_LCD_SLOT_IDS = ("leave_package", "be_right_there", "do_not_disturb")
+
+
+def resolve_lcd_slots(
+    slot_ids: tuple[str, ...],
+    *,
+    presets: dict[str, Any],
+    animations: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    """Resolve up to 3 configured option ids into the ring payload's
+    `doorbell.lcd_slots` (M-2 spec point 5).
+
+    Drops any id that no longer resolves to a known preset or image, keeping
+    the `slot` numbering as the 1-based position in the *resolved* list --
+    i.e. iterate the configured ids in order, resolve each, and number only
+    the resolved ones sequentially starting at 1.
+    """
+    animations_by_id = {a["id"]: a for a in animations}
+    resolved: list[dict[str, Any]] = []
+    for slot_id in slot_ids:
+        title: str | None = None
+        if slot_id in presets:
+            preset = presets[slot_id]
+            title = preset.title if hasattr(preset, "title") else preset.get("title")
+        elif slot_id in animations_by_id:
+            title = animations_by_id[slot_id]["title"]
+        if title is None:
+            continue
+        resolved.append({"slot": len(resolved) + 1, "id": slot_id, "title": title})
+    return resolved
+
+
 def build_ring_payload(
     *,
     frigate_camera: str,
@@ -93,6 +131,10 @@ def build_ring_payload(
     protect_event_id: str,
     device_timezone: str = "",
     now: float | None = None,
+    has_lcd: bool = False,
+    lcd_slots: list[dict[str, Any]] | None = None,
+    custom_reply_max_chars: int = 30,
+    custom_reply_duration_s: int = 120,
 ) -> dict[str, Any]:
     """The full APNs body for one doorbell-ring push.
 
@@ -113,14 +155,18 @@ def build_ring_payload(
         "thread-id": "doorbell",
         "mutable-content": 1,
     }
-    payload: dict[str, Any] = {
-        "aps": aps,
-        "doorbell": {
-            "camera": frigate_camera,
-            "protect_event_id": protect_event_id,
-            "ts": round(now, 3),
-        },
+    doorbell: dict[str, Any] = {
+        "camera": frigate_camera,
+        "protect_event_id": protect_event_id,
+        "ts": round(now, 3),
     }
+    if has_lcd:
+        doorbell["lcd_slots"] = lcd_slots or []
+        doorbell["custom_reply"] = {
+            "max_chars": custom_reply_max_chars,
+            "duration_s": custom_reply_duration_s,
+        }
+    payload: dict[str, Any] = {"aps": aps, "doorbell": doorbell}
     if media:
         payload["media"] = media
     return payload
@@ -148,6 +194,13 @@ async def handle_ring(
     situation_handle_ttl_s: float,
     ring_dedup_seconds: float,
     now: float | None = None,
+    has_lcd: bool = False,
+    lcd_presets: dict[str, Any] | None = None,
+    animations: list[dict[str, str]] | None = None,
+    custom_reply_max_chars: int = 30,
+    custom_reply_duration_s: int = 120,
+    ring_snapshot: str = "frigate",
+    protect_snapshot_fetcher: Callable[[str], Awaitable[bytes | None]] | None = None,
 ) -> RingOutcome:
     """Send one ring to every eligible device. `conn` is an already-open
     sidecar DB connection (caller owns its lifecycle, same convention as
@@ -185,19 +238,40 @@ async def handle_ring(
         )
         media = f"{external_base_url.rstrip('/')}/v1/push/thumbnail/{handle}"
 
+        jpeg: bytes | None = None
+        if ring_snapshot == "protect" and protect_snapshot_fetcher is not None:
+            jpeg = await protect_snapshot_fetcher(protect_camera_id)
+        if jpeg is None and frigate_base_url:
+            async with httpx.AsyncClient() as client:
+                jpeg = await fetch_thumbnail(
+                    client, frigate_base_url=frigate_base_url, camera=frigate_camera, event_id=""
+                )
+        if jpeg:
+            store.store_thumbnail(conn, handle, jpeg)
+
     collapse_id = f"ring:{frigate_camera}"
     card_key = f"{_CARD_KEY_PREFIX}{frigate_camera}"
+    presets = lcd_presets or {}
+    anims = animations or []
     sent = 0
     for device in eligible:
         snoozed = store.active_snoozes(conn, device.apns_token, now=now)
         if not _should_send(device, frigate_camera=frigate_camera, snoozed_scopes=snoozed):
             continue
+        lcd_slots: list[dict[str, Any]] | None = None
+        if has_lcd:
+            slot_ids = device.doorbell_slots or DEFAULT_LCD_SLOT_IDS
+            lcd_slots = resolve_lcd_slots(tuple(slot_ids), presets=presets, animations=anims)
         payload = build_ring_payload(
             frigate_camera=frigate_camera,
             media=media,
             protect_event_id=protect_event_id,
             device_timezone=device.timezone,
             now=now,
+            has_lcd=has_lcd,
+            lcd_slots=lcd_slots,
+            custom_reply_max_chars=custom_reply_max_chars,
+            custom_reply_duration_s=custom_reply_duration_s,
         )
         result: TransportResult = await transport.send_situation(
             device, payload=payload, collapse_id=collapse_id,

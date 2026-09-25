@@ -51,6 +51,20 @@ def reset_test_rate_limit_for_tests() -> None:
     _last_test_push_at.clear()
 
 
+def _parse_doorbell_slots(raw: Any) -> list[str] | None:
+    if not raw:
+        return None
+    try:
+        import json as _json
+
+        value = _json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(value, list) and len(value) == 3:
+        return [str(v) for v in value]
+    return None
+
+
 class DeviceLocation(BaseModel):
     lat: float
     lon: float
@@ -116,6 +130,12 @@ class DeviceRegistration(BaseModel):
     # `snoozes` above: a relaunch PUT must not silently flip a user's
     # opt-out back on.
     doorbell_rings: bool | None = None
+
+    # M-2: this device's 3 doorbell-LCD quick-reply slot ids. `None`/absent
+    # means "the client didn't mention it" and leaves whatever is stored
+    # alone (or the config default order, for a brand-new device) -- an
+    # explicit `null` clears any device-specific slots back to that default.
+    doorbell_slots: list[str] | None = None
 
 
 class ReceiptEntry(BaseModel):
@@ -216,6 +236,16 @@ async def register_device(
     parsed = [s for s in (Situation.from_dict(s) for s in situations) if s is not None]
     schema_version = 2 if parsed else body.schema_version
 
+    slots_provided = "doorbell_slots" in (body.model_fields_set or set())
+    if slots_provided and body.doorbell_slots is not None and len(body.doorbell_slots) != 3:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_doorbell_slots",
+                "message": "doorbell_slots must be exactly 3 ids, or null",
+            },
+        )
+
     def _persist(conn: Any) -> tuple[Any, Any, Any]:
         previous = store.get_device(conn, apns_token)
         doorbell_rings = (
@@ -223,6 +253,14 @@ async def register_device(
             if body.doorbell_rings is not None
             else (previous.doorbell_rings if previous is not None else True)
         )
+        if slots_provided:
+            doorbell_slots = body.doorbell_slots
+        else:
+            doorbell_slots = (
+                list(previous.doorbell_slots)
+                if previous is not None and previous.doorbell_slots
+                else None
+            )
         device_id = store.upsert_device(
             conn,
             apns_token=apns_token,
@@ -243,6 +281,7 @@ async def register_device(
             la_capable=body.la_capable,
             frequent_pushes_enabled=body.frequent_pushes_enabled,
             doorbell_rings=doorbell_rings,
+            doorbell_slots=doorbell_slots,
         )
         if body.snoozes is not None:
             store.replace_snoozes(conn, apns_token=apns_token, snoozes=body.snoozes)
@@ -290,6 +329,7 @@ async def register_device(
         "la_capable": bool(stored.la_capable) if stored else True,
         "live_activities": bool(stored and stored.can_live_activity),
         "doorbell_rings": bool(stored.doorbell_rings) if stored else True,
+        "doorbell_slots": list(stored.doorbell_slots) if stored and stored.doorbell_slots else None,
     }
 
 
@@ -859,6 +899,7 @@ async def get_device_detail(
         "updated_at": device_row["updated_at"],
         "la_capable": bool(device_row["la_capable"]),
         "doorbell_rings": bool(device_row["doorbell_rings"]),
+        "doorbell_slots": _parse_doorbell_slots(device_row["doorbell_slots"]),
         "relay": device_relay,
         **stats,
     }

@@ -1,6 +1,7 @@
 {
   "app_version": "1.0 (309)",
   "doorbell_rings": true,
+  "doorbell_slots": null,
   "environment": "prod",
   "la_capable": true,
   "last_received_at": "2026-08-05T17:57:04Z",

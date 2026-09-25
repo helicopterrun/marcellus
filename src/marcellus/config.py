@@ -15,7 +15,7 @@ import os
 import types
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Union, get_args, get_origin
+from typing import Any, Literal, Union, get_args, get_origin
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -957,6 +957,47 @@ class PushSection(BaseModel):
         return t
 
 
+class LcdPreset(BaseModel):
+    """One configurable doorbell LCD reply (M-2, `unifi_protect.lcd_presets`).
+
+    Maps to a Protect `lcdMessage` PATCH body: `type` LEAVE_PACKAGE_AT_DOOR
+    and DO_NOT_DISTURB carry no `text`; CUSTOM_MESSAGE requires one.
+    """
+
+    type: Literal["LEAVE_PACKAGE_AT_DOOR", "DO_NOT_DISTURB", "CUSTOM_MESSAGE"]
+    text: str | None = None
+    duration_s: int
+    title: str
+
+    @field_validator("duration_s")
+    @classmethod
+    def _duration_bounds(cls, v: int) -> int:
+        if not 1 <= v <= 86400:
+            raise ValueError(f"lcd_presets duration_s must be 1..86400, got {v!r}")
+        return v
+
+    @model_validator(mode="after")
+    def _custom_message_needs_text(self) -> LcdPreset:
+        if self.type == "CUSTOM_MESSAGE" and not (self.text or "").strip():
+            raise ValueError("lcd_presets: type CUSTOM_MESSAGE requires non-empty text")
+        return self
+
+
+def _default_lcd_presets() -> dict[str, LcdPreset]:
+    return {
+        "leave_package": LcdPreset(
+            type="LEAVE_PACKAGE_AT_DOOR", duration_s=1800, title="Leave package"
+        ),
+        "be_right_there": LcdPreset(
+            type="CUSTOM_MESSAGE",
+            text="BE RIGHT THERE",
+            duration_s=120,
+            title="Be right there",
+        ),
+        "do_not_disturb": LcdPreset(type="DO_NOT_DISTURB", duration_s=3600, title="Do not disturb"),
+    }
+
+
 class UnifiProtectSection(BaseModel):
     """UniFi Protect doorbell-ring -> push notification (guide_content's
     `unifi-protect.md`).
@@ -1006,6 +1047,33 @@ class UnifiProtectSection(BaseModel):
     def _min_device_poll_seconds(cls, v: float) -> float:
         if v < 15:
             raise ValueError(f"unifi_protect.device_poll_seconds must be >= 15, got {v!r}")
+        return v
+
+    # -- M-2: doorbell LCD replies + ring snapshot ---------------------------
+    # Configurable LCD reply slots (`GET/POST /v1/doorbell/{camera}/lcd*`).
+    # Keyed by an operator-chosen id referenced from a device's
+    # `doorbell_slots`; the three defaults below are also the fallback order
+    # when a device has never set its own slots.
+    lcd_presets: dict[str, LcdPreset] = Field(default_factory=_default_lcd_presets)
+    # A device's own free-text LCD reply (`POST .../lcd` with `custom_text`)
+    # stays lit this long before the console clears it back to nothing.
+    custom_reply_duration_s: int = 120
+    # Longest normalized custom-text reply accepted; the console itself takes
+    # up to 34 chars but this stays conservative.
+    custom_reply_max_chars: int = 30
+    # An animation/image LCD reply (`GET .../files/animations`) stays lit
+    # this long.
+    image_duration_s: int = 300
+    # Which source a ring's `media` snapshot comes from: "protect" (the
+    # doorbell's own onboard snapshot) or "frigate" (today's behaviour,
+    # unchanged).
+    ring_snapshot: Literal["protect", "frigate"] = "protect"
+
+    @field_validator("custom_reply_max_chars")
+    @classmethod
+    def _custom_reply_max_chars_bounds(cls, v: int) -> int:
+        if not 1 <= v <= 64:
+            raise ValueError(f"unifi_protect.custom_reply_max_chars must be 1..64, got {v!r}")
         return v
 
 

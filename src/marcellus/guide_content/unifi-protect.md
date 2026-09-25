@@ -68,6 +68,31 @@ still mute rings, same as everything else.
   independent of the ring websocket. Surfaced at `GET /v1/protect/status`
   and in `/healthz`'s `unifi_protect` check.
 
+## Doorbell LCD replies (M-2)
+
+For a Protect doorbell with an LCD screen, a ring's push carries up to three
+quick-reply slots plus a custom-text option; `POST /v1/doorbell/{camera}/lcd`
+sends the reply to the console, `GET /v1/doorbell/{camera}/lcd/options` lists
+what's available, and `GET /v1/doorbell/{camera}/snapshot` proxies the
+doorbell's own onboard snapshot.
+
+- `lcd_presets` -- a map of preset id to `{type, text, duration_s, title}`,
+  the quick replies offered on a ring. Defaults to three presets:
+  `leave_package` (LEAVE_PACKAGE_AT_DOOR), `be_right_there` (CUSTOM_MESSAGE,
+  "BE RIGHT THERE"), `do_not_disturb` (DO_NOT_DISTURB). A `CUSTOM_MESSAGE`
+  preset must set `text`; `duration_s` (1..86400) is how long the message
+  stays on the LCD before the console clears it.
+- `custom_reply_duration_s` -- default `120` seconds a device's own free-text
+  LCD reply stays lit before clearing.
+- `custom_reply_max_chars` -- default `30` (1..64), the longest normalized
+  custom-text reply accepted.
+- `image_duration_s` -- default `300` seconds an animation/image LCD reply
+  stays lit.
+- `ring_snapshot` -- default `"protect"`; `"protect"` uses the doorbell's own
+  onboard snapshot for a ring's `media`, falling back to the Frigate
+  `latest.jpg` on any console failure. `"frigate"` uses the Frigate snapshot
+  outright, unchanged from before M-2.
+
 ## Health & capabilities
 
 `GET /healthz`'s `checks.unifi_protect` reports `ok` / `degraded` / `down`:
