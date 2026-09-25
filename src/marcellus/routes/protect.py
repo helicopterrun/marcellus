@@ -22,9 +22,9 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel
 
-from marcellus import db
+from marcellus import db, frigate_api
 from marcellus.push import store
 from marcellus.push.thumbnails import fetch_thumbnail
 from marcellus.push.unifi_protect import ProtectRingSubscriber
@@ -144,14 +144,13 @@ async def lcd_options(camera: str, request: Request) -> dict[str, Any]:
 
 
 class LcdActionRequest(BaseModel):
+    """Deliberately permissive -- both fields optional, no cross-field
+    validator -- so the "both or neither" case is a plain route-level 400
+    (matching every other input-rejection case on this route: bad
+    custom_text charset/length, etc.) instead of pydantic's automatic 422."""
+
     option_id: str | None = None
     custom_text: str | None = None
-
-    @model_validator(mode="after")
-    def _exactly_one(self) -> LcdActionRequest:
-        if bool(self.option_id) == bool(self.custom_text):
-            raise ValueError("exactly one of option_id or custom_text is required")
-        return self
 
 
 def _normalize_custom_text(text: str, *, max_chars: int) -> str:
@@ -192,6 +191,15 @@ async def lcd_action(camera: str, body: LcdActionRequest, request: Request) -> d
     section = settings.unifi_protect
     subscriber: ProtectRingSubscriber = request.app.state.protect_subscriber
     now_ms = int(time.time() * 1000)
+
+    if bool(body.option_id) == bool(body.custom_text):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": _ERR_BAD_OPTION,
+                "message": "exactly one of option_id or custom_text is required",
+            },
+        )
 
     option_id: str | None = None
     if body.option_id is not None:
@@ -281,13 +289,12 @@ async def doorbell_snapshot(camera: str, request: Request) -> Response:
     if subscriber is not None:
         jpeg = await subscriber.fetch_snapshot(protect_id)
     if jpeg is None:
-        async with httpx.AsyncClient() as client:
-            jpeg = await fetch_thumbnail(
-                client,
-                frigate_base_url=settings.frigate.base_url,
-                camera=camera,
-                event_id="",
-            )
+        jpeg = await fetch_thumbnail(
+            frigate_api.get_async_client(request.app),
+            frigate_base_url=settings.frigate.base_url,
+            camera=camera,
+            event_id="",
+        )
     if jpeg is None:
         raise HTTPException(
             status_code=502,

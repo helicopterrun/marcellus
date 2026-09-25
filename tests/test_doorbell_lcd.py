@@ -245,13 +245,13 @@ def test_action_route_both_fields_rejected(_base_settings_kwargs: dict) -> None:
         "/v1/doorbell/front_door/lcd",
         json={"option_id": "leave_package", "custom_text": "hi"},
     )
-    assert r.status_code == 422  # pydantic validation error
+    assert r.status_code == 400
 
 
 def test_action_route_neither_field_rejected(_base_settings_kwargs: dict) -> None:
     client, _sub = _client_with_subscriber(_base_settings_kwargs, has_lcd=True)
     r = client.post("/v1/doorbell/front_door/lcd", json={})
-    assert r.status_code == 422
+    assert r.status_code == 400
 
 
 def test_action_route_no_lcd_409(_base_settings_kwargs: dict) -> None:
@@ -413,14 +413,30 @@ def test_doorbell_slots_null_clears_to_default(_base_settings_kwargs: dict) -> N
 # -- payload slot resolution --------------------------------------------------
 
 
-def test_resolve_lcd_slots_drops_unknown_and_renumbers() -> None:
+def test_resolve_lcd_slots_drops_unknown_keeps_original_position() -> None:
     presets = {"a": LcdPreset(type="DO_NOT_DISTURB", duration_s=60, title="A")}
     animations = [{"id": "image:x.png", "title": "X", "name": "x.png"}]
     resolved = doorbell.resolve_lcd_slots(
         ("a", "unknown", "image:x.png"), presets=presets, animations=animations
     )
-    assert [r["slot"] for r in resolved] == [1, 2]
+    # "unknown" is slot 2 and drops out -- the third configured id must keep
+    # its original position (slot: 3), not be renumbered down to slot 2.
+    assert [r["slot"] for r in resolved] == [1, 3]
     assert [r["id"] for r in resolved] == ["a", "image:x.png"]
+
+
+def test_resolve_lcd_slots_gap_in_middle_preserved() -> None:
+    presets = {
+        "valid1": LcdPreset(type="DO_NOT_DISTURB", duration_s=60, title="Valid 1"),
+        "valid3": LcdPreset(type="DO_NOT_DISTURB", duration_s=60, title="Valid 3"),
+    }
+    resolved = doorbell.resolve_lcd_slots(
+        ("valid1", "unknown-id", "valid3"), presets=presets, animations=[]
+    )
+    assert [(r["slot"], r["id"]) for r in resolved] == [
+        (1, "valid1"),
+        (3, "valid3"),
+    ]
 
 
 def test_build_ring_payload_without_lcd_omits_keys() -> None:
@@ -484,6 +500,46 @@ def test_handle_ring_populates_lcd_slots_end_to_end(tmp_path: Path) -> None:
     sent_payload = transport.sent[0]["payload"]
     assert sent_payload["doorbell"]["lcd_slots"][0]["id"] == "leave_package"
     assert "custom_reply" in sent_payload["doorbell"]
+
+
+def test_handle_ring_snapshot_prewarm_bounded_on_dead_console(tmp_path: Path) -> None:
+    """Fix 2 (review blocker): a Protect fetcher that hangs must not delay
+    the ring send past `snapshot_prewarm_timeout_s` -- the send completes
+    with the handle minted but no prewarmed bytes, not an exception."""
+    conn = db.open_sidecar(str(tmp_path / "sidecar.db"))
+    store.upsert_device(
+        conn, apns_token="tok-1", bundle_id="com.x", environment="sandbox", cameras=[], labels=[]
+    )
+    conn.commit()
+    doorbell.reset_ring_dedup_for_tests()
+    transport = LogTransport()
+
+    async def _hanging_fetcher(_protect_camera_id: str) -> bytes | None:
+        await asyncio.sleep(10.0)
+        return b"never"
+
+    async def _run() -> doorbell.RingOutcome:
+        return await doorbell.handle_ring(
+            protect_camera_id="cam-1",
+            protect_event_id="evt-1",
+            cameras={"cam-1": "front_door"},
+            conn=conn,
+            transport=transport,
+            frigate_base_url="http://frigate.test:5000",
+            external_base_url="https://push.test",
+            situation_handle_ttl_s=3600.0,
+            ring_dedup_seconds=20.0,
+            ring_snapshot="protect",
+            protect_snapshot_fetcher=_hanging_fetcher,
+            snapshot_prewarm_timeout_s=0.05,
+            frigate_fallback_timeout_s=0.05,
+        )
+
+    start = time.monotonic()
+    outcome = asyncio.run(asyncio.wait_for(_run(), timeout=2.0))
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.0
+    assert outcome.sent == 1
 
 
 # -- snapshot proxy ------------------------------------------------------

@@ -93,6 +93,14 @@ doorbell's own onboard snapshot.
   `latest.jpg` on any console failure. `"frigate"` uses the Frigate snapshot
   outright, unchanged from before M-2.
 
+`POST /v1/doorbell/{camera}/lcd` response status codes: `400` for a bad
+request -- neither/both of `option_id`/`custom_text` present, an unknown
+`option_id`, or `custom_text` that's empty after normalization, over
+`custom_reply_max_chars`, or outside the allowed character set; `404` if
+`camera` isn't mapped to a Protect camera; `409` if the mapped camera has no
+LCD; `502` if the console accepted the request but returned an error;
+`503` if `unifi_protect` isn't enabled.
+
 ## Health & capabilities
 
 `GET /healthz`'s `checks.unifi_protect` reports `ok` / `degraded` / `down`:
