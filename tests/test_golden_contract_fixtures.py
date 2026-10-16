@@ -81,7 +81,29 @@ def _isolated_globals() -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-def _make_client(tmp: Path) -> TestClient:
+class _FakeSources:
+    """Stands in for ExternalSourceService so the capabilities golden carries
+    a populated, enabled `external_sources` block (the test client does not
+    run the lifespan, so no real service would start)."""
+
+    def capabilities(self) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "sources": [
+                {
+                    "id": "bernardo",
+                    "kind": "bernardo",
+                    "name": "Wildlife camera",
+                    "enabled": True,
+                    "healthy": True,
+                    "subjects": ["animal", "person", "vehicle", "none", "unknown"],
+                    "media": ["poster", "stills", "clip", "audio"],
+                }
+            ],
+        }
+
+
+def _make_client(tmp: Path, *, with_sources: bool = False) -> TestClient:
     """A fresh app over a canned Frigate config + empty DBs, fully inside
     `tmp` so two consecutive builds share nothing."""
     frigate_db = tmp / "frigate.db"
@@ -127,7 +149,17 @@ def _make_client(tmp: Path) -> TestClient:
             push_settings_path=str(tmp / "push_settings.json"),
         ),
     )
-    return TestClient(create_app(settings))
+    if with_sources:
+        from marcellus.config import BernardoSourceConfig, ExternalSourcesSection
+
+        settings.external_sources = ExternalSourcesSection(
+            enabled=True,
+            sources=[BernardoSourceConfig(id="bernardo", base_url="http://bernardo.invalid:8000")],
+        )
+    app = create_app(settings)
+    if with_sources:
+        app.state.external_sources = _FakeSources()
+    return TestClient(app)
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +631,7 @@ def _build_push_silence() -> dict[str, Any]:
 
 def _build_capabilities() -> dict[str, Any]:
     with tempfile.TemporaryDirectory() as td:
-        client = _make_client(Path(td))
+        client = _make_client(Path(td), with_sources=True)
         resp = client.get("/v1/capabilities")
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
@@ -1122,7 +1154,10 @@ def _build_v1_sightings() -> dict[str, Any]:
     from marcellus.routes.sources import sighting_summary
 
     sightings = _bernardo_sightings()
-    body = {"sightings": [sighting_summary(s) for s in sightings], "next_before": None}
+    body = {
+        "sightings": [sighting_summary(s, "Wildlife camera") for s in sightings],
+        "next_before": None,
+    }
     out: dict[str, Any] = SightingsResponse.model_validate(body).model_dump(mode="json")
     return out
 

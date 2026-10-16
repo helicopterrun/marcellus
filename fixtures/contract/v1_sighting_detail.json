@@ -16,6 +16,7 @@
   "detail_url": "/v1/sources/bernardo/sightings/20261015_210520",
   "end": 1792123535.9710348,
   "final": true,
+  "has_audio": true,
   "id": "bernardo:20261015_210520",
   "is_dark": true,
   "key": "20261015_210520",
@@ -68,5 +69,7 @@
   ],
   "subject": "animal",
   "subject_conf": 0.927,
+  "tag": "notable",
+  "title": "Animal \u00b7 Wildlife camera",
   "trigger": "pir"
 }

@@ -72,7 +72,7 @@ def test_list_ordering_limit_next_before_filter(env: Any) -> None:
 
     animals = client.get("/v1/sightings", params={"subject": "animal"}).json()["sightings"]
     assert animals and all(s["subject"] == "animal" for s in animals)
-    assert client.get("/v1/sightings", params={"subject": "bogus"}).status_code == 422
+    assert client.get("/v1/sightings", params={"subject": "bogus"}).status_code == 400
     assert client.get("/v1/sightings", params={"limit": 0}).status_code == 422
 
 
@@ -247,3 +247,62 @@ def test_group_by_day_labels_order_and_counts() -> None:
     assert groups[2]["counts"]["wildlife"] == 1
     solo = sources.group_sightings_by_day([mk(14, 8, "person")], now=now)
     assert solo[0]["summary"] == "1 person"
+
+
+def _sighting(key: str, subject: str, labels: tuple[str, ...] = (), audio: bool = False) -> Any:
+    from marcellus.external.types import Sighting, SightingStream
+
+    return Sighting(
+        source_id="cam1",
+        native_key=key,
+        start=1000.0,
+        subject=subject,  # type: ignore[arg-type]
+        labels=labels,
+        streams=(SightingStream(name="cam", role="color", has_audio=audio),),
+    )
+
+
+def test_subject_csv_filter(env: Any) -> None:
+    client, _svc, parsed = env
+    wanted = {"animal", "person"}
+    body = client.get("/v1/sightings", params={"subject": "animal,person"}).json()
+    got = body["sightings"]
+    assert got and all(s["subject"] in wanted for s in got)
+    assert len(got) == sum(1 for p in parsed if p.subject in wanted)
+    one = client.get("/v1/sightings", params={"subject": "animal"}).json()["sightings"]
+    assert one and all(s["subject"] == "animal" for s in one)
+
+
+def test_bad_subject_is_400(env: Any) -> None:
+    client, _svc, _ = env
+    r = client.get("/v1/sightings", params={"subject": "animal,bogus"})
+    assert r.status_code == 400
+    assert r.json()["detail"]["error"] == "bad_subject"
+
+
+def test_title_cases() -> None:
+    name = "Wildlife camera"
+    assert sources.sighting_title(_sighting("a", "animal"), name) == "Animal · Wildlife camera"
+    assert sources.sighting_title(_sighting("b", "unknown"), name) == "Activity · Wildlife camera"
+    assert sources.sighting_title(_sighting("c", "none"), name) == "Nothing · Wildlife camera"
+    mix = _sighting("d", "animal", labels=("person", "animal"))
+    assert sources.sighting_title(mix, name) == "Person and animal · Wildlife camera"
+
+
+def test_tag_mapping() -> None:
+    tags = {
+        subj: sources.sighting_summary(_sighting("t", subj), "N")["tag"]
+        for subj in ("animal", "unknown", "person", "vehicle", "none")
+    }
+    assert tags == {
+        "animal": "notable",
+        "unknown": "notable",
+        "person": "background",
+        "vehicle": "background",
+        "none": "background",
+    }
+
+
+def test_has_audio() -> None:
+    assert sources.sighting_summary(_sighting("a", "animal", audio=True), "N")["has_audio"] is True
+    assert sources.sighting_summary(_sighting("b", "animal"), "N")["has_audio"] is False
