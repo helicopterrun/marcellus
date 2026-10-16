@@ -1100,6 +1100,82 @@ class UnifiProtectSection(BaseModel):
         return v
 
 
+class BernardoSourceConfig(BaseModel):
+    """One Bernardo wildlife camera (github.com/helicopterrun/wildlife-cam) as
+    an external event source (`external/bernardo.py`). Read-only against the
+    device: Marcellus never needs its write token."""
+
+    kind: Literal["bernardo"] = "bernardo"
+    # Stable id: the journal key, the URL segment in `/v1/sources/{id}/...`
+    # and the `/healthz` check name (`source:<id>`). Never rename once set.
+    id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    name: str = "Wildlife camera"
+    enabled: bool = True
+    # Device API origin, e.g. "http://192.168.1.37:8000".
+    base_url: str
+    # The device's MQTT base topic (its own Settings -> MQTT page).
+    mqtt_base_topic: str = "bernardo"
+    # Rows fetched per poll (newest first).
+    poll_limit: int = Field(default=50, ge=1, le=500)
+    # Concurrent upstream connections (polling + media relay). The Pi is
+    # small; keep this low.
+    max_connections: int = Field(default=4, ge=1, le=16)
+    request_timeout_s: float = Field(default=10.0, gt=0)
+    # A sighting still unclassified this long after it started is settled
+    # as-is (Bernardo classifies ~45 s after an event finalises and gives up
+    # silently on events that never reach a terminal state).
+    settle_after_s: float = Field(default=900.0, ge=60)
+
+
+class ExternalSourcesSection(BaseModel):
+    """Non-Frigate event sources (guide_content's `external-sources.md`).
+
+    MQTT is the live trigger, HTTP polling is the record (and the safety net
+    for missed messages). Its own switch, independent of `push.enabled`; its
+    MQTT client is separate from push's so a source can never take the push
+    pipeline down. Broker settings left unset inherit `push.mqtt_*`.
+    """
+
+    enabled: bool = False
+    mqtt_enabled: bool = True
+    mqtt_host: str | None = None
+    mqtt_port: int | None = None
+    mqtt_username: str | None = None
+    # Env-overridable (MARCELLUS_EXTERNAL_SOURCES__MQTT_PASSWORD); unset
+    # inherits push.mqtt_password. Never logged.
+    mqtt_password: str | None = None
+    # Must differ from push.mqtt_client_id: two clients sharing an id kick
+    # each other off the broker in a loop.
+    mqtt_client_id: str = "marcellus-sources"
+    poll_interval_s: float = Field(default=60.0, ge=10)
+    # Rows fetched per source on startup to backfill the journal.
+    backfill_limit: int = Field(default=200, ge=0, le=2000)
+    # Journal rows older than this are pruned. Upstream media may be gone
+    # sooner (Bernardo keeps ~14 days); those rows answer `media_gone`.
+    retention_days: int = Field(default=30, ge=1)
+    # No retained `state` message for this long => health `stale`.
+    state_stale_s: float = Field(default=180.0, ge=30)
+    sources: list[BernardoSourceConfig] = Field(default_factory=list)
+
+    @field_validator("sources")
+    @classmethod
+    def _unique_source_ids(cls, v: list[BernardoSourceConfig]) -> list[BernardoSourceConfig]:
+        ids = [s.id for s in v]
+        dupes = sorted({i for i in ids if ids.count(i) > 1})
+        if dupes:
+            raise ValueError(f"external_sources.sources: duplicate id(s) {dupes}")
+        return v
+
+    def broker(self, push: PushSection) -> tuple[str, int, str | None, str | None]:
+        """(host, port, username, password), falling back to `push.mqtt_*`."""
+        return (
+            self.mqtt_host or push.mqtt_host,
+            self.mqtt_port or push.mqtt_port,
+            self.mqtt_username if self.mqtt_username is not None else push.mqtt_username,
+            self.mqtt_password if self.mqtt_password is not None else push.mqtt_password,
+        )
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix=_ENV_PREFIX,
@@ -1117,7 +1193,17 @@ class Settings(BaseSettings):
     push: PushSection = Field(default_factory=PushSection)
     encounters: EncountersSection = Field(default_factory=EncountersSection)
     unifi_protect: UnifiProtectSection = Field(default_factory=UnifiProtectSection)
+    external_sources: ExternalSourcesSection = Field(default_factory=ExternalSourcesSection)
     log_level: str = "INFO"
+
+    @model_validator(mode="after")
+    def _check_source_client_id(self) -> Settings:
+        if self.external_sources.mqtt_client_id == self.push.mqtt_client_id:
+            raise ValueError(
+                "external_sources.mqtt_client_id must differ from push.mqtt_client_id "
+                f"({self.push.mqtt_client_id!r}) -- two clients sharing an id disconnect each other"
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_origins(self) -> Settings:

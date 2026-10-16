@@ -1,0 +1,30 @@
+{
+    "capture_ok": true,
+    "cam_ok": true,
+    "cam2_ok": true,
+    "mic_ok": true,
+    "mode": "night",
+    "lux": 0.1,
+    "events_today": 9,
+    "events_24h": 10,
+    "last_event": "2026-10-15T21:05:20-07:00",
+    "last_event_type": "animal",
+    "hours_since_event": 0.4,
+    "disk_free_gb": 49.5,
+    "temp_c": 60.4,
+    "ext5v_v": 5.144,
+    "throttled": "0x80000",
+    "under_volt_now": false,
+    "uptime_h": 2195.1,
+    "backup_configured": false,
+    "backup_age_h": null,
+    "vmd_only_24h": 85,
+    "problems": [],
+    "problem": false,
+    "mqtt": {
+        "running": true,
+        "connected": true,
+        "error": "",
+        "age_s": 2
+    }
+}

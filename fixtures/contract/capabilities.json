@@ -8,6 +8,10 @@
     "loops": false,
     "tags": false
   },
+  "external_sources": {
+    "enabled": false,
+    "sources": []
+  },
   "proxy": {
     "enabled": true
   },

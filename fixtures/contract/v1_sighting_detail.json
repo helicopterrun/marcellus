@@ -1,0 +1,72 @@
+{
+  "boxes": [
+    {
+      "box": [
+        0.086,
+        0.4407,
+        0.537,
+        0.9479
+      ],
+      "conf": 0.927,
+      "label": "animal",
+      "still_url": "/v1/sources/bernardo/sightings/20261015_210520/stills/cam/2"
+    }
+  ],
+  "clip_url": "/v1/sources/bernardo/sightings/20261015_210520/clip/cam",
+  "detail_url": "/v1/sources/bernardo/sightings/20261015_210520",
+  "end": 1792123535.9710348,
+  "final": true,
+  "id": "bernardo:20261015_210520",
+  "is_dark": true,
+  "key": "20261015_210520",
+  "labels": [
+    "animal"
+  ],
+  "model": "MDV6-yolov10-c@640",
+  "poster_url": "/v1/sources/bernardo/sightings/20261015_210520/poster",
+  "source": "bernardo",
+  "source_name": "Wildlife camera",
+  "start": 1792123520.9710348,
+  "status": "complete",
+  "streams": [
+    {
+      "clip_url": "/v1/sources/bernardo/sightings/20261015_210520/clip/cam",
+      "has_audio": true,
+      "name": "cam",
+      "role": "ir",
+      "stills": [
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam/0",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam/1",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam/2",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam/3",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam/4",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam/5",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam/6",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam/7",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam/8",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam/9",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam/10",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam/11"
+      ]
+    },
+    {
+      "clip_url": "/v1/sources/bernardo/sightings/20261015_210520/clip/cam2",
+      "has_audio": true,
+      "name": "cam2",
+      "role": "color",
+      "stills": [
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam2/0",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam2/1",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam2/2",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam2/3",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam2/4",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam2/5",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam2/6",
+        "/v1/sources/bernardo/sightings/20261015_210520/stills/cam2/7"
+      ]
+    }
+  ],
+  "subject": "animal",
+  "subject_conf": 0.927,
+  "trigger": "pir"
+}
