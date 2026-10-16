@@ -18,6 +18,42 @@ def test_default_settings_include_delivery_and_person_restricted():
     assert la_settings["person_restricted"] is True
 
 
+def test_default_settings_include_summary_row():
+    defaults = policy_settings.default_settings()
+    assert defaults["live_activities"]["summary_row"] is True
+
+
+def test_validate_summary_row_rejects_non_bool():
+    errors = policy_settings.validate_settings({
+        "live_activities": {"summary_row": "nope"},
+    })
+    assert any("summary_row" in e for e in errors)
+
+
+def test_normalize_summary_row_absent_keeps_prior(tmp_path):
+    """PUT omitting summary_row must not reset it (sticky, mirrors la_only)."""
+    settings_path = tmp_path / "push_settings.json"
+    initial = policy_settings.default_settings()
+    initial["live_activities"]["summary_row"] = False
+    policy_settings.save_settings(settings_path, initial)
+    policy_settings.apply_settings(initial)
+
+    merged, _ = policy_settings.save_and_apply(settings_path, {"live_activities": {"person": True}})
+    assert merged["live_activities"]["summary_row"] is False
+
+
+def test_normalize_summary_row_present_overrides(tmp_path):
+    settings_path = tmp_path / "push_settings.json"
+    initial = policy_settings.default_settings()
+    policy_settings.save_settings(settings_path, initial)
+    policy_settings.apply_settings(initial)
+
+    merged, _ = policy_settings.save_and_apply(
+        settings_path, {"live_activities": {"summary_row": False}},
+    )
+    assert merged["live_activities"]["summary_row"] is False
+
+
 def test_validate_delivery_accepts_valid_values():
     for val in ("la_first", "notifications"):
         errors = policy_settings.validate_settings({

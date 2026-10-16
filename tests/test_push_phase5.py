@@ -480,6 +480,52 @@ async def test_la_covered_resolve_row_is_deferred(
 
 
 @pytest.mark.asyncio
+async def test_la_covered_resolve_row_dropped_when_summary_row_off(
+    sidecar_db_path: Path, monkeypatch,
+):
+    """summary_row=False: the demoted device's deferred resolve is dropped
+    entirely, not just delayed -- there's no durable history row at all."""
+    import asyncio
+
+    from marcellus.push import delivery
+    from marcellus.push.cards import RESOLVE, Card
+
+    monkeypatch.setattr(delivery, "RESOLVE_DEFER_S", 0.0)
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    device = make_device()
+    card = Card(
+        card_key="doorbell:person:trk1", level="notify", peak_level="notify",
+        created_at=1.0, updated_at=9.0, state_since_at=1.0,
+        resolved=True, closed=True,
+    )
+    payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
+
+    await send_card_mutation(
+        conn, transport, [device], card, RESOLVE, payload,
+        subject_kind="person", camera="doorbell", now=10.0,
+        demote_tokens={"tok1"}, suppress_demoted=True, summary_row=False,
+    )
+    # Nothing lands synchronously.
+    assert situation_sends(transport) == []
+
+    # ...and nothing lands after the deferred window either -- it was never
+    # scheduled in the first place.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert situation_sends(transport) == []
+
+
+# Note: a non-demoted device still gets its resolve when summary_row=False
+# -- summary_row only ever applies inside the
+# `demoted and suppress_demoted and mutation == RESOLVE` branch, which a
+# non-covered device never enters. Covered by
+# `test_non_covered_device_resolve_row_is_immediate` above (summary_row
+# defaults to True there, but the code path it exercises is identical
+# regardless of summary_row's value).
+
+
+@pytest.mark.asyncio
 async def test_non_covered_device_resolve_row_is_immediate(sidecar_db_path: Path):
     from marcellus.push.cards import RESOLVE, Card
 
