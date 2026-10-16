@@ -539,10 +539,16 @@ async def sweep_urgent_resound(
     enabled: bool = True,
     max_resounds: int = 5,
     payload_for_resound: Any = None,
+    muted: bool = False,
 ) -> int:
     """Check every open `urgent` card for repeating re-sounds (§2). Each
-    re-sound counts against the global sounding rate cap."""
-    if not enabled or payload_for_resound is None:
+    re-sound counts against the global sounding rate cap.
+
+    `muted` (`mute_sounds`): no repeats are scheduled at all. A re-sound is a
+    sound-only nudge (iOS vibrates only alongside a sound), so a soundless
+    repeat would be a pointless duplicate banner; the Alarm still arrives
+    once, silently."""
+    if not enabled or muted or payload_for_resound is None:
         return 0
     now = time.time() if now is None else now
     resounded = 0

@@ -455,6 +455,7 @@ async def _delivery_resound_sweep_loop(app: FastAPI) -> None:
         await asyncio.sleep(interval)
         try:
             from marcellus import db
+            from marcellus.push import policy_settings
 
             conn = db.open_sidecar(engine.db_path)
             try:
@@ -467,6 +468,7 @@ async def _delivery_resound_sweep_loop(app: FastAPI) -> None:
                     enabled=settings.push.delivery_urgent_resound_enabled,
                     max_resounds=settings.push.delivery_urgent_resound_max,
                     payload_for_resound=delivery_wire.resound_payload_for,
+                    muted=bool(policy_settings.get_active().get("mute_sounds")),
                 )
             finally:
                 conn.close()

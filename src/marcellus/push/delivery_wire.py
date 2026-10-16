@@ -1603,9 +1603,13 @@ async def handle_delivery_event(
 
         # mute_sounds / quiet-hours mute_sounds mode: omit sound entirely
         # (urgent exempt from quiet-hours mute).
-        if muted:
-            sound = False
-        if qh_active and qh_mode == "mute_sounds" and card.level != "urgent":
+        # A sound stripped here was never heard, so un-book it: otherwise the
+        # one-sound-per-story budget is spent on silence and a later
+        # unmuted escalation is wrongly denied.
+        if muted or (qh_active and qh_mode == "mute_sounds" and card.level != "urgent"):
+            if sound and card.sound_count > 0:
+                card.sound_count -= 1
+                card.last_sound_at = existing.last_sound_at if existing is not None else None
             sound = False
 
         payload = None
@@ -1832,8 +1836,10 @@ def resound_payload_for(card: Card, context: dict[str, str]) -> dict[str, Any]:
     )
     active = policy_settings.get_active()
     la_only = bool(active.get("live_activities", {}).get("la_only", False))
+    # Defence in depth: the sweep already skips repeats while muted.
+    muted = bool(active.get("mute_sounds"))
     return build_card_payload(
-        card, "escalate", sound=not la_only, la_active=la_only,
+        card, "escalate", sound=not la_only and not muted, la_active=la_only,
         subject_kind=subject_kind, place_class=context.get("place_class", ""),
         label=context.get("label", ""), camera=context.get("camera", ""),
         zone_name=context.get("zone_name", ""),
