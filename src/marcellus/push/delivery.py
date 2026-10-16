@@ -544,10 +544,9 @@ async def sweep_urgent_resound(
     """Check every open `urgent` card for repeating re-sounds (§2). Each
     re-sound counts against the global sounding rate cap.
 
-    `muted` (`mute_sounds`): no repeats are scheduled at all. A re-sound is a
-    sound-only nudge (iOS vibrates only alongside a sound), so a soundless
-    repeat would be a pointless duplicate banner; the Alarm still arrives
-    once, silently."""
+    `muted` (`mute_sounds`): no repeats are scheduled at all. A re-sound exists
+    to sound again; muted, it would only re-post the same alarm. The Alarm
+    still arrives once, without sound."""
     if not enabled or muted or payload_for_resound is None:
         return 0
     now = time.time() if now is None else now
