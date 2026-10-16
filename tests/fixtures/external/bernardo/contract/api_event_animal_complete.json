@@ -1,0 +1,14 @@
+{
+  "id": 2685,
+  "type": "pir",
+  "stream": "GPIO17",
+  "start_time": 1792123520.9710348,
+  "end_time": 1792123535.9710348,
+  "score": null,
+  "label": "pir",
+  "thumbnail": "/poster/20261015_210520",
+  "clip_path": "/media/_events/cam2/evt_20261015_210520.mp4",
+  "has_clip": 1,
+  "data": "{\"gpio\": 17, \"edge\": \"low->high\", \"sensor\": \"pir\", \"mode\": \"night\", \"trigger_path\": \"gpio\", \"cooldown_s\": 15.0, \"is_dark\": true, \"host\": \"bernardo\", \"git_commit\": \"b90df4c\", \"captured_iso\": \"2026-10-15T21:05:20\", \"pi_temp_c\": 62.6, \"throttled\": \"0x80000\", \"under_volt\": false, \"ext5v_v\": 5.101, \"primary_stream\": \"cam\", \"vmd\": {\"fired\": true, \"lead_s\": -1.01}, \"streams\": {\"cam\": {\"resolution\": \"1920x1080\", \"raw\": false, \"stills\": [\"/snap/cam/snap_20261015_210520_n8ms_g4_f00.jpg\", \"/snap/cam/snap_20261015_210520_n8ms_g4_f15.jpg\", \"/snap/cam/snap_20261015_210520_n8ms_g4_f25.jpg\", \"/snap/cam/snap_20261015_210520_n8ms_g4_f35.jpg\", \"/snap/cam/snap_20261015_210520_n8ms_g4_f45.jpg\", \"/snap/cam/snap_20261015_210520_n8ms_g4_f55.jpg\", \"/snap/cam/snap_20261015_210520_n8ms_g4_f65.jpg\", \"/snap/cam/snap_20261015_210520_n8ms_g4_f75.jpg\", \"/snap/cam/snap_20261015_210520_n8ms_g4_f85.jpg\", \"/snap/cam/snap_20261015_210520_n8ms_g4_f95.jpg\", \"/snap/cam/snap_20261015_210520_n8ms_g4_f136.jpg\", \"/snap/cam/snap_20261015_210520_n8ms_g4_f273.jpg\"], \"exposure\": {\"ExposureTime\": 8000, \"AnalogueGain\": 4.03, \"Lux\": 99.04899597167969}, \"clip\": \"/media/_events/cam/evt_20261015_210520.mp4\"}, \"cam2\": {\"resolution\": \"1920x1080\", \"raw\": false, \"stills\": [\"/snap/cam2/snap_20261015_210520_d33ms_g16_f00.jpg\", \"/snap/cam2/snap_20261015_210520_d33ms_g16_f01.jpg\", \"/snap/cam2/snap_20261015_210520_d33ms_g16_f02.jpg\", \"/snap/cam2/snap_20261015_210520_d33ms_g16_f03.jpg\", \"/snap/cam2/snap_20261015_210520_d33ms_g16_f04.jpg\", \"/snap/cam2/snap_20261015_210520_d33ms_g16_f05.jpg\", \"/snap/cam2/snap_20261015_210520_d33ms_g16_f06.jpg\", \"/snap/cam2/snap_20261015_210520_d33ms_g16_f07.jpg\"], \"exposure\": {\"ExposureTime\": 32680, \"AnalogueGain\": 15.52, \"Lux\": 0.07307020574808121}, \"clip\": \"/media/_events/cam2/evt_20261015_210520.mp4\"}}, \"activity\": {\"cam\": 0.1373, \"cam2\": 0.0523}, \"classification\": {\"label\": \"animal\", \"conf\": 0.927, \"labels\": [\"animal\"], \"frames\": 18, \"model\": \"MDV6-yolov10-c@640\", \"boxes\": [{\"label\": \"animal\", \"conf\": 0.927, \"box\": [0.086, 0.4407, 0.537, 0.9479], \"still\": \"/snap/cam/snap_20261015_210520_n8ms_g4_f25.jpg\"}], \"suppressed\": 2}}",
+  "event_key": "20261015_210520"
+}
