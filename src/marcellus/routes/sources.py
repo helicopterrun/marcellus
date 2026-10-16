@@ -10,7 +10,8 @@ the feature is disabled."""
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any, Literal, Protocol
 from urllib.parse import quote
 
@@ -116,6 +117,32 @@ def sighting_detail(s: Sighting, source_name: str) -> dict[str, Any]:
     return out
 
 
+_STREAM_LABELS = {"color": "Colour", "ir": "IR"}
+
+
+def _page_item(s: Sighting, name: str) -> dict[str, Any]:
+    d = sighting_summary(s)
+    base = _detail_url(s)
+    primary = s.preferred_clip_stream()
+    ordered = sorted(
+        (st for st in s.streams if st.clip), key=lambda st: primary is None or st is not primary
+    )
+    d["source_name"] = name
+    d["conf_pct"] = None if s.subject_conf is None else int(round(s.subject_conf * 100))
+    d["time_label"] = datetime.fromtimestamp(s.start).strftime("%H:%M")
+    d["hover_clip_url"] = d["clip_url"]
+    d["streams"] = [
+        {
+            "name": st.name,
+            "role": st.role,
+            "label": _STREAM_LABELS.get(st.role, st.name),
+            "clip_url": base + f"/clip/{_q(st.name)}",
+        }
+        for st in ordered
+    ]
+    return d
+
+
 def sightings_for_page(
     conn: sqlite3.Connection,
     *,
@@ -124,17 +151,103 @@ def sightings_for_page(
     source_names: Mapping[str, str],
 ) -> list[dict[str, Any]]:
     """Recent sightings for the Encounters HTML page: summary dicts plus
-    `source_name`. Rows from sources not in `source_names` are dropped."""
+    `source_name` and the gallery keys (`conf_pct`, `time_label`,
+    `hover_clip_url`, `streams`). Rows from sources not in `source_names`
+    are dropped."""
     rows = store.list_sightings(conn, since=since, limit=limit)
     out: list[dict[str, Any]] = []
     for s in rows:
         name = source_names.get(s.source_id)
         if name is None:
             continue
-        d = sighting_summary(s)
-        d["source_name"] = name
-        out.append(d)
+        out.append(_page_item(s, name))
     return out
+
+
+def _filter_class(subject: str) -> str:
+    if subject == "person":
+        return "people"
+    if subject == "none":
+        return "empty"
+    return "wildlife"
+
+
+def _counts(items: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    c = {"wildlife": 0, "people": 0, "empty": 0, "all": len(items)}
+    for it in items:
+        c[_filter_class(it["subject"])] += 1
+    return c
+
+
+def _plural(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+def _day_summary(items: Sequence[Mapping[str, Any]]) -> str:
+    by: dict[str, int] = {}
+    for it in items:
+        by[it["subject"]] = by.get(it["subject"], 0) + 1
+    parts = (
+        (by.get("animal", 0), "animal", "animals"),
+        (by.get("person", 0), "person", "people"),
+        (by.get("vehicle", 0), "vehicle", "vehicles"),
+        (by.get("none", 0), "empty", "empty"),
+        (by.get("unknown", 0), "not yet classified", "not yet classified"),
+    )
+    return " \u00b7 ".join(_plural(n, a, b) for n, a, b in parts if n)
+
+
+def group_sightings_by_day(
+    items: Sequence[Mapping[str, Any]], *, now: float
+) -> list[dict[str, Any]]:
+    """Group page items by local calendar day, newest day first, items newest
+    first. Local time matches `fmt.fmt_ts`."""
+    today = datetime.fromtimestamp(now).date()
+    buckets: dict[Any, list[dict[str, Any]]] = {}
+    for it in sorted(items, key=lambda i: i["start"], reverse=True):
+        day = datetime.fromtimestamp(it["start"]).date()
+        buckets.setdefault(day, []).append(dict(it))
+    groups: list[dict[str, Any]] = []
+    for day in sorted(buckets, reverse=True):
+        delta = (today - day).days
+        if delta == 0:
+            label = "Today"
+        elif delta == 1:
+            label = "Yesterday"
+        else:
+            label = f"{day:%A} {day.day} {day:%b}"
+        day_items = buckets[day]
+        for it in day_items:
+            it["day_label"] = label
+        groups.append(
+            {
+                "key": day.isoformat(),
+                "label": label,
+                "summary": _day_summary(day_items),
+                "counts": _counts(day_items),
+                "items": day_items,
+            }
+        )
+    return groups
+
+
+def sightings_page_context(
+    conn: sqlite3.Connection,
+    *,
+    since: float,
+    now: float,
+    source_names: Mapping[str, str],
+    limit: int = 300,
+) -> dict[str, Any] | None:
+    items = sightings_for_page(conn, since=since, limit=limit, source_names=source_names)
+    if not items:
+        return None
+    names = sorted({i["source_name"] for i in items})
+    return {
+        "source_name": names[0] if len(names) == 1 else "External sources",
+        "groups": group_sightings_by_day(items, now=now),
+        "totals": _counts(items),
+    }
 
 
 @v1_router.get("/sightings", response_model=SightingsResponse)

@@ -1,18 +1,46 @@
 {% if external_sightings %}
-{% set _names = external_sightings|map(attribute='source_name')|unique|list %}
-<section class="capture-visit enc-row ext-sightings">
-  <header>
-    <b class="id-title">{{ _names[0] if _names|length == 1 else 'External sources' }}</b>
-    <span class="mode">{{ external_sightings|length }} sighting{{ 's' if external_sightings|length != 1 else '' }}</span>
-  </header>
-  {% for s in external_sightings %}
-  <div class="enc-chips ext-sighting">
-    {% if s.poster_url %}<img src="{{ s.poster_url }}" alt="{{ s.subject }}" loading="lazy" width="96" style="max-width:96px;height:auto">{% endif %}
-    <span class="badge {{ 'recognized' if s.subject in ('animal', 'person', 'vehicle') else 'noise' }}">{{ s.subject }}{% if s.subject_conf is not none %} {{ (s.subject_conf * 100)|round|int }}%{% endif %}</span>
-    <span class="mode">{{ fmt_ts(s.start) }}</span>
-    {% if s.status != 'complete' %}<span class="badge">{{ s.status }}</span>{% endif %}
-    {% if s.clip_url %}<a href="{{ s.clip_url }}" target="_blank" rel="noopener" class="page-link">Clip</a>{% endif %}
+{% set _ws = external_sightings %}
+{% set _names = {'animal': 'Animal', 'person': 'Person', 'vehicle': 'Vehicle', 'none': 'Empty', 'unknown': 'New'} %}
+{% set _cls = {'person': 'people', 'none': 'empty'} %}
+<section class="ws" data-ws data-ws-filter="wildlife">
+  <div class="ws-head">
+    <h2>{{ _ws.source_name }}</h2>
+    <div class="ws-chips">
+      {% for key, label in (('wildlife', 'Wildlife'), ('people', 'People'), ('empty', 'Empty'), ('all', 'All')) %}
+      <button type="button" class="ws-chip{{ ' on' if key == 'wildlife' else '' }}" data-filter="{{ key }}">{{ label }}<span class="n">{{ _ws.totals[key] }}</span></button>
+      {% endfor %}
+    </div>
+  </div>
+  {% for g in _ws.groups %}
+  <div class="ws-day" data-day="{{ g.key }}">
+    <div class="ws-dayhead"><h3>{{ g.label }}</h3><span class="ws-sum">{{ g.summary }}</span></div>
+    <div class="ws-gallery">
+      {% for it in g['items'] %}
+      {% set _class = _cls.get(it.subject, 'wildlife') %}
+      <a class="ws-shot{{ ' ws-dim' if it.subject == 'none' else '' }}" href="{{ it.hover_clip_url or it.poster_url or it.detail_url }}" data-class="{{ _class }}" data-subject="{{ it.subject }}" data-item='{{ it|tojson }}'>
+        {% if it.hover_clip_url %}<video class="ws-thumb" src="{{ it.hover_clip_url }}"{% if it.poster_url %} poster="{{ it.poster_url }}"{% endif %} muted loop playsinline preload="none"></video>
+        {% elif it.poster_url %}<img class="ws-thumb" src="{{ it.poster_url }}" alt="" loading="lazy">{% endif %}
+        {% if it.status != 'complete' %}<span class="ws-flag">{{ it.status }}</span>{% endif %}
+        <div class="ws-cap"><span class="ws-time">{{ it.time_label }}</span><span class="ws-cls" style="--c:var(--ws-{{ it.subject }})">{{ _names.get(it.subject, it.subject) }}</span>{% if it.conf_pct is not none %}<span class="ws-conf">{{ it.conf_pct }}%</span>{% endif %}</div>
+      </a>
+      {% endfor %}
+    </div>
+    <p class="ws-more" data-day-total="{{ g.counts['all'] }}" hidden></p>
   </div>
   {% endfor %}
+  <div class="ws-lightbox" hidden role="dialog" aria-modal="true" aria-label="Sighting player">
+    <div class="ws-lb-stage">
+      <video class="ws-lb-video" controls playsinline></video>
+      <img class="ws-lb-img" alt="" hidden>
+    </div>
+    <div class="ws-lb-title"></div>
+    <div class="ws-lb-bar">
+      <button type="button" class="ws-lb-btn" data-lb="prev" aria-label="Previous">&larr;</button>
+      <span class="ws-lb-streams"></span>
+      <button type="button" class="ws-lb-btn" data-lb="next" aria-label="Next">&rarr;</button>
+      <a class="ws-lb-btn ws-lb-open" target="_blank" rel="noopener">Open clip</a>
+      <button type="button" class="ws-lb-btn" data-lb="close" aria-label="Close">Close</button>
+    </div>
+  </div>
 </section>
 {% endif %}
