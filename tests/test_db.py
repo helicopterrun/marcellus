@@ -307,3 +307,59 @@ def test_open_sidecar_migrates_pre_zones_csv_card_table(tmp_path):
     cols = {r["name"] for r in migrated.execute("PRAGMA table_info(push_cards)")}
     assert "zones_csv" in cols
     assert "peak_level" in cols
+
+
+def test_open_sidecar_concurrent_first_open_never_locks(tmp_path: Path) -> None:
+    """Several threads opening a brand-new DB at once must all succeed: the
+    switch into WAL takes an exclusive lock that SQLite does not wait on, so
+    without the retry one opener fails outright with "database is locked"
+    (the flake behind test_link_now_concurrent_worker_and_push_paths_agree)."""
+    import threading
+
+    path = tmp_path / "fresh.db"
+    n = 8
+    barrier = threading.Barrier(n)
+    errors: list[BaseException] = []
+
+    def opener() -> None:
+        try:
+            barrier.wait(timeout=5)
+            conn = db.open_sidecar(path)
+            try:
+                mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+                assert mode == "wal"
+            finally:
+                conn.close()
+        except BaseException as exc:  # noqa: BLE001 -- surfaced via `errors`
+            errors.append(exc)
+
+    for _ in range(20):
+        path.unlink(missing_ok=True)
+        db._SCHEMA_APPLIED.discard(str(path.resolve()))
+        threads = [threading.Thread(target=opener) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=15)
+        assert not errors, errors
+
+
+def test_enable_wal_retries_only_lock_errors() -> None:
+    class _Conn:
+        def __init__(self, failures: list[str]) -> None:
+            self.failures = failures
+            self.calls = 0
+
+        def execute(self, sql: str) -> None:
+            self.calls += 1
+            if self.failures:
+                raise sqlite3.OperationalError(self.failures.pop(0))
+
+    locked = _Conn(["database is locked", "database is locked"])
+    db._enable_wal(locked)  # type: ignore[arg-type]
+    assert locked.calls == 3
+
+    other = _Conn(["disk I/O error"])
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+        db._enable_wal(other)  # type: ignore[arg-type]
+    assert other.calls == 1
