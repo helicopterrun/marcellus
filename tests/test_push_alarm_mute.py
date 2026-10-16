@@ -1,6 +1,6 @@
 """An Alarm (engine level `urgent`) under `mute_sounds` must be silent: no
 sound on the first push, no sound-budget booked, and no repeating re-sound
-(iOS vibrates only alongside a sound, so a soundless repeat is pointless)."""
+(a repeat exists only to sound again)."""
 from __future__ import annotations
 
 from pathlib import Path
