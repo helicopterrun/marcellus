@@ -1,0 +1,128 @@
+{
+  "capture_settings": {
+    "audio_bitrate_k": 160,
+    "audio_compress": false,
+    "audio_denoise_db": 0,
+    "audio_denoise_engine": "afftdn",
+    "audio_eq": "[]",
+    "audio_event_flac": false,
+    "audio_limiter_ceiling_db": -1.0,
+    "audio_loudnorm": false,
+    "burst_video_fps": 24,
+    "burst_video_max_edge": 3840,
+    "burst_video_realtime": true,
+    "cam2_video_fps": 30,
+    "jpeg_quality": 93,
+    "night_keep_stills": 12,
+    "postroll_s": 15,
+    "preroll_s": 15
+  },
+  "clip_path": "/media/_events/cam2/evt_20261015_210520.mp4",
+  "data": {
+    "activity": {
+      "cam": 0.1373,
+      "cam2": 0.0523
+    },
+    "captured_iso": "2026-10-15T21:05:20",
+    "classification": {
+      "boxes": [
+        {
+          "box": [
+            0.086,
+            0.4407,
+            0.537,
+            0.9479
+          ],
+          "conf": 0.927,
+          "label": "animal",
+          "still": "/snap/cam/snap_20261015_210520_n8ms_g4_f25.jpg"
+        }
+      ],
+      "conf": 0.927,
+      "frames": 18,
+      "label": "animal",
+      "labels": [
+        "animal"
+      ],
+      "model": "MDV6-yolov10-c@640",
+      "suppressed": 2
+    },
+    "cooldown_s": 15.0,
+    "edge": "low->high",
+    "ext5v_v": 5.101,
+    "git_commit": "b90df4c",
+    "gpio": 17,
+    "host": "bernardo",
+    "is_dark": true,
+    "mode": "night",
+    "pi_temp_c": 62.6,
+    "primary_stream": "cam",
+    "sensor": "pir",
+    "streams": {
+      "cam": {
+        "clip": "/media/_events/cam/evt_20261015_210520.mp4",
+        "exposure": {
+          "AnalogueGain": 4.03,
+          "ExposureTime": 8000,
+          "Lux": 99.04899597167969
+        },
+        "raw": false,
+        "resolution": "1920x1080",
+        "stills": [
+          "/snap/cam/snap_20261015_210520_n8ms_g4_f00.jpg",
+          "/snap/cam/snap_20261015_210520_n8ms_g4_f15.jpg",
+          "/snap/cam/snap_20261015_210520_n8ms_g4_f25.jpg",
+          "/snap/cam/snap_20261015_210520_n8ms_g4_f35.jpg",
+          "/snap/cam/snap_20261015_210520_n8ms_g4_f45.jpg",
+          "/snap/cam/snap_20261015_210520_n8ms_g4_f55.jpg",
+          "/snap/cam/snap_20261015_210520_n8ms_g4_f65.jpg",
+          "/snap/cam/snap_20261015_210520_n8ms_g4_f75.jpg",
+          "/snap/cam/snap_20261015_210520_n8ms_g4_f85.jpg",
+          "/snap/cam/snap_20261015_210520_n8ms_g4_f95.jpg",
+          "/snap/cam/snap_20261015_210520_n8ms_g4_f136.jpg",
+          "/snap/cam/snap_20261015_210520_n8ms_g4_f273.jpg"
+        ]
+      },
+      "cam2": {
+        "clip": "/media/_events/cam2/evt_20261015_210520.mp4",
+        "exposure": {
+          "AnalogueGain": 15.52,
+          "ExposureTime": 32680,
+          "Lux": 0.07307020574808121
+        },
+        "raw": false,
+        "resolution": "1920x1080",
+        "stills": [
+          "/snap/cam2/snap_20261015_210520_d33ms_g16_f00.jpg",
+          "/snap/cam2/snap_20261015_210520_d33ms_g16_f01.jpg",
+          "/snap/cam2/snap_20261015_210520_d33ms_g16_f02.jpg",
+          "/snap/cam2/snap_20261015_210520_d33ms_g16_f03.jpg",
+          "/snap/cam2/snap_20261015_210520_d33ms_g16_f04.jpg",
+          "/snap/cam2/snap_20261015_210520_d33ms_g16_f05.jpg",
+          "/snap/cam2/snap_20261015_210520_d33ms_g16_f06.jpg",
+          "/snap/cam2/snap_20261015_210520_d33ms_g16_f07.jpg"
+        ]
+      }
+    },
+    "throttled": "0x80000",
+    "trigger_path": "gpio",
+    "under_volt": false,
+    "vmd": {
+      "fired": true,
+      "lead_s": -1.01
+    }
+  },
+  "db_id": 2685,
+  "end_time": 1792123535.9710348,
+  "error": null,
+  "event_key": "20261015_210520",
+  "has_clip": 1,
+  "label": "pir",
+  "manifest_version": 1,
+  "start_time": 1792123520.9710348,
+  "status": "complete",
+  "stream": "GPIO17",
+  "thumbnail": "/poster/20261015_210520",
+  "type": "pir",
+  "updated_iso": "2026-10-15T21:06:37"
+}

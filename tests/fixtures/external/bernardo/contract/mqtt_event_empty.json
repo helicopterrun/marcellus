@@ -1,0 +1,19 @@
+{
+  "event_type": "empty",
+  "key": "20261015_212835",
+  "time": "2026-10-15T21:28:35-07:00",
+  "status": "complete",
+  "sensor": "manual",
+  "trigger_path": "manual",
+  "mode": "night",
+  "camera": "cam",
+  "confidence": null,
+  "activity": {
+    "cam": 0.0,
+    "cam2": 0.0496
+  },
+  "degraded": [],
+  "poster_url": "http://192.168.1.37:8000/poster/20261015_212835",
+  "clip_url": "http://192.168.1.37:8000/media/_events/cam/evt_20261015_212835.mp4",
+  "page_url": "http://192.168.1.37:8000/#/events/2686"
+}

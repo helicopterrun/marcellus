@@ -1,0 +1,16 @@
+{
+  "files": {
+    "README.md": "b5198d170a15901cff27f3a41ec238064d72e2bcfc2ca4e1375b6cffcf2c84d6",
+    "api_event_animal_complete.json": "be1036ecbb40a9637ca6c7dd92d82f2fdebd18876deae72fd72653bd92712b08",
+    "api_event_media_pending.json": "ef51b3a74eb6f28107db98a55ca7ad344e3a2deb69a435a898c2744f1cb4aeeb",
+    "api_health.json": "8d1a3f1b405746d75084f18606ab38aae15e3bd37d949c25d086c669c3efce8e",
+    "manifest_animal_complete.json": "e95c07652109ba422ae02275410f6fb1a1f3cdaaf99b9beabea91ef94ae625ca",
+    "manifest_media_pending.json": "9778756e9e065adb51453976a734bc6fa4c848ec1ab5171c05a5acd8e0bd5293",
+    "mqtt_event_animal.json": "46b901ca90db1779aa0ba771d1dafcda56fcfa1794dc4c33c0762ddc31beaddd",
+    "mqtt_event_empty.json": "e360d35822079ac2195039bd9ef75f37b749313f1a47f44923b134cf07bc13ce",
+    "mqtt_state.json": "11bd817da501b4be6ae6b3a51a50fd88edf6e0aa4b472b68ad0b9aff80e1ed28"
+  },
+  "path": "fixtures/contract",
+  "ref": "d6bd98f0cf279d1fa80442dfd5a0d19fa0b873bd",
+  "repo": "helicopterrun/wildlife-cam"
+}
