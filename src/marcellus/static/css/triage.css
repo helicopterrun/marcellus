@@ -1397,3 +1397,47 @@ body.map-full-open .me-toolbar {
 .login-links a:hover { color: var(--accent); border-bottom-color: var(--accent); }
 .login-version { margin: 11px 0 0; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--muted-2); }
 .login-version a { color: var(--muted); }
+
+/* -- External sightings gallery (Bernardo-style) -- */
+.ws { --ws-animal: #6fcf97; --ws-person: #c79be8; --ws-vehicle: #6db3d8; --ws-none: #6b7280; --ws-unknown: #6b7280; font-family: var(--font-body); margin: 0 0 var(--space-5); }
+.ws-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.ws-head h2 { margin: 0; font-size: 18px; font-weight: 700; }
+.ws-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.ws-chip { background: var(--surface); color: var(--muted); border: 1px solid var(--stroke); border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.ws-chip.on { background: var(--text); color: var(--panel); border-color: var(--text); }
+.ws-chip .n { font-weight: 400; opacity: .7; margin-left: 5px; }
+.ws-chip:focus-visible, .ws-lb-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ws-day[hidden], .ws-more[hidden] { display: none; }
+.ws-dayhead { display: flex; align-items: baseline; gap: 12px; margin: 26px 0 10px; flex-wrap: wrap; }
+.ws-head + .ws-day .ws-dayhead { margin-top: 8px; }
+.ws-dayhead h3 { margin: 0; font-family: var(--font-body); font-size: 22px; font-weight: 700; letter-spacing: -.01em; }
+.ws-sum { font-size: 14px; color: var(--muted); }
+.ws-gallery { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+.ws-more { margin: 8px 0 0; font-size: 13px; }
+.ws-shot { position: relative; display: block; border-radius: 10px; overflow: hidden; background: #000; aspect-ratio: 16/9; color: #fff; text-decoration: none; }
+.ws-shot:hover { outline: 2px solid var(--stroke); }
+.ws-shot:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ws-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ws-dim .ws-thumb { opacity: .5; }
+.ws-cap { position: absolute; left: 0; right: 0; bottom: 0; padding: 22px 10px 8px; display: flex; align-items: flex-end; gap: 8px; font-size: 13px; background: linear-gradient(transparent, rgba(0, 0, 0, .78)); pointer-events: none; }
+.ws-time { font-size: 15px; font-weight: 700; }
+.ws-cls { display: inline-flex; align-items: center; white-space: nowrap; font-size: 13px; font-weight: 600; }
+.ws-cls::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--c); margin-right: 6px; }
+.ws-conf { font-size: 12px; opacity: .75; }
+.ws-flag { position: absolute; top: 8px; right: 8px; padding: 2px 9px; font-size: 12px; font-weight: 700; background: rgba(0, 0, 0, .6); border-radius: 999px; }
+.ws[data-ws-filter="wildlife"] .ws-shot:not([data-class="wildlife"]),
+.ws[data-ws-filter="people"] .ws-shot:not([data-class="people"]),
+.ws[data-ws-filter="empty"] .ws-shot:not([data-class="empty"]) { display: none; }
+.ws-lightbox { position: fixed; inset: 0; z-index: 1000; background: rgba(0, 0, 0, .92); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 16px; }
+.ws-lightbox[hidden] { display: none; }
+.ws-lb-stage { display: flex; justify-content: center; }
+.ws-lb-video, .ws-lb-img { width: min(96vw, 1400px); max-height: 80vh; aspect-ratio: 16/9; border-radius: 10px; background: #000; object-fit: contain; }
+.ws-lb-video[hidden], .ws-lb-img[hidden] { display: none; }
+.ws-lb-title { color: #fff; font-size: 15px; font-weight: 600; }
+.ws-lb-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: center; }
+.ws-lb-streams { display: inline-flex; gap: 6px; }
+.ws-lb-btn { background: transparent; color: #fff; border: 1px solid rgba(255, 255, 255, .3); border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 13px; cursor: pointer; text-decoration: none; }
+.ws-lb-btn[hidden] { display: none; }
+@media (max-width: 680px) {
+  .ws-gallery { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 6px; }
+}

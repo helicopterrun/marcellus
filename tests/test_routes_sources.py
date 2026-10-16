@@ -137,32 +137,113 @@ def test_service_absent() -> None:
         assert r.json()["detail"]["error"] == "external_sources_disabled"
 
 
-def _render(rows: Any) -> str:
+def _render(ctx: Any) -> str:
     t = Jinja2Templates(directory=str(TEMPLATES))
     t.env.globals["fmt_ts"] = fmt.fmt_ts
-    return t.env.get_template("_external_sightings.html").render(external_sightings=rows)
+    return t.env.get_template("_external_sightings.html").render(external_sightings=ctx)
+
+
+NAMES = {"cam1": "Wildlife camera"}
+
+
+def _page_ctx(env: Any, limit: int = 300) -> dict[str, Any]:
+    _client, svc, parsed = env
+    conn = db.open_sidecar(svc.db_path)
+    ctx = sources.sightings_page_context(
+        conn, since=0.0, now=max(p.start for p in parsed) + 60, source_names=NAMES, limit=limit
+    )
+    conn.close()
+    assert ctx is not None
+    return ctx
 
 
 def test_partial_renders(env: Any) -> None:
-    _client, svc, _ = env
-    conn = db.open_sidecar(svc.db_path)
-    rows = sources.sightings_for_page(
-        conn, since=0.0, limit=2, source_names={"cam1": "Wildlife camera"}
-    )
-    conn.close()
-    assert len(rows) == 2
-    html = _render(rows)
+    ctx = _page_ctx(env)
+    html = _render(ctx)
     assert "Wildlife camera" in html
-    assert 'loading="lazy"' in html and "Clip" in html
-    assert rows[0]["subject"] in html
+    for key in ("wildlife", "people", "empty", "all"):
+        assert f'data-filter="{key}"' in html
+    assert f'<span class="n">{ctx["totals"]["all"]}</span>' in html
+    assert 'data-class="' in html and "ws-cap" in html and "ws-time" in html
+    assert "ws-lightbox" in html and "ws-dayhead" in html
+    assert 'preload="none"' in html and " muted " in html
     for bad in ("/snap/", "/media/", "/poster/2", "192.168", "pi:8000"):
         assert bad not in html
     assert "<script" not in html
 
-    mixed = [dict(rows[0]), dict(rows[1], source_name="Other")]
-    assert "External sources" in _render(mixed)
-
 
 def test_partial_empty() -> None:
-    assert _render([]).strip() == ""
     assert _render(None).strip() == ""
+    assert _render([]).strip() == ""
+    assert _render({}).strip() == ""
+
+
+def test_page_context_none_when_empty(env: Any) -> None:
+    _client, svc, _ = env
+    conn = db.open_sidecar(svc.db_path)
+    assert sources.sightings_page_context(conn, since=0.0, now=1e10, source_names={}) is None
+    conn.close()
+
+
+def test_page_items_primary_stream_first(env: Any) -> None:
+    _client, svc, parsed = env
+    conn = db.open_sidecar(svc.db_path)
+    items = sources.sightings_for_page(conn, since=0.0, limit=300, source_names=NAMES)
+    conn.close()
+    by_key = {p.native_key: p for p in parsed}
+    seen_multi = False
+    for it in items:
+        s = by_key[it["key"]]
+        pref = s.preferred_clip_stream()
+        assert it["hover_clip_url"] == it["clip_url"]
+        assert it["time_label"] and len(it["time_label"]) == 5
+        if pref is None:
+            assert it["streams"] == [] and it["hover_clip_url"] is None
+            continue
+        assert it["streams"][0]["name"] == pref.name
+        assert it["hover_clip_url"] == it["streams"][0]["clip_url"]
+        assert all(st["label"] in ("Colour", "IR", st["name"]) for st in it["streams"])
+        for st in it["streams"]:
+            if st["role"] == "color":
+                assert st["label"] == "Colour"
+            if st["role"] == "ir":
+                assert st["label"] == "IR"
+        seen_multi = seen_multi or len(it["streams"]) > 1
+        assert "192.168" not in json.dumps(it)
+
+
+def _item(start: float, subject: str) -> dict[str, Any]:
+    return {"start": start, "subject": subject}
+
+
+def test_group_by_day_labels_order_and_counts() -> None:
+    from datetime import datetime
+
+    now = datetime(2026, 10, 14, 15, 0).timestamp()  # a Wednesday
+    mk = lambda d, h, subj: _item(datetime(2026, 10, d, h, 0).timestamp(), subj)  # noqa: E731
+    items = [
+        mk(12, 9, "animal"),
+        mk(14, 8, "animal"),
+        mk(14, 13, "animal"),
+        mk(13, 10, "person"),
+        mk(14, 11, "unknown"),
+        mk(13, 12, "person"),
+        mk(13, 14, "person"),
+        mk(13, 15, "none"),
+        mk(14, 12, "vehicle"),
+    ]
+    groups = sources.group_sightings_by_day(items, now=now)
+    assert [g["label"] for g in groups] == ["Today", "Yesterday", "Monday 12 Oct"]
+    assert [g["key"] for g in groups] == ["2026-10-14", "2026-10-13", "2026-10-12"]
+    today = groups[0]
+    assert [i["start"] for i in today["items"]] == sorted(
+        (i["start"] for i in today["items"]), reverse=True
+    )
+    assert today["summary"] == "2 animals \u00b7 1 vehicle \u00b7 1 not yet classified"
+    assert today["counts"] == {"wildlife": 4, "people": 0, "empty": 0, "all": 4}
+    assert groups[1]["summary"] == "3 people \u00b7 1 empty"
+    assert groups[1]["counts"] == {"wildlife": 0, "people": 3, "empty": 1, "all": 4}
+    assert groups[2]["summary"] == "1 animal"
+    assert groups[2]["counts"]["wildlife"] == 1
+    solo = sources.group_sightings_by_day([mk(14, 8, "person")], now=now)
+    assert solo[0]["summary"] == "1 person"
