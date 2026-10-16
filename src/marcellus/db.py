@@ -819,6 +819,33 @@ def open_frigate_ro(path: str | Path) -> sqlite3.Connection:
 _SCHEMA_APPLIED: set[str] = set()
 
 
+#: How long `_enable_wal` keeps retrying a fresh DB's switch into WAL.
+_WAL_SWITCH_DEADLINE_S = 5.0
+
+
+def _enable_wal(conn: sqlite3.Connection) -> None:
+    """`PRAGMA journal_mode = WAL`, retried while another connection holds
+    the lock.
+
+    Switching a database INTO WAL needs an exclusive lock, and SQLite answers
+    a contended switch with an immediate SQLITE_BUSY -- the busy_timeout
+    handler is not consulted. Two threads opening a brand-new sidecar DB at
+    once (the encounters worker and the push link path, every test's
+    tmp_path DB, a first boot) could therefore fail one open outright with
+    "database is locked". Once a DB is in WAL the mode is persistent and
+    re-asserting it takes no lock, so this only ever spins on first open.
+    """
+    deadline = time.monotonic() + _WAL_SWITCH_DEADLINE_S
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
+
+
 def open_sidecar(path: str | Path) -> sqlite3.Connection:
     """Open the sidecar DB read/write, creating directory + schema if needed."""
     p = Path(path)
@@ -828,7 +855,7 @@ def open_sidecar(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(p, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 3000")
-    conn.execute("PRAGMA journal_mode = WAL")
+    _enable_wal(conn)
     if needs_schema:
         conn.executescript(SIDECAR_SCHEMA)
         _apply_added_columns(conn)
