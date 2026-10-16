@@ -85,7 +85,8 @@ Off by default (`enabled`), with its own switch independent of `push.enabled`.
 
 ## API
 
-- `GET /v1/sightings` -- query `source`, `subject`, `since`, `before`, `limit`; returns `{sightings, next_before}` (pass `next_before` as `before` for the next page).
+- `GET /v1/sightings` -- query `source`, `subject`, `since`, `before`, `limit`; returns `{sightings, next_before}` (pass `next_before` as `before` for the next page). `subject` takes a comma-separated list (`subject=animal,unknown`); any value outside `animal`, `person`, `vehicle`, `none`, `unknown` is a 400 `bad_subject`. A single value behaves as before.
+- Every sighting (list and detail) carries `source_name`, `title`, `tag` and `has_audio` alongside the original summary fields. `title` is `"<who> · <source_name>"` built like an encounter title, e.g. `Animal · Wildlife camera`; with no labels, subject `unknown` reads `Activity` and `none` reads `Nothing`. `tag` is `notable` for `animal` and `unknown`, `background` for `person`, `vehicle` and `none`. `has_audio` is true when any stream has audio. `source_name` moved from detail-only to the summary; the detail still includes it.
 - `GET /v1/sources/{source_id}/sightings/{key}` -- one sighting.
 - Media: `.../poster`, `.../stills/{stream}/{index}` and `.../clip/{stream}` (Range supported) under the same prefix.
 

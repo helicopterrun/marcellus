@@ -15,6 +15,7 @@ import dataclasses
 import hashlib
 import json
 import sqlite3
+from collections.abc import Sequence
 from typing import Any, Literal
 
 from marcellus.external.types import (
@@ -137,6 +138,7 @@ def list_sightings(
     *,
     source_id: str | None = None,
     subject: str | None = None,
+    subjects: Sequence[str] | None = None,
     since: float | None = None,
     before: float | None = None,
     limit: int = 50,
@@ -147,9 +149,10 @@ def list_sightings(
     if source_id is not None:
         where.append("source_id = ?")
         params.append(source_id)
-    if subject is not None:
-        where.append("subject = ?")
-        params.append(subject)
+    wanted = list(subjects) if subjects is not None else ([subject] if subject else None)
+    if wanted is not None:
+        where.append("subject IN (" + ",".join("?" * len(wanted)) + ")")
+        params.extend(wanted)
     if since is not None:
         where.append("start_time >= ?")
         params.append(since)

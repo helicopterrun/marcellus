@@ -9,8 +9,29 @@
     "tags": false
   },
   "external_sources": {
-    "enabled": false,
-    "sources": []
+    "enabled": true,
+    "sources": [
+      {
+        "enabled": true,
+        "healthy": true,
+        "id": "bernardo",
+        "kind": "bernardo",
+        "media": [
+          "poster",
+          "stills",
+          "clip",
+          "audio"
+        ],
+        "name": "Wildlife camera",
+        "subjects": [
+          "animal",
+          "person",
+          "vehicle",
+          "none",
+          "unknown"
+        ]
+      }
+    ]
   },
   "proxy": {
     "enabled": true

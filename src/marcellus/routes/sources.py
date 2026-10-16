@@ -12,16 +12,19 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from starlette.responses import Response
 
 from marcellus import db
+from marcellus.encounters.linker import KNOWN_LABELS
+from marcellus.encounters.notability import TAG_BACKGROUND, TAG_NOTABLE
+from marcellus.encounters.title import who
 from marcellus.errors import error_detail
 from marcellus.external import store
-from marcellus.external.types import MediaRef, Sighting, media_upstream_path
+from marcellus.external.types import SUBJECTS, MediaRef, Sighting, media_upstream_path
 from marcellus.models.wire import SightingDetail, SightingsResponse
 
 v1_router = APIRouter(prefix="/v1", tags=["v1"])
@@ -55,12 +58,37 @@ def _detail_url(s: Sighting) -> str:
     return f"/v1/sources/{_q(s.source_id)}/sightings/{_q(s.native_key)}"
 
 
-def sighting_summary(s: Sighting) -> dict[str, Any]:
+#: Sources classify with family words ("animal", "vehicle") as well as
+#: specific labels, so those count as known labels when building titles.
+_TITLE_LABELS = KNOWN_LABELS | {"animal", "vehicle"}
+_NOTABLE_SUBJECTS = frozenset({"animal", "unknown"})
+
+
+def sighting_tag(s: Sighting) -> str:
+    """animal and unknown are worth a look; person, vehicle and none are not."""
+    return TAG_NOTABLE if s.subject in _NOTABLE_SUBJECTS else TAG_BACKGROUND
+
+
+def sighting_title(s: Sighting, source_name: str) -> str:
+    """"{who} · {source_name}", built like an encounter title."""
+    if not s.labels and s.subject == "none":
+        who_part = "Nothing"
+    else:
+        labels = list(s.labels) or ([] if s.subject == "unknown" else [s.subject])
+        who_part = who(labels, (), _TITLE_LABELS)
+    return f"{who_part} · {source_name}"
+
+
+def sighting_summary(s: Sighting, source_name: str) -> dict[str, Any]:
     base = _detail_url(s)
     clip_stream = s.preferred_clip_stream()
     return {
         "id": s.wire_id,
         "source": s.source_id,
+        "source_name": source_name,
+        "title": sighting_title(s, source_name),
+        "tag": sighting_tag(s),
+        "has_audio": any(st.has_audio for st in s.streams),
         "key": s.native_key,
         "start": s.start,
         "end": s.end,
@@ -105,10 +133,9 @@ def sighting_detail(s: Sighting, source_name: str) -> dict[str, Any]:
         }
         for b in s.boxes
     ]
-    out = sighting_summary(s)
+    out = sighting_summary(s, source_name)
     out.update(
         {
-            "source_name": source_name,
             "model": s.model,
             "streams": streams,
             "boxes": boxes,
@@ -121,13 +148,12 @@ _STREAM_LABELS = {"color": "Colour", "ir": "IR"}
 
 
 def _page_item(s: Sighting, name: str) -> dict[str, Any]:
-    d = sighting_summary(s)
+    d = sighting_summary(s, name)
     base = _detail_url(s)
     primary = s.preferred_clip_stream()
     ordered = sorted(
         (st for st in s.streams if st.clip), key=lambda st: primary is None or st is not primary
     )
-    d["source_name"] = name
     d["conf_pct"] = None if s.subject_conf is None else int(round(s.subject_conf * 100))
     d["time_label"] = datetime.fromtimestamp(s.start).strftime("%H:%M")
     d["hover_clip_url"] = d["clip_url"]
@@ -254,7 +280,9 @@ def sightings_page_context(
 async def list_sightings(
     request: Request,
     source: str | None = None,
-    subject: Literal["animal", "person", "vehicle", "none", "unknown"] | None = None,
+    subject: str | None = Query(
+        None, description="Comma-separated subjects, e.g. `animal,unknown`."
+    ),
     since: float | None = None,
     before: float | None = None,
     limit: int = Query(50, ge=1, le=200),
@@ -262,15 +290,30 @@ async def list_sightings(
     service = _service(request)
     if source is not None and service.source_name(source) is None:
         raise HTTPException(404, error_detail("unknown_source", f"Unknown source {source!r}."))
+    subjects: list[str] | None = None
+    if subject is not None:
+        subjects = [v.strip() for v in subject.split(",")]
+        bad = [v for v in subjects if v not in SUBJECTS]
+        if bad:
+            raise HTTPException(
+                400,
+                error_detail(
+                    "bad_subject",
+                    f"Unknown subject {bad[0]!r}; expected one of {', '.join(SUBJECTS)}.",
+                ),
+            )
     rows = await db.with_sidecar(
         service.db_path,
         lambda conn: store.list_sightings(
-            conn, source_id=source, subject=subject, since=since, before=before, limit=limit
+            conn, source_id=source, subjects=subjects, since=since, before=before, limit=limit
         ),
     )
     kept = [s for s in rows if service.source_name(s.source_id) is not None]
     next_before = rows[-1].start if len(rows) == limit else None
-    return {"sightings": [sighting_summary(s) for s in kept], "next_before": next_before}
+    return {
+        "sightings": [sighting_summary(s, service.source_name(s.source_id) or "") for s in kept],
+        "next_before": next_before,
+    }
 
 
 async def _load(service: _Service, source_id: str, key: str) -> Sighting:

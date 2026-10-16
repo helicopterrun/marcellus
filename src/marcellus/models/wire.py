@@ -545,6 +545,11 @@ class ContinuationsResponse(_Wire):
 class SightingSummary(_Wire):
     id: str  # "<source_id>:<key>"
     source: str
+    source_name: str
+    # "<who> · <source_name>", e.g. "Animal · Wildlife camera".
+    title: str
+    tag: str  # notable | background
+    has_audio: bool  # any stream has audio
     key: str
     start: float
     end: float | None
@@ -582,7 +587,6 @@ class SightingBoxWire(_Wire):
 
 
 class SightingDetail(SightingSummary):
-    source_name: str
     model: str | None
     streams: list[SightingStreamWire]
     boxes: list[SightingBoxWire]
