@@ -332,6 +332,18 @@ async def healthz(request: Request) -> JSONResponse:
     else:
         checks["encounters"] = "disabled"
 
+    if settings.external_sources.enabled:
+        sources_service = getattr(app.state, "external_sources", None)
+        if sources_service is not None:
+            # Per-source `source:<id>` states from cached service state (no
+            # I/O). Deliberately never clears `ok`: a wildlife camera on
+            # another subnet going dark must not 503 Marcellus itself.
+            checks.update(sources_service.health_checks())
+        else:
+            checks["external_sources"] = "starting"
+    else:
+        checks["external_sources"] = "disabled"
+
     if settings.unifi_protect.enabled:
         protect_subscriber = getattr(app.state, "protect_subscriber", None)
         if protect_subscriber is None:

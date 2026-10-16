@@ -25,6 +25,7 @@ from marcellus.models.wire import EncounterResponse, EncountersResponse
 from marcellus.push import policy_settings
 from marcellus.routes._deps import settings_of as _settings
 from marcellus.routes._deps import templates_of as _templates
+from marcellus.routes.sources import sightings_for_page
 
 router = APIRouter(tags=["encounters"])
 v1_router = APIRouter(prefix="/v1", tags=["v1"])
@@ -180,6 +181,7 @@ async def encounters_page(
         dict(_summary(row, member_rows), members=[_member(m) for m in member_rows])
         for row, member_rows in loaded
     ]
+    external_sightings = await _external_sightings(request, window_since)
     return _templates(request).TemplateResponse(
         request,
         "encounters.html",
@@ -191,8 +193,26 @@ async def encounters_page(
             "active_page": "encounters",
             "adjacency": _adjacency_for(request).to_json(),
             "msg": msg,
+            "external_sightings": external_sightings,
         },
     )
+
+
+async def _external_sightings(request: Request, since: float) -> list[dict[str, Any]]:
+    """Recent external-source sightings for the page's "Wildlife camera"
+    section (guide_content's external-sources.md). Shown beside encounters,
+    never linked into them -- an external device has no zones/adjacency.
+    Empty when the feature is off or its service failed to start."""
+    service = getattr(request.app.state, "external_sources", None)
+    if service is None:
+        return []
+    names = service.source_names()
+
+    def _load(conn: Any) -> list[dict[str, Any]]:
+        return sightings_for_page(conn, since=since, limit=50, source_names=names)
+
+    rows: list[dict[str, Any]] = await db.with_sidecar(service.db_path, _load)
+    return rows
 
 
 @router.get("/encounters/{encounter_id}", response_class=HTMLResponse)

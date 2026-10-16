@@ -170,6 +170,36 @@ def _encounters_capabilities(settings: Any) -> dict[str, Any]:
     }
 
 
+def _external_sources_capabilities(settings: Any, state: Any) -> dict[str, Any]:
+    """`external_sources` block of `/v1/capabilities` (guide_content's
+    `external-sources.md`): which non-Frigate sources this build serves
+    sightings for. Per-source `healthy` is a hint from cached service state;
+    `/healthz` is authoritative. Before the service is up (or when it failed
+    to start) the configured sources are listed as not healthy."""
+    section = settings.external_sources
+    if not section.enabled:
+        return {"enabled": False, "sources": []}
+    service = getattr(state, "external_sources", None)
+    if service is not None:
+        caps: dict[str, Any] = service.capabilities()
+        return caps
+    return {
+        "enabled": True,
+        "sources": [
+            {
+                "id": cfg.id,
+                "kind": cfg.kind,
+                "name": cfg.name,
+                "enabled": cfg.enabled,
+                "healthy": False,
+                "subjects": [],
+                "media": [],
+            }
+            for cfg in section.sources
+        ],
+    }
+
+
 @router.get("/capabilities", response_model=CapabilitiesResponse)
 async def capabilities(request: Request) -> dict[str, Any]:
     """No auth required -- this is the one `/v1` endpoint the client probes
@@ -228,6 +258,7 @@ async def capabilities(request: Request) -> dict[str, Any]:
         "search": {"enabled": True, "related_events": True},
         "unifi_protect": _protect_capabilities(settings, request.app.state),
         "encounters": _encounters_capabilities(settings),
+        "external_sources": _external_sources_capabilities(settings, request.app.state),
     }
 
 

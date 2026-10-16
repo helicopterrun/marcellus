@@ -1,0 +1,61 @@
+{
+  "next_before": null,
+  "sightings": [
+    {
+      "clip_url": "/v1/sources/bernardo/sightings/20261015_210520/clip/cam",
+      "detail_url": "/v1/sources/bernardo/sightings/20261015_210520",
+      "end": 1792123535.9710348,
+      "final": true,
+      "id": "bernardo:20261015_210520",
+      "is_dark": true,
+      "key": "20261015_210520",
+      "labels": [
+        "animal"
+      ],
+      "poster_url": "/v1/sources/bernardo/sightings/20261015_210520/poster",
+      "source": "bernardo",
+      "start": 1792123520.9710348,
+      "status": "complete",
+      "subject": "animal",
+      "subject_conf": 0.927,
+      "trigger": "pir"
+    },
+    {
+      "clip_url": "/v1/sources/bernardo/sightings/20261015_185239/clip/cam",
+      "detail_url": "/v1/sources/bernardo/sightings/20261015_185239",
+      "end": 1792115574.0106788,
+      "final": true,
+      "id": "bernardo:20261015_185239",
+      "is_dark": true,
+      "key": "20261015_185239",
+      "labels": [
+        "person",
+        "animal"
+      ],
+      "poster_url": "/v1/sources/bernardo/sightings/20261015_185239/poster",
+      "source": "bernardo",
+      "start": 1792115559.0106788,
+      "status": "complete",
+      "subject": "person",
+      "subject_conf": 0.87,
+      "trigger": "pir"
+    },
+    {
+      "clip_url": "/v1/sources/bernardo/sightings/20261015_122941/clip/cam2",
+      "detail_url": "/v1/sources/bernardo/sightings/20261015_122941",
+      "end": 1792092596.9169412,
+      "final": true,
+      "id": "bernardo:20261015_122941",
+      "is_dark": false,
+      "key": "20261015_122941",
+      "labels": [],
+      "poster_url": "/v1/sources/bernardo/sightings/20261015_122941/poster",
+      "source": "bernardo",
+      "start": 1792092581.9169412,
+      "status": "complete",
+      "subject": "none",
+      "subject_conf": null,
+      "trigger": "pir"
+    }
+  ]
+}

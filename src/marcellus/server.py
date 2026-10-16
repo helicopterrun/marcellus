@@ -59,6 +59,7 @@ from marcellus.routes import scrub as scrub_routes
 from marcellus.routes import scrub_ui as scrub_ui_routes
 from marcellus.routes import search as search_routes
 from marcellus.routes import settings_page as settings_page_routes
+from marcellus.routes import sources as sources_routes
 from marcellus.routes import status as status_routes
 from marcellus.routes import timeline as timeline_routes
 from marcellus.routes import topology as topology_routes
@@ -547,6 +548,20 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         encounters_task = asyncio.create_task(_encounters_loop(app))
         encounters_worker_task = asyncio.create_task(_encounters_worker_loop(app))
 
+    # External event sources (guide_content's external-sources.md): its own
+    # switch, independent of push. A failure to start is logged and leaves
+    # the feature off -- it must never take the sidecar down with it.
+    if settings.external_sources.enabled:
+        from marcellus.external.service import ExternalSourceService
+
+        try:
+            sources_service = ExternalSourceService(settings)
+            await sources_service.start()
+        except Exception:
+            logger.exception("external_sources: failed to start; sightings unavailable")
+        else:
+            app.state.external_sources = sources_service
+
     push_task: asyncio.Task[None] | None = None
     sweep_task: asyncio.Task[None] | None = None
     delivery_sweep_task: asyncio.Task[None] | None = None
@@ -665,6 +680,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         if scrub_lock is not None:
             scrub_lock.release()
         delivery.cancel_deferred()
+        running_sources = getattr(app.state, "external_sources", None)
+        if running_sources is not None:
+            await running_sources.aclose()
         running_subscriber = getattr(app.state, "push_subscriber", None)
         if running_subscriber is not None:
             running_subscriber.stop()
@@ -769,6 +787,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(triage_routes.router)
     app.include_router(encounters_routes.router)
     app.include_router(encounters_routes.v1_router)
+    app.include_router(sources_routes.v1_router)
     app.include_router(observations_routes.v1_router)
     app.include_router(topology_routes.v1_router)
     app.include_router(timeline_routes.router)

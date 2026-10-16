@@ -1096,6 +1096,47 @@ def _build_v1_push_map_track() -> dict[str, Any]:
         return body
 
 
+#: Real Bernardo `/api/events` rows (animal, person, empty) captured
+#: 2026-10-15 -- the external-sources goldens are built from these through
+#: the same adapter + builders the routes use.
+_BERNARDO_ROWS = (
+    Path(__file__).resolve().parent / "fixtures" / "external" / "bernardo" / "api_events_list.json"
+)
+
+
+def _bernardo_sightings() -> list[Any]:
+    from marcellus.config import BernardoSourceConfig
+    from marcellus.external.bernardo import BernardoSource
+
+    rows = json.loads(_BERNARDO_ROWS.read_text())
+    # A clock long past every row: settled regardless of classification.
+    source = BernardoSource(
+        BernardoSourceConfig(id="bernardo", base_url="http://bernardo.invalid:8000"),
+        clock=lambda: SENT_AT,
+    )
+    return [source.parse_row(r) for r in rows]
+
+
+def _build_v1_sightings() -> dict[str, Any]:
+    from marcellus.models.wire import SightingsResponse
+    from marcellus.routes.sources import sighting_summary
+
+    sightings = _bernardo_sightings()
+    body = {"sightings": [sighting_summary(s) for s in sightings], "next_before": None}
+    out: dict[str, Any] = SightingsResponse.model_validate(body).model_dump(mode="json")
+    return out
+
+
+def _build_v1_sighting_detail() -> dict[str, Any]:
+    from marcellus.models.wire import SightingDetail
+    from marcellus.routes.sources import sighting_detail
+
+    animal = _bernardo_sightings()[0]
+    body = sighting_detail(animal, "Wildlife camera")
+    out: dict[str, Any] = SightingDetail.model_validate(body).model_dump(mode="json")
+    return out
+
+
 #: fixture filename -> zero-arg builder. MANIFEST.json is derived, not built.
 FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "la_content_state.json": _build_la_content_state,
@@ -1123,6 +1164,8 @@ FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "v1_events_related.json": _build_v1_events_related,
     "v1_push_map_live.json": _build_v1_push_map_live,
     "v1_push_map_track.json": _build_v1_push_map_track,
+    "v1_sightings.json": _build_v1_sightings,
+    "v1_sighting_detail.json": _build_v1_sighting_detail,
 }
 
 MANIFEST_NAME = "MANIFEST.json"

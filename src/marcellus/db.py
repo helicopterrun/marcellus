@@ -634,6 +634,48 @@ CREATE TABLE IF NOT EXISTS doorbell_actions (
     error       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_doorbell_actions_camera_ts ON doorbell_actions(camera, ts);
+
+-- External event sources (external/, guide_content's external-sources.md):
+-- the sighting journal. One row per (source, device event key), upserted by
+-- both ingest paths -- MQTT hints (origin 'mqtt', partial) and HTTP polls
+-- (origin 'poll', authoritative). `sighting_json` is the normalised
+-- external.types.Sighting incl. UPSTREAM media paths, which never leave
+-- the server. Upsert rules live in external/store.py: a poll beats a hint,
+-- `final` never goes 1 -> 0, non-empty media never becomes empty.
+CREATE TABLE IF NOT EXISTS external_sightings (
+    source_id     TEXT NOT NULL,
+    native_key    TEXT NOT NULL,
+    native_id     TEXT,
+    start_time    REAL NOT NULL,
+    end_time      REAL,
+    trigger       TEXT NOT NULL DEFAULT '',
+    subject       TEXT NOT NULL DEFAULT 'unknown',
+    subject_conf  REAL,
+    labels_json   TEXT NOT NULL DEFAULT '[]',
+    status        TEXT NOT NULL DEFAULT 'pending',
+    final         INTEGER NOT NULL DEFAULT 0,
+    sighting_json TEXT NOT NULL,
+    raw_json      TEXT NOT NULL DEFAULT '{}',
+    origin        TEXT NOT NULL,                 -- 'mqtt' | 'poll'
+    content_hash  TEXT NOT NULL,
+    first_seen    REAL NOT NULL,
+    updated_at    REAL NOT NULL,
+    PRIMARY KEY (source_id, native_key)
+);
+CREATE INDEX IF NOT EXISTS idx_external_sightings_start ON external_sightings(start_time);
+CREATE INDEX IF NOT EXISTS idx_external_sightings_source_start
+    ON external_sightings(source_id, start_time);
+CREATE INDEX IF NOT EXISTS idx_external_sightings_open
+    ON external_sightings(source_id, start_time) WHERE final = 0;
+-- Per-source device state: key 'state' = last StateReport payload,
+-- 'alert:<code>' = an active device alert, 'availability' = online/offline.
+CREATE TABLE IF NOT EXISTS external_source_state (
+    source_id  TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value_json TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (source_id, key)
+);
 """
 
 # Columns added to `push_devices` / `push_handles` after those tables first

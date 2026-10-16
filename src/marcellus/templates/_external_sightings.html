@@ -1,0 +1,18 @@
+{% if external_sightings %}
+{% set _names = external_sightings|map(attribute='source_name')|unique|list %}
+<section class="capture-visit enc-row ext-sightings">
+  <header>
+    <b class="id-title">{{ _names[0] if _names|length == 1 else 'External sources' }}</b>
+    <span class="mode">{{ external_sightings|length }} sighting{{ 's' if external_sightings|length != 1 else '' }}</span>
+  </header>
+  {% for s in external_sightings %}
+  <div class="enc-chips ext-sighting">
+    {% if s.poster_url %}<img src="{{ s.poster_url }}" alt="{{ s.subject }}" loading="lazy" width="96" style="max-width:96px;height:auto">{% endif %}
+    <span class="badge {{ 'recognized' if s.subject in ('animal', 'person', 'vehicle') else 'noise' }}">{{ s.subject }}{% if s.subject_conf is not none %} {{ (s.subject_conf * 100)|round|int }}%{% endif %}</span>
+    <span class="mode">{{ fmt_ts(s.start) }}</span>
+    {% if s.status != 'complete' %}<span class="badge">{{ s.status }}</span>{% endif %}
+    {% if s.clip_url %}<a href="{{ s.clip_url }}" target="_blank" rel="noopener" class="page-link">Clip</a>{% endif %}
+  </div>
+  {% endfor %}
+</section>
+{% endif %}

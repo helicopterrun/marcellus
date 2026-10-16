@@ -79,6 +79,23 @@ class EncountersCapabilities(_Wire):
     filters: list[str]
 
 
+class ExternalSourceCapability(_Wire):
+    id: str
+    kind: str
+    name: str
+    enabled: bool
+    # A hint only (cached service state); `/healthz` is authoritative.
+    healthy: bool
+    subjects: list[str]
+    # Any of "poster", "stills", "clip", "audio".
+    media: list[str]
+
+
+class ExternalSourcesCapabilities(_Wire):
+    enabled: bool
+    sources: list[ExternalSourceCapability]
+
+
 class CapabilitiesResponse(_Wire):
     version: str
     scrub_cache: ScrubCacheCapabilities
@@ -88,6 +105,7 @@ class CapabilitiesResponse(_Wire):
     search: SearchCapabilities
     unifi_protect: UnifiProtectCapabilities
     encounters: EncountersCapabilities
+    external_sources: ExternalSourcesCapabilities
 
 
 # --------------------------------------------------------------------------
@@ -513,3 +531,58 @@ class ContinuationsResponse(_Wire):
 
     from_: ContinuationFrom = Field(alias="from")
     suggestions: list[ContinuationSuggestion]
+
+
+# --------------------------------------------------------------------------
+# /v1/sightings, /v1/sources/{id}/sightings/{key}  (external event sources,
+# guide_content's external-sources.md) -- plain `response_model=`.
+#
+# Every *_url is a Marcellus-relative path; upstream device URLs never
+# appear on the wire.
+# --------------------------------------------------------------------------
+
+
+class SightingSummary(_Wire):
+    id: str  # "<source_id>:<key>"
+    source: str
+    key: str
+    start: float
+    end: float | None
+    status: str  # pending | complete | failed
+    final: bool
+    subject: str  # animal | person | vehicle | none | unknown
+    subject_conf: float | None
+    labels: list[str]
+    trigger: str
+    is_dark: bool | None
+    poster_url: str | None
+    clip_url: str | None
+    detail_url: str
+
+
+class SightingsResponse(_Wire):
+    sightings: list[SightingSummary]
+    # Pass as `before=` for the next (older) page; null = no more rows.
+    next_before: float | None
+
+
+class SightingStreamWire(_Wire):
+    name: str
+    role: str  # ir | color | unknown
+    stills: list[str]
+    clip_url: str | None
+    has_audio: bool
+
+
+class SightingBoxWire(_Wire):
+    label: str
+    conf: float
+    box: list[float]  # normalised [x0, y0, x1, y1]
+    still_url: str | None
+
+
+class SightingDetail(SightingSummary):
+    source_name: str
+    model: str | None
+    streams: list[SightingStreamWire]
+    boxes: list[SightingBoxWire]

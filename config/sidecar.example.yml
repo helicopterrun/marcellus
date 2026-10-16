@@ -247,4 +247,33 @@ push:
   # handle-redemption fetch) stays valid.
   handle_ttl_s: 3600.0
 
+# External event sources (guide topic "External event sources"): non-Frigate
+# devices whose events Marcellus ingests, journals and serves. The first kind
+# is `bernardo`, a Raspberry Pi wildlife camera. MQTT (same broker as Frigate)
+# is the live trigger; HTTP polling is the record and safety net. Off by
+# default and independent of push. Broker settings left unset inherit
+# push.mqtt_*; mqtt_client_id must differ from push.mqtt_client_id.
+# external_sources:
+#   enabled: true
+#   # mqtt_enabled: true
+#   # mqtt_host: 192.168.1.10
+#   # mqtt_port: 1883
+#   # mqtt_username: bernardo-sources
+#   # mqtt_password: set via MARCELLUS_EXTERNAL_SOURCES__MQTT_PASSWORD
+#   # mqtt_client_id: marcellus-sources
+#   # poll_interval_s: 60.0
+#   # backfill_limit: 200
+#   # retention_days: 30      # device media may be gone sooner (~14 days)
+#   # state_stale_s: 180.0
+#   sources:
+#     - id: bernardo          # never rename once set
+#       base_url: "http://192.168.1.37:8000"
+#       # name: Wildlife camera
+#       # enabled: true
+#       # mqtt_base_topic: bernardo
+#       # poll_limit: 50
+#       # max_connections: 4
+#       # request_timeout_s: 10.0
+#       # settle_after_s: 900.0
+
 log_level: INFO
