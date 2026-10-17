@@ -2,7 +2,7 @@
   "deep_link_card_key": "doorbell:package:t_1755550001-abc123",
   "elapsed_seconds": 0,
   "glyph": "figure.walk",
-  "level": "notify",
+  "level": "quiet",
   "mutation": "create",
   "primary": "Person at the doorbell",
   "secondary": "",

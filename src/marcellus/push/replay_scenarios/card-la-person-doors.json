@@ -2,7 +2,7 @@
   "id": "card-la-person-doors",
   "camera": "doorbell",
   "label": "person",
-  "description": "Live-Activity-eligible person at doors: stranger+doors=notify, then escalates to urgent via zone change to pool (off_limits). Exercises LA push-to-start -> update -> escalation alert (time-sensitive + sound) -> end with 30s dismissal.",
+  "description": "Live-Activity-eligible person at doors: person+doors=Glance (person family), then escalates to urgent via zone change to pool (off_limits). Exercises LA push-to-start -> update -> escalation alert (time-sensitive + sound) -> end with 30s dismissal.",
   "steps": [
     {"type": "new",    "severity": "alert", "delay_s": 0,  "topic": "frigate/reviews", "zones": ["front_door"]},
     {"type": "update", "severity": "alert", "delay_s": 5,  "topic": "frigate/reviews", "zones": ["front_door"]},

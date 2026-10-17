@@ -14,23 +14,26 @@ and example notifications rendered by the real pipeline).
 
 ## The attention ladder
 
-Alerts aren't binary. Every detection is scored on a ladder with four rungs:
+Alerts aren't binary. Every detection is scored on a ladder with four levels:
 
-- **Log** — recorded, no alert.
-- **Glance** — a silent notification.
-- **Notify** — a notification with sound.
-- **Alarm** — critical, breaks through Focus.
+- **Ignore** — recorded, shows in the app only. Nothing on your phone.
+- **Quiet** — a silent notification that stays in Notification Center.
+- **Glance** — a Live Activity on your Lock Screen. No banner, no sound.
+  (A device that can't show Live Activities gets a Quiet notification
+  instead.)
+- **Urgent** — a time-sensitive banner with sound.
 
-The rung comes from a matrix: **who was seen** (unknown person, known
-person, animal, vehicle/thing) crossed with the **place class** of the zone
-it happened in — a package zone and a secure-area zone earn very different
-baseline rungs for the same subject.
+The level comes from a matrix: **who was seen** (person, animal, vehicle,
+thing, package, bin, opening) crossed with the **place** of the zone it
+happened in: Public, Grounds, Entrances or Restricted. A package zone and a
+Restricted zone earn very different baseline levels for the same subject.
 
-Context nudges the rung up or down from there. Nudges *up*: nobody's home,
+Context nudges the level up or down from there. Nudges *up*: nobody's home,
 it's nighttime, the subject is lingering, or they're approaching the secure
 area. Nudges *down*: a known face, low detection confidence, or the subject
-is leaving. An approaching person can escalate rung by rung, and a situation
-that fizzles resolves quietly instead of leaving a stale alarm.
+is leaving. Behaviour alone never takes a story past Glance; Urgent comes
+from your settings, a Restricted place or a safety trigger. A situation that
+fizzles resolves quietly instead of leaving a stale alert.
 
 Per-zone overrides set in Zones & routing win over the matrix outright. You
 configure the ladder in the Elsinore app (Settings → Alerts) and the app's
@@ -48,22 +51,22 @@ Every routing decision is logged (`GET /v1/push/decisions`) with a `stage`
 | `system` | Server notice |
 | `safety` | Safety exception: always urgent |
 | `zone_override` | Your rule for {subject} in {zone} |
-| `off_cell` | {subject} in {place} is set to Off |
+| `off_cell` | {subject} in {place} is set to Ignore |
 | `table` | {subject} in {place} is set to {level} |
 | `nudge_up` | raised one step (nobody home / night / approaching …) |
 | `nudge_down` | lowered one step (known / leaving …) |
-| `child_hazard_floor` | at least Notify: child-hazard zone |
-| `street_cap` | capped at Quiet: street |
-| `unconfirmed_cap` | capped at Quiet: detector unconfirmed |
-| `quiet_hours_cap` | capped at Quiet: quiet hours |
+| `child_hazard_floor` | at least Glance: child-hazard zone |
+| `street_cap` | capped at Glance: street |
+| `unconfirmed_cap` | capped at Glance: detector unconfirmed |
+| `quiet_hours_hold` | held at Glance: quiet hours |
 | `reclass_dangerous_animal` | treated as a person: dangerous animal |
 
 From a card's detail screen, **Quiet this** (`POST /v1/push/silence`) drops
-the cell it routed through — the per-zone override or the outcomes-table
-cell — to `quiet`, and the decisions feed marks every affected entry
+the cell it routed through — the per-zone override or the ladder cell —
+to Quiet, and the decisions feed marks every affected entry
 `silenced`. `PUT /v1/push/overrides` is the fine-grained version for the
 settings screen: set or clear one zone-override cell, or set one
-outcomes-table cell directly, without needing a card to point at.
+ladder cell directly, without needing a card to point at.
 
 `GET /v1/push/status` is the one-glance health check: MQTT/Frigate liveness,
 the last review/decision/send timestamps, quiet-hours state, and registered

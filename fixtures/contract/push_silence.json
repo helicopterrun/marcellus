@@ -1,6 +1,6 @@
 {
-  "applied": "quiet",
-  "previous": "glance",
+  "applied": "silent",
+  "previous": "quiet",
   "scope": {
     "camera": "doorbell",
     "kind": "outcome_cell",

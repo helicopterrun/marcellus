@@ -1,0 +1,27 @@
+{
+  "aps": {
+    "alert": {
+      "body": "Courier left a box on the porch",
+      "title": "Package at the front door"
+    },
+    "category": "card.silent",
+    "interruption-level": "passive",
+    "mutable-content": 1,
+    "thread-id": "doorbell"
+  },
+  "camera": "doorbell",
+  "card_key": "doorbell:package:t_1755550001-abc123",
+  "deep_link": "elsinore://camera/doorbell?t=1785952622.704",
+  "event_ts": 1785952622.704,
+  "glyph": "shippingbox.fill",
+  "level": "silent",
+  "media": "h_9f3a1c2d3e4f5061",
+  "mutation": "create",
+  "place_class": "doors",
+  "primary": "Package at the front door",
+  "secondary": "Courier left a box on the porch",
+  "state_since_ts": 1785952622.704,
+  "subject_kind": "package",
+  "v": 1,
+  "zone_name": "front_door"
+}

@@ -23,7 +23,7 @@
         "backyard"
       ],
       "friendly_name": null,
-      "guessed_class": "private",
+      "guessed_class": "yard",
       "zone": "garage"
     },
     {
@@ -62,6 +62,50 @@
     "escalation_sound": "urgent",
     "floorplan": null,
     "geometric_dedup": false,
+    "ladder": {
+      "animal": {
+        "doors": "glance",
+        "off_limits": "glance",
+        "street": "ignore",
+        "yard": "glance"
+      },
+      "bin": {
+        "doors": "glance",
+        "off_limits": "glance",
+        "street": "glance",
+        "yard": "glance"
+      },
+      "opening": {
+        "doors": "glance",
+        "off_limits": "glance",
+        "street": "ignore",
+        "yard": "ignore"
+      },
+      "package": {
+        "doors": "silent",
+        "off_limits": "glance",
+        "street": "ignore",
+        "yard": "glance"
+      },
+      "person": {
+        "doors": "glance",
+        "off_limits": "urgent",
+        "street": "ignore",
+        "yard": "glance"
+      },
+      "thing": {
+        "doors": "ignore",
+        "off_limits": "glance",
+        "street": "ignore",
+        "yard": "urgent"
+      },
+      "vehicle": {
+        "doors": "glance",
+        "off_limits": "glance",
+        "street": "ignore",
+        "yard": "glance"
+      }
+    },
     "live_activities": {
       "alert_all_changes": false,
       "bins": true,
@@ -80,53 +124,57 @@
         "doors": "glance",
         "off_limits": "glance",
         "private": "glance",
-        "street": "log",
+        "street": "off",
         "yard": "glance"
       },
       "bin": {
         "doors": "glance",
-        "off_limits": "notify",
-        "private": "log",
+        "off_limits": "glance",
+        "private": "glance",
         "street": "glance",
         "yard": "glance"
       },
       "opening": {
         "doors": "glance",
-        "off_limits": "notify",
-        "private": "glance",
-        "street": "log",
+        "off_limits": "glance",
+        "private": "off",
+        "street": "off",
         "yard": "off"
       },
       "package": {
         "doors": "notify",
-        "off_limits": "notify",
+        "off_limits": "glance",
         "private": "glance",
-        "street": "log",
+        "street": "off",
         "yard": "glance"
       },
       "person": {
-        "doors": "notify",
+        "doors": "glance",
         "off_limits": "alarm",
-        "private": "notify",
+        "private": "glance",
         "street": "log",
         "yard": "glance"
       },
       "thing": {
-        "doors": "log",
+        "doors": "off",
         "off_limits": "glance",
-        "private": "log",
-        "street": "log",
+        "private": "alarm",
+        "street": "off",
         "yard": "alarm"
       },
       "vehicle": {
         "doors": "glance",
-        "off_limits": "notify",
+        "off_limits": "glance",
         "private": "glance",
-        "street": "log",
+        "street": "off",
         "yard": "glance"
       }
     },
-    "quiet_hours": null,
+    "quiet_hours": {
+      "end": "07:00",
+      "mode": "hold_urgent",
+      "start": "22:00"
+    },
     "recognition": {
       "known_person": "relax_one",
       "known_vehicle": "relax_one"
@@ -171,49 +219,49 @@
       },
       "bin": {
         "doors": "quiet",
-        "off_limits": "notify",
-        "private": "log",
+        "off_limits": "quiet",
+        "private": "quiet",
         "street": "quiet",
         "yard": "quiet"
       },
       "opening": {
         "doors": "quiet",
-        "off_limits": "notify",
-        "private": "quiet",
+        "off_limits": "quiet",
+        "private": "log",
         "street": "log",
         "yard": "log"
       },
       "package": {
         "doors": "notify",
-        "off_limits": "notify",
+        "off_limits": "quiet",
         "private": "quiet",
         "street": "log",
         "yard": "quiet"
       },
       "person": {
-        "doors": "notify",
+        "doors": "quiet",
         "off_limits": "urgent",
-        "private": "notify",
+        "private": "quiet",
         "street": "log",
         "yard": "quiet"
       },
       "thing": {
         "doors": "log",
         "off_limits": "quiet",
-        "private": "log",
+        "private": "urgent",
         "street": "log",
         "yard": "urgent"
       },
       "vehicle": {
         "doors": "quiet",
-        "off_limits": "notify",
+        "off_limits": "quiet",
         "private": "quiet",
         "street": "log",
         "yard": "quiet"
       }
     },
     "secure_area": null,
-    "v": 2,
+    "v": 3,
     "zone_classes": {
       "front_door": "doors",
       "garage": "off_limits"
@@ -221,7 +269,7 @@
     "zone_names": {},
     "zone_overrides": {
       "sidewalk": {
-        "person": "notify"
+        "person": "silent"
       }
     }
   }

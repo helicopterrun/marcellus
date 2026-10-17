@@ -6,7 +6,7 @@
   "last_review_at": "2026-08-05T17:56:32Z",
   "last_sent_at": "2026-09-17T17:55:00Z",
   "last_sent_card_key": "doorbell:package:t_1755550001-abc123",
-  "last_sent_level": "notify",
+  "last_sent_level": "urgent",
   "mqtt_connected": true,
   "now": "2026-09-17T17:58:41Z",
   "paused_until": null,

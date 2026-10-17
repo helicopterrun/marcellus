@@ -7,7 +7,7 @@ config: ["unifi_protect"]
 
 A UniFi Protect doorbell ring goes straight to your phone -- bypassing the
 attention ladder entirely. This is on purpose: a ring is a person at the
-door, not a detection to route through Log/Glance/Notify/Alarm.
+door, not a detection to route through Ignore/Quiet/Glance/Urgent.
 
 ## Setup
 
