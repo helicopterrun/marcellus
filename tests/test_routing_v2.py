@@ -84,15 +84,23 @@ class TestClassifySubject:
 
 
 class TestV2TableRouting:
-    def test_person_at_doors_is_notify(self):
+    def test_person_at_doors_is_quiet(self):
+        # v3 default: person x doors is Glance (engine level "quiet").
         policy_settings.apply_settings(policy_settings.default_settings())
         snap = Snapshot(subject="person", place="doors", label="person")
-        assert evaluate_ladder(snap) == "notify"
+        assert evaluate_ladder(snap) == "quiet"
 
-    def test_vehicle_at_off_limits_is_notify(self):
+    def test_vehicle_at_off_limits_is_quiet(self):
         policy_settings.apply_settings(policy_settings.default_settings())
         snap = Snapshot(subject="vehicle", place="off_limits", label="car")
-        assert evaluate_ladder(snap) == "notify"
+        assert evaluate_ladder(snap) == "quiet"
+
+    def test_silent_cell_evaluates_to_silent(self):
+        settings = policy_settings.default_settings()
+        settings["ladder"]["person"]["doors"] = "silent"
+        policy_settings.apply_settings(policy_settings.normalize_settings(settings))
+        snap = Snapshot(subject="person", place="doors", label="person")
+        assert evaluate_ladder(snap) == "silent"
 
     def test_person_at_off_limits_is_urgent(self):
         policy_settings.apply_settings(policy_settings.default_settings())
@@ -131,13 +139,13 @@ async def test_create_time_routing_ignores_sub_label(sidecar_db_path: Path):
 
 class TestRelaxedLevel:
     def test_relax_one_from_urgent(self):
-        assert _relaxed_level("urgent", "relax_one") == "notify"
-
-    def test_relax_one_from_notify(self):
-        assert _relaxed_level("notify", "relax_one") == "quiet"
+        assert _relaxed_level("urgent", "relax_one") == "quiet"
 
     def test_relax_one_from_quiet(self):
-        assert _relaxed_level("quiet", "relax_one") == "log"
+        assert _relaxed_level("quiet", "relax_one") == "silent"
+
+    def test_relax_one_from_silent(self):
+        assert _relaxed_level("silent", "relax_one") == "log"
 
     def test_relax_one_from_log_returns_none(self):
         assert _relaxed_level("log", "relax_one") is None
@@ -145,8 +153,9 @@ class TestRelaxedLevel:
     def test_relax_to_quiet_from_urgent(self):
         assert _relaxed_level("urgent", "relax_to_quiet") == "quiet"
 
-    def test_relax_to_quiet_from_notify(self):
-        assert _relaxed_level("notify", "relax_to_quiet") == "quiet"
+    def test_relax_to_quiet_from_silent_returns_none(self):
+        # Silent is already below quiet: relax_to_quiet never raises a level.
+        assert _relaxed_level("silent", "relax_to_quiet") is None
 
     def test_relax_to_quiet_from_quiet_returns_none(self):
         assert _relaxed_level("quiet", "relax_to_quiet") is None
@@ -157,8 +166,10 @@ class TestRelaxedLevel:
 
 @pytest.mark.asyncio
 async def test_recognition_deescalates_silently(sidecar_db_path: Path):
-    """Recognition relax_one: person at urgent → deescalate to notify.
-    The deescalate mutation is silent: no sound, card push passive."""
+    """Recognition relax_one: person at urgent → deescalate to quiet (Glance).
+    This device can't show a Live Activity (no push-to-start token), so the
+    Glance level falls back to a passive silent card; the deescalate mutation
+    carries no sound."""
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = _device(push_to_start="")
@@ -185,7 +196,7 @@ async def test_recognition_deescalates_silently(sidecar_db_path: Path):
     sends = _card_sends(transport2)
     assert len(sends) == 1
     aps = sends[0]["payload"]["aps"]
-    assert sends[0]["payload"]["level"] == "notify"
+    assert sends[0]["payload"]["level"] == "silent"
     assert sends[0]["payload"]["mutation"] == "deescalate"
     assert "sound" not in aps
     assert aps["interruption-level"] == "passive"
@@ -203,10 +214,10 @@ async def test_recognition_la_update_no_alert(sidecar_db_path: Path):
     settings = policy_settings.default_settings()
     settings["mute_sounds"] = False
     settings["recognition"] = {"known_person": "relax_to_quiet", "known_vehicle": "relax_one"}
-    settings["routing_table_v2"]["person"]["doors"] = "notify"
-    policy_settings.apply_settings(settings)
+    settings["ladder"]["person"]["doors"] = "urgent"
+    policy_settings.apply_settings(policy_settings.normalize_settings(settings))
 
-    # Create at doors (notify) — qualifies for person LA family.
+    # Create at doors (urgent) — qualifies for person LA family.
     await handle_delivery_event(
         _event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
@@ -233,11 +244,11 @@ async def test_recognition_la_update_no_alert(sidecar_db_path: Path):
     )
     la = _la_sends(transport2)
     assert len(la) >= 1
-    # Device-scoped LA: relaxing to "quiet" drops the card below LA
-    # eligibility, so this now closes the aggregate activity ("end") rather
-    # than sending a card-specific "update". Either way it must stay silent:
-    # no alert, no sound.
+    # Relaxing urgent to quiet (Glance) keeps the person Live Activity
+    # eligible (the family starts at quiet or urgent), so it is a plain
+    # "update" -- and it must stay silent: no alert, no sound.
     update = [s for s in la if s["event"] in ("update", "end")][-1]
+    assert update["event"] == "update"
     assert "alert" not in update["payload"]["aps"]
     assert "sound" not in update["payload"]["aps"]
 
@@ -511,6 +522,7 @@ class TestSettingsShape:
 
     def test_validate_v2_table_rejects_bad_level(self):
         s = policy_settings.default_settings()
+        del s["ladder"]  # a legacy-client body: routing_table_v2 is validated
         s["routing_table_v2"]["person"]["doors"] = "scream"
         errors = policy_settings.validate_settings(s)
         assert any("routing_table_v2.person.doors" in e for e in errors)
@@ -529,6 +541,13 @@ class TestSettingsShape:
 
     def test_zone_overrides_accept_v2_subjects(self):
         s = policy_settings.default_settings()
-        s["zone_overrides"] = {"pool": {"person": "urgent", "vehicle": "notify"}}
+        s["zone_overrides"] = {"pool": {"person": "urgent", "vehicle": "silent"}}
         errors = policy_settings.validate_settings(s)
         assert errors == []
+
+    def test_zone_overrides_still_accept_legacy_notify(self):
+        s = policy_settings.default_settings()
+        s["zone_overrides"] = {"pool": {"vehicle": "notify"}}
+        assert policy_settings.validate_settings(s) == []
+        normalized = policy_settings.normalize_settings(s)
+        assert normalized["zone_overrides"] == {"pool": {"vehicle": "silent"}}
