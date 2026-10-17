@@ -54,6 +54,8 @@ class PushCapabilities(_Wire):
     enabled: bool
     transport: str
     attention_subjects: list[str]
+    #: Attention ladder version (v3: settings carry `ladder`). Additive.
+    ladder_version: int
 
 
 class DecisionsCapabilities(_Wire):

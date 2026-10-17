@@ -95,7 +95,9 @@ class DeviceRegistration(BaseModel):
     app_version: str = ""
     cameras: list[str] = Field(default_factory=list)  # [] = all cameras
     labels: list[str] = Field(default_factory=list)  # [] = all labels
-    min_severity: Literal["alert", "detection"] = "alert"
+    # Ladder v3 §5.4: `detection` (was `alert`, which silently dropped every
+    # Glance for a client that omitted the field -- the 2026-09-22 app bug).
+    min_severity: Literal["alert", "detection"] = "detection"
 
     # -- v2 --
     schema_version: int = 1
@@ -415,10 +417,13 @@ async def test_push(
 
     from marcellus.push.cards import Card
     from marcellus.push.delivery import build_card_payload
+    from marcellus.push.ladder_policy import SYSTEM_CARD_LEVEL
 
     card_key = f"test:{apns_token[:8]}:{int(now)}"
+    # A system card (v3 §6): its own delivery outside the ladder -- an active
+    # push with sound, exactly as before ladder v3.
     card = Card(
-        card_key=card_key, level="notify", peak_level="notify",
+        card_key=card_key, level=SYSTEM_CARD_LEVEL, peak_level=SYSTEM_CARD_LEVEL,
         created_at=now, updated_at=now, state_since_at=now,
     )
     payload = build_card_payload(
