@@ -1813,6 +1813,7 @@ async def handle_delivery_event(
             event_camera=event.camera,
             cameras_path=cameras_path or None,
             fallback_out=fallback_devices,
+            la_available=config.delivery_la_enabled,
         )
         if mutation in (CREATE, ESCALATE, DEESCALATE):
             decision_trace.annotate(
@@ -1826,7 +1827,11 @@ async def handle_delivery_event(
                 # that it happened.
                 decision_trace.annotate(
                     conn, event.event_id,
-                    la_reason=None if la_covered else "device_not_la_capable",
+                    la_reason=(
+                        None if la_covered
+                        else "device_not_la_capable" if config.delivery_la_enabled
+                        else "la_disabled"
+                    ),
                     add_reason="glance_fallback",
                 )
         if warm_task is not None:
@@ -1962,6 +1967,7 @@ async def handle_delivery_resolve(
             subject_kind=kind, camera=camera, zone_name=zone_name,
             now=now, demote_tokens=demote_resolve,
             suppress_demoted=delivery_mode == "la_first" and not la_only,
+            la_available=config.delivery_la_enabled,
         )
         conn.commit()
         resolved += 1
@@ -2207,6 +2213,7 @@ async def handle_recognition_event(
         demote_tokens=demote_recog,
         suppress_demoted=_recog_la.get("delivery", "la_first") == "la_first"
         and not _recog_la.get("la_only", False),
+        la_available=config.delivery_la_enabled,
     )
     conn.commit()
     logger.info(

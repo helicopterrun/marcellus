@@ -237,6 +237,10 @@ false — e.g. the Mac): a `quiet` card is delivered to that device as a
 `silent` card (passive, no sound, `card.silent`, kept). Trace it per device
 as today's la_reason `device_not_la_capable` plus the fallback.
 
+The same applies to every device when Live Activities are switched off
+server-wide (`push.delivery_la_enabled: false`): no device can show one, so
+Glance falls back to a silent card everywhere (la_reason `la_disabled`).
+
 ### 5.4 Eligibility and registration
 
 - `_LEVEL_TO_SEVERITY`: `urgent → alert`, `silent → detection`,

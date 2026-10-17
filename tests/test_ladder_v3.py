@@ -764,3 +764,64 @@ def test_legacy_default_constants_agree_with_the_default():
     for subject in PS.SUBJECTS_V2:
         assert PS.DEFAULT_ROUTING_TABLE_V2[subject] == derived_v2[subject]
     assert PS.DEFAULT_ROUTING_TABLE["stranger"] == derived_v2["person"]
+
+
+# -- §5.3 Glance fallback when Live Activities are switched off ---------------
+
+
+@pytest.mark.asyncio
+async def test_glance_falls_back_for_every_device_when_las_are_disabled(
+    sidecar_db_path, tmp_path
+):
+    conn = db.open_sidecar(tmp_path / "marcellus.db")
+    transport = LogTransport()
+    fallback: list[str] = []
+    try:
+        card = _card("quiet")
+        await send_card_mutation(
+            conn, transport, [_dev("a", la=True), _dev("mac", la=False)], card, "create",
+            _payload(card), camera="cam", subject_kind="person", now=0.0,
+            fallback_out=fallback, la_available=False,
+        )
+    finally:
+        conn.close()
+    sent = {s["device_id"]: s["payload"] for s in transport.sent}
+    assert set(sent) == {"d_a", "d_mac"} and sorted(fallback) == ["d_a", "d_mac"]
+    for payload in sent.values():
+        assert payload["level"] == "silent"
+        assert payload["aps"]["category"] == "card.silent"
+        assert payload["aps"]["interruption-level"] == "passive"
+        assert "sound" not in payload["aps"]
+
+
+@pytest.mark.asyncio
+async def test_glance_person_with_las_disabled_reaches_an_iphone_as_a_silent_card(
+    sidecar_db_path,
+):
+    from marcellus.push import decision_trace
+    from marcellus.push.delivery_wire import handle_delivery_event
+    from marcellus.push.models import ReviewEvent
+
+    _apply()  # person at doors = Glance
+    conn = db.open_sidecar(sidecar_db_path)
+    transport = LogTransport()
+    try:
+        await handle_delivery_event(
+            ReviewEvent(
+                review_id="r1", camera="doorbell", severity="alert", labels=("person",),
+                track_ids=("trk1",), zones=("front_door",),
+            ),
+            conn=conn, devices=[_dev("iphone", la=True)], transport=transport,
+            config=PushSection(delivery_enabled=True, delivery_la_enabled=False), now=0.0,
+        )
+        decisions = decision_trace.recent(conn)
+    finally:
+        conn.close()
+    assert not [s for s in transport.sent if s.get("live_activity")]
+    cards = [s for s in transport.sent if not s.get("live_activity")]
+    assert len(cards) == 1
+    payload = cards[0]["payload"]
+    assert payload["level"] == "silent" and payload["aps"]["category"] == "card.silent"
+    assert decisions[0]["level"] == "quiet"
+    assert "glance_fallback" in decisions[0]["reasons"]
+    assert decisions[0].get("la_reason") == "la_disabled"

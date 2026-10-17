@@ -446,6 +446,7 @@ async def send_card_mutation(
     event_camera: str = "",
     cameras_path: list[str] | None = None,
     fallback_out: list[str] | None = None,
+    la_available: bool = True,
 ) -> int:
     """Persist `card` and send to eligible devices, honoring per-device
     filtering, snooze, quiet resolves, and the global sounding rate cap.
@@ -467,7 +468,10 @@ async def send_card_mutation(
 
     A Glance (`quiet`) card goes only to devices that can't show a Live
     Activity, as a `silent` card (§5.3); `fallback_out`, when given, collects
-    the device ids that got that fallback (for the decision trace)."""
+    the device ids that got that fallback (for the decision trace).
+    `la_available` false (Live Activities switched off server-wide,
+    `push.delivery_la_enabled`) means no device can show one: every device
+    gets the Glance fallback, exactly like a device without LA support."""
     import time as _time
 
     from marcellus.push import store
@@ -520,11 +524,12 @@ async def send_card_mutation(
 
         dev_payload = payload
         is_fallback = False
-        if mutation == RESOLVE and not device.can_live_activity and card.fallback_row:
+        device_la = device.can_live_activity and la_available
+        if mutation == RESOLVE and not device_la and card.fallback_row:
             dev_payload = dict(payload)
             dev_payload["ephemeral"] = not ephemeral_exempt(card, fallback_device=True)
         if glance_card or (mutation == RESOLVE and glance_story):
-            if device.can_live_activity:
+            if device_la:
                 if mutation != RESOLVE:
                     continue  # its Live Activity is the Glance surface
             else:
@@ -532,8 +537,9 @@ async def send_card_mutation(
                 is_fallback = mutation != RESOLVE
                 logger.info(
                     "push: glance fallback -> silent card device=%s card_key=%s "
-                    "mutation=%s la_reason=device_not_la_capable",
+                    "mutation=%s la_reason=%s",
                     device.device_id, card.card_key, mutation,
+                    "device_not_la_capable" if la_available else "la_disabled",
                 )
                 fallback_sent.append(device.device_id)
         demoted = device.apns_token in demote_tokens

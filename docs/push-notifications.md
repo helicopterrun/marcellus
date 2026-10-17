@@ -247,7 +247,9 @@ omitted and the same collapse id, so the card replaces in place.
 push-to-start token, or `la_capable` false, e.g. the Mac) gets a Glance
 story as a Quiet card instead: passive, no sound, `card.silent`, kept. The
 decision trace records `glance_fallback` and la_reason
-`device_not_la_capable`.
+`device_not_la_capable`. With Live Activities switched off server-wide
+(`push.delivery_la_enabled: false`) every device gets this fallback (la_reason
+`la_disabled`), so Glance never silently delivers nothing.
 
 **Eligibility.** Device registration `min_severity` now defaults to
 `"detection"` (it was `"alert"`, which silently dropped Glance for clients
