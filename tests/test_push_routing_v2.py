@@ -325,7 +325,7 @@ def test_v2_table_person_at_doors_is_quiet():
 def test_v2_table_vehicle_at_yard_is_quiet():
     _apply_v2_defaults()
     level = evaluate_ladder(Snapshot(subject="vehicle", place="yard"))
-    assert level == "quiet"
+    assert level == "silent"  # Balanced: Quiet (passive card), not Glance
 
 
 def test_v2_table_animal_at_off_limits_is_quiet():
@@ -337,7 +337,7 @@ def test_v2_table_animal_at_off_limits_is_quiet():
 def test_v2_table_thing_at_off_limits_is_quiet():
     _apply_v2_defaults()
     level = evaluate_ladder(Snapshot(subject="thing", place="off_limits"))
-    assert level == "quiet"
+    assert level == "silent"  # Balanced: Quiet
 
 
 def test_relaxed_level_relax_one_from_quiet():

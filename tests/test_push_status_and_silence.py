@@ -191,6 +191,9 @@ class TestSilence:
         assert active["zone_overrides"]["front_door"]["person"] == "silent"
 
     def test_silence_outcome_cell_card_no_zone(self, client: TestClient, sidecar_conn):
+        _glance = policy_settings.default_settings()
+        _glance["ladder"]["animal"]["yard"] = "glance"  # explicit; default is Quiet
+        policy_settings.apply_settings(_glance)
         _make_outcome_cell_card(sidecar_conn)
         resp = client.post("/v1/push/silence", json={"card_key": CARD_KEY_CELL})
         assert resp.status_code == 200
@@ -406,6 +409,9 @@ class TestV3Silence:
 
     @pytest.mark.parametrize("level", ["glance", "alarm"])
     def test_outcome_cell_rejects_outcome_words(self, client: TestClient, level: str):
+        _glance = policy_settings.default_settings()
+        _glance["ladder"]["animal"]["yard"] = "glance"  # explicit; default is Quiet
+        policy_settings.apply_settings(_glance)
         resp = client.put(
             "/v1/push/overrides",
             json={"kind": "outcome_cell", "subject": "animal", "place": "yard", "level": level},

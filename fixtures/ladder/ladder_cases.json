@@ -135,7 +135,7 @@
       "subject": "animal",
       "place": "yard"
     },
-    "expected": "quiet"
+    "expected": "silent"
   },
   {
     "id": 14,
@@ -144,7 +144,7 @@
       "subject": "animal",
       "place": "street"
     },
-    "expected": "log"
+    "expected": "suppressed"
   },
   {
     "id": 15,
@@ -154,17 +154,17 @@
       "place": "doors",
       "dwell_exceeded": true
     },
-    "expected": "silent"
+    "expected": "quiet"
   },
   {
     "id": 16,
     "name": "Package taken by stranger",
     "inputs": {
-      "subject": "thing",
+      "subject": "package",
       "place": "yard",
       "dwell_exceeded": true
     },
-    "expected": "silent"
+    "expected": "quiet"
   },
   {
     "id": 17,

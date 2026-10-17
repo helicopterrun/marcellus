@@ -45,17 +45,31 @@ def canonical_level(level: str) -> str:
 
 
 #: subject x place -> base level, before nudges/floor/caps. The evaluator's
-#: own built-in baseline (the golden suite's table); the live, user-edited
-#: table comes from `policy_settings` via `set_table`. v3 translation of the
-#: pre-v3 baseline: `private` merged into `yard` (louder wins), and the
-#: retired `notify` cells became Glance (`quiet`) -- the Live Activity the
-#: old notify level also started (`docs/ladder-v3.md` §2.1 example row).
+#: own built-in baseline, used when no settings were ever applied (the golden
+#: suite's table); the live, user-edited table comes from `policy_settings`
+#: via `set_table`. It agrees with the v3 default ladder, the owner-approved
+#: Balanced preset (`policy_settings.DEFAULT_LADDER`, `docs/ladder-v3.md`
+#: §2.1), in engine levels; `stranger` is the person row, and `known` (no
+#: preset counterpart) keeps its pre-v3 row.
 TABLE: dict[str, dict[str, str]] = {
+    "person": {"street": "log", "yard": "quiet", "doors": "quiet", "off_limits": "urgent"},
     "stranger": {"street": "log", "yard": "quiet", "doors": "quiet", "off_limits": "urgent"},
     "known": {"street": "log", "yard": "log", "doors": "quiet", "off_limits": "quiet"},
-    "animal": {"street": "log", "yard": "quiet", "doors": "quiet", "off_limits": "quiet"},
-    "thing": {"street": "log", "yard": "log", "doors": "log", "off_limits": "quiet"},
+    "vehicle": {"street": "log", "yard": "silent", "doors": "silent", "off_limits": "quiet"},
+    "animal": {"street": "log", "yard": "silent", "doors": "silent", "off_limits": "quiet"},
+    "package": {"street": "log", "yard": "silent", "doors": "quiet", "off_limits": "quiet"},
+    "opening": {"street": "log", "yard": "silent", "doors": "quiet", "off_limits": "urgent"},
+    "bin": {"street": "log", "yard": "log", "doors": "silent", "off_limits": "silent"},
+    "thing": {"street": "log", "yard": "log", "doors": "silent", "off_limits": "silent"},
 }
+
+#: The Balanced preset's Ignore cells for non-person subjects: suppressed
+#: before evaluation (v3 §4.1 step 6), the built-in counterpart of what
+#: `policy_settings.apply_settings` derives from a user's ladder.
+DEFAULT_OFF_CELLS: frozenset[tuple[str, str]] = frozenset(
+    {(s, "street") for s in ("vehicle", "animal", "package", "opening", "bin", "thing")}
+    | {(s, "yard") for s in ("bin", "thing")}
+)
 
 #: Frigate labels that reclassify `subject` as `stranger` regardless of its
 #: upstream classification (a bear or skunk on the property outranks whatever
@@ -102,7 +116,7 @@ def set_zone_overrides(overrides: dict[str, dict[str, str]]) -> None:
 #: evaluator answers SUPPRESSED for them before nudges can raise anything.
 #: Zone overrides still outrank this -- an explicit per-zone rule is the
 #: user's most specific statement.
-OFF_CELLS: set[tuple[str, str]] = set()
+OFF_CELLS: set[tuple[str, str]] = set(DEFAULT_OFF_CELLS)
 
 
 def set_off_cells(cells: set[tuple[str, str]]) -> None:

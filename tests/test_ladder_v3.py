@@ -636,3 +636,39 @@ def test_settings_get_serves_ladder_and_derived_views(frigate_db_path, sidecar_d
         r = client.put("/v1/push/settings", json=bad)
         assert r.status_code == 400
         assert r.json()["detail"]["error"] == "invalid_settings"
+
+
+# -- §2.1 default: the Balanced preset, and every fallback agrees ------------
+
+
+BALANCED = {
+    "person": ("ignore", "glance", "glance", "urgent"),
+    "vehicle": ("ignore", "silent", "silent", "glance"),
+    "animal": ("ignore", "silent", "silent", "glance"),
+    "package": ("ignore", "silent", "glance", "glance"),
+    "opening": ("ignore", "silent", "glance", "urgent"),
+    "bin": ("ignore", "ignore", "silent", "silent"),
+    "thing": ("ignore", "ignore", "silent", "silent"),
+}
+
+
+def test_default_ladder_is_the_balanced_preset():
+    ladder = PS.default_settings()["ladder"]
+    assert {s: tuple(row[p] for p in PS.PLACES) for s, row in ladder.items()} == BALANCED
+
+
+def test_builtin_engine_table_and_off_cells_agree_with_the_default():
+    table, off = PS.engine_table(PS.default_settings())
+    for subject, row in table.items():
+        assert ladder_policy.TABLE[subject] == row, subject
+    assert ladder_policy.TABLE["stranger"] == table["person"]
+    assert off == set(ladder_policy.DEFAULT_OFF_CELLS)
+
+
+def test_legacy_default_constants_agree_with_the_default():
+    derived_outcomes, derived_v2 = PS.derive_legacy_views(PS.default_settings()["ladder"])
+    for subject in PS.SUBJECTS_V3_EXTRA:
+        assert PS.DEFAULT_EXTRA_OUTCOMES[subject] == derived_outcomes[subject]
+    for subject in PS.SUBJECTS_V2:
+        assert PS.DEFAULT_ROUTING_TABLE_V2[subject] == derived_v2[subject]
+    assert PS.DEFAULT_ROUTING_TABLE["stranger"] == derived_v2["person"]

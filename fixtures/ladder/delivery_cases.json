@@ -2,13 +2,13 @@
   {
     "id": 1,
     "name": "Package: delivered, dwell after dark, collected",
-    "card_key": "front:thing:pkg-1",
+    "card_key": "front:package:pkg-1",
     "steps": [
       {
         "kind": "snapshot",
         "now": 0,
         "inputs": {
-          "subject": "thing",
+          "subject": "package",
           "place": "yard"
         }
       },
@@ -16,7 +16,7 @@
         "kind": "snapshot",
         "now": 3600,
         "inputs": {
-          "subject": "thing",
+          "subject": "package",
           "place": "yard",
           "night": true,
           "dwell_exceeded": true
@@ -26,7 +26,7 @@
         "kind": "snapshot",
         "now": 4200,
         "inputs": {
-          "subject": "thing",
+          "subject": "package",
           "place": "yard"
         },
         "resolved": true
@@ -35,21 +35,21 @@
     "expected": [
       {
         "mutation": "create",
-        "level": "log",
+        "level": "silent",
+        "sound": false,
+        "push": true
+      },
+      {
+        "mutation": "escalate",
+        "level": "quiet",
         "sound": false,
         "push": false
       },
       {
-        "mutation": "escalate",
-        "level": "silent",
-        "sound": false,
-        "push": true
-      },
-      {
         "mutation": "resolve",
-        "level": "silent",
+        "level": "quiet",
         "sound": false,
-        "push": true
+        "push": false
       }
     ]
   },
@@ -140,15 +140,15 @@
     "expected": [
       {
         "mutation": "create",
-        "level": "log",
-        "sound": false,
-        "push": false
-      },
-      {
-        "mutation": "escalate",
         "level": "silent",
         "sound": false,
         "push": true
+      },
+      {
+        "mutation": "escalate",
+        "level": "quiet",
+        "sound": false,
+        "push": false
       },
       {
         "mutation": "escalate",

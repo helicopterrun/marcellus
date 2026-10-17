@@ -110,7 +110,7 @@ class TestV2TableRouting:
     def test_animal_at_yard_is_quiet(self):
         policy_settings.apply_settings(policy_settings.default_settings())
         snap = Snapshot(subject="animal", place="yard", label="dog")
-        assert evaluate_ladder(snap) == "quiet"
+        assert evaluate_ladder(snap) == "silent"  # Balanced: Quiet
 
 
 @pytest.mark.asyncio

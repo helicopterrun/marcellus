@@ -374,10 +374,10 @@ def test_routing_table_defaults_agree():
         for place in settings_table[subject]:
             if place == "private":
                 continue  # retired in v3: read as yard
-            # The legacy routing_table still carries `notify`, which v3 routes
-            # as Glance (`quiet`) in the engine's built-in table.
+            # The legacy routing_table still carries `notify`, which is the
+            # Balanced preset's Quiet (`silent`) in the engine's built-in table.
             legacy = settings_table[subject][place]
-            legacy = "quiet" if legacy == "notify" else legacy
+            legacy = "silent" if legacy == "notify" else legacy
             assert ladder_table[subject][place] == legacy, (
                 f"{subject}.{place}: ladder={ladder_table[subject][place]} "
                 f"settings={settings_table[subject][place]}"

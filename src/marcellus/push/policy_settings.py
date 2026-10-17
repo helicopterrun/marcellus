@@ -135,33 +135,42 @@ def _louder(a: str | None, b: str) -> str:
     return max(a, b, key=LADDER_VALUES.index)
 
 
-#: The ladder a freshly onboarded settings file starts the user at (v3).
-#: The pre-v3 defaults, translated: `private` merged into `yard` (louder
-#: wins), and the retired `notify` cells became Glance -- the Live Activity the
-#: old notify level also started, and the person row of the v3 spec's §2.1
-#: example. (The §2.3 `notify -> silent` rule is for reading an older
-#: client's *edits* back losslessly, not for choosing defaults.)
+#: The ladder a freshly onboarded settings file starts the user at (v3): the
+#: owner-approved "Balanced" preset (`docs/ladder-v3.md` §2.1). Every other
+#: built-in default below -- the legacy views, the V3-subject seeding rows,
+#: and `ladder_policy.TABLE`/`DEFAULT_OFF_CELLS` (the evaluator's fallback
+#: when no settings were ever applied) -- is derived from or agrees with it.
 DEFAULT_LADDER: dict[str, dict[str, str]] = {
     "person": {"street": "ignore", "yard": "glance", "doors": "glance", "off_limits": "urgent"},
-    "vehicle": {"street": "ignore", "yard": "glance", "doors": "glance", "off_limits": "glance"},
-    "animal": {"street": "ignore", "yard": "glance", "doors": "glance", "off_limits": "glance"},
-    "thing": {"street": "ignore", "yard": "ignore", "doors": "ignore", "off_limits": "glance"},
-    "package": {"street": "ignore", "yard": "glance", "doors": "glance", "off_limits": "glance"},
-    "bin": {"street": "glance", "yard": "glance", "doors": "glance", "off_limits": "glance"},
-    "opening": {"street": "ignore", "yard": "glance", "doors": "glance", "off_limits": "glance"},
+    "vehicle": {"street": "ignore", "yard": "silent", "doors": "silent", "off_limits": "glance"},
+    "animal": {"street": "ignore", "yard": "silent", "doors": "silent", "off_limits": "glance"},
+    "package": {"street": "ignore", "yard": "silent", "doors": "glance", "off_limits": "glance"},
+    "opening": {"street": "ignore", "yard": "silent", "doors": "glance", "off_limits": "urgent"},
+    "bin": {"street": "ignore", "yard": "ignore", "doors": "silent", "off_limits": "silent"},
+    "thing": {"street": "ignore", "yard": "ignore", "doors": "silent", "off_limits": "silent"},
 }
 
 
-#: The routing table a freshly onboarded settings file starts the user at
-#: (design doc §1, "match the v3 brief's §1.4 table exactly").
+def _legacy_row(subject: str, *, outcome_words: bool) -> dict[str, str]:
+    """One `DEFAULT_LADDER` row in the pre-v3 five-place vocabulary."""
+    row = DEFAULT_LADDER[subject]
+    return {
+        place: (
+            ladder_to_outcome(subject, row["yard" if place == "private" else place])
+            if outcome_words
+            else LADDER_TO_LEGACY_LEVEL[row["yard" if place == "private" else place]]
+        )
+        for place in LEGACY_PLACES
+    }
+
+
+#: The legacy v1 `routing_table` (stranger/known/animal/thing) a fresh file
+#: carries -- stored untouched once written (v3 §2.2), and read only by a
+#: document predating every newer table. Rows with a v3 counterpart are the
+#: Balanced preset in legacy levels (stranger = person); `known` has none and
+#: keeps its pre-v3 default.
 DEFAULT_ROUTING_TABLE: dict[str, dict[str, str]] = {
-    "stranger": {
-        "street": "log",
-        "yard": "quiet",
-        "doors": "notify",
-        "private": "notify",
-        "off_limits": "urgent",
-    },
+    "stranger": _legacy_row("person", outcome_words=False),
     "known": {
         "street": "log",
         "yard": "log",
@@ -169,82 +178,22 @@ DEFAULT_ROUTING_TABLE: dict[str, dict[str, str]] = {
         "private": "quiet",
         "off_limits": "quiet",
     },
-    "animal": {
-        "street": "log",
-        "yard": "quiet",
-        "doors": "quiet",
-        "private": "quiet",
-        "off_limits": "quiet",
-    },
-    "thing": {
-        "street": "log",
-        "yard": "log",
-        "doors": "log",
-        "private": "log",
-        "off_limits": "quiet",
-    },
+    "animal": _legacy_row("animal", outcome_words=False),
+    "thing": _legacy_row("thing", outcome_words=False),
 }
 
+#: The Balanced preset as a legacy `routing_table_v2` (the derived view a
+#: fresh v3 file serves; kept as a named constant for callers predating v3).
 DEFAULT_ROUTING_TABLE_V2: dict[str, dict[str, str]] = {
-    "person": {
-        "street": "log",
-        "yard": "quiet",
-        "doors": "notify",
-        "private": "notify",
-        "off_limits": "urgent",
-    },
-    "vehicle": {
-        "street": "log",
-        "yard": "quiet",
-        "doors": "quiet",
-        "private": "quiet",
-        "off_limits": "notify",
-    },
-    "animal": {
-        "street": "log",
-        "yard": "quiet",
-        "doors": "quiet",
-        "private": "quiet",
-        "off_limits": "quiet",
-    },
-    "thing": {
-        "street": "log",
-        "yard": "log",
-        "doors": "log",
-        "private": "log",
-        "off_limits": "quiet",
-    },
+    subject: _legacy_row(subject, outcome_words=False) for subject in SUBJECTS_V2
 }
 
-#: Default outcome rows for the V3 subjects, chosen to reproduce what the
-#: retired family booleans did when on: the family ran a silent LA wherever
-#: it could fire (glance), with a heads-up in a restricted place (notify).
-#: Cells where the family was noise (a package "on the street", bins deep
-#: in a private area) idle at log. Authored in outcome vocabulary because
-#: these subjects exist for the merged ladder; their `routing_table_v2`
-#: rows are derived via `OUTCOME_TO_LEVEL` like every other lockstep row.
+#: Default outcome rows for the V3 subjects, in the pre-v3 outcome words: what
+#: the one-time v2 seeding (`_pre_v3_migrations`) writes for a document that
+#: predates the package/bin/opening rows -- the Balanced preset's rows, so a
+#: seeded file lands on the same defaults as a fresh one.
 DEFAULT_EXTRA_OUTCOMES: dict[str, dict[str, str]] = {
-    "package": {
-        "street": "log",
-        "yard": "glance",
-        "doors": "glance",
-        "private": "glance",
-        "off_limits": "notify",
-    },
-    "bin": {
-        "street": "glance",
-        "yard": "glance",
-        "doors": "glance",
-        "private": "log",
-        "off_limits": "notify",
-    },
-    "opening": {
-        "street": "log",
-        "yard": "glance",
-        "doors": "glance",
-        "private": "glance",
-        "off_limits": "notify",
-    },
+    subject: _legacy_row(subject, outcome_words=True) for subject in SUBJECTS_V3_EXTRA
 }
 
 DEFAULT_RECOGNITION: dict[str, str] = {

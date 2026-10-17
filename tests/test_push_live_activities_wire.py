@@ -185,8 +185,13 @@ async def test_non_qualifying_card_gets_no_live_activity(sidecar_db_path: Path):
     )
     assert la_sends(transport) == []
 
-    # And the old premise inverted: a glance cell (animal x yard) starts a
-    # catch-all activity even though no curated family matches a dog.
+    # And the old premise inverted: a glance cell (animal x yard, set
+    # explicitly -- the Balanced default is Quiet) starts a catch-all
+    # activity even though no curated family matches a dog.
+    from marcellus.push import policy_settings
+    _settings = policy_settings.default_settings()
+    _settings["ladder"]["animal"]["yard"] = "glance"
+    policy_settings.apply_settings(_settings)
     await handle_delivery_event(
         make_event("yard-cam", "trk2", "dog", zones=("yard",)),
         conn=conn, devices=[device], transport=transport, config=config, now=1.0,

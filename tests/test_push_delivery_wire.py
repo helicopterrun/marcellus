@@ -51,6 +51,13 @@ async def test_zone_change_mutates_same_card_not_a_new_one(sidecar_db_path: Path
     # not merely because nothing was configured.
     config = PushSection(delivery_enabled=True, external_base_url=EXTERNAL_BASE_URL)
 
+    # Pin vehicle/yard to ignore so both evaluations land on the same
+    # non-pushing cell (the default is Quiet, which would push a card).
+    from marcellus.push import policy_settings
+    _settings = policy_settings.default_settings()
+    _settings["ladder"]["vehicle"]["yard"] = "ignore"
+    policy_settings.apply_settings(_settings)
+
     no_zone_event = ReviewEvent(
         review_id="r1", camera="alley-wide", severity="alert", labels=("car",),
         track_ids=("trk1",), zones=(),
@@ -68,8 +75,8 @@ async def test_zone_change_mutates_same_card_not_a_new_one(sidecar_db_path: Path
     rows = conn.execute("SELECT card_key, level FROM push_cards").fetchall()
     assert len(rows) == 1
     assert rows[0]["card_key"] == "alley-wide:vehicle:trk1"
-    assert rows[0]["level"] == "log"
-    assert transport.sent == []  # log never pushes
+    assert rows[0]["level"] == "suppressed"  # ignore on a non-person subject
+    assert transport.sent == []  # never pushes
 
     # Second evaluation: same track id, now carries a zone -- vehicle/yard is
     # also `quiet` under v2. This must be the SAME card (enrich), not a
@@ -81,7 +88,7 @@ async def test_zone_change_mutates_same_card_not_a_new_one(sidecar_db_path: Path
     rows = conn.execute("SELECT card_key, level, zone_name FROM push_cards").fetchall()
     assert len(rows) == 1, "a zone change must mutate the existing card, not fork a new one"
     assert rows[0]["card_key"] == "alley-wide:vehicle:trk1"
-    assert rows[0]["level"] == "log"
+    assert rows[0]["level"] == "suppressed"
     assert rows[0]["zone_name"] == "parking_spot"
 
     # thing/yard = log (same as thing/street), so the zone change is an
@@ -662,11 +669,12 @@ async def test_label_flip_keeps_one_card(sidecar_db_path: Path):
 
 @pytest.mark.asyncio
 async def test_label_flip_escalation_routes_at_new_kind(sidecar_db_path: Path):
-    """animal/doors is Glance but person/doors is Urgent (set here): the flip
+    """animal/doors is Glance and person/doors is Urgent (both set here): the flip
     re-routes the SAME card upward (escalate), pushing for the first time."""
     from marcellus.push import policy_settings
 
     settings = policy_settings.default_settings()
+    settings["ladder"]["animal"]["doors"] = "glance"
     settings["ladder"]["person"]["doors"] = "urgent"
     policy_settings.apply_settings(settings)
 

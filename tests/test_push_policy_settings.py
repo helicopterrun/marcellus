@@ -12,22 +12,24 @@ from marcellus.push import ladder_policy, policy_settings
 
 
 def test_default_routing_table_matches_the_brief_exactly():
+    # Derived from the owner-approved "Balanced" preset (docs/ladder-v3.md
+    # §2.1): ignore->log, silent->notify, glance->quiet, urgent->urgent.
     assert policy_settings.default_settings()["routing_table"] == {
         "stranger": {
-            "street": "log", "yard": "quiet", "doors": "notify",
-            "private": "notify", "off_limits": "urgent",
+            "street": "log", "yard": "quiet", "doors": "quiet",
+            "private": "quiet", "off_limits": "urgent",
         },
         "known": {
             "street": "log", "yard": "log", "doors": "quiet",
             "private": "quiet", "off_limits": "quiet",
         },
         "animal": {
-            "street": "log", "yard": "quiet", "doors": "quiet",
-            "private": "quiet", "off_limits": "quiet",
+            "street": "log", "yard": "notify", "doors": "notify",
+            "private": "notify", "off_limits": "quiet",
         },
         "thing": {
-            "street": "log", "yard": "log", "doors": "log",
-            "private": "log", "off_limits": "quiet",
+            "street": "log", "yard": "log", "doors": "notify",
+            "private": "log", "off_limits": "notify",
         },
     }
 
@@ -351,6 +353,7 @@ def test_zone_override_does_not_affect_other_zones_in_the_same_place_class():
     from marcellus.push.ladder import Snapshot, evaluate_ladder
 
     settings = policy_settings.default_settings()
+    settings["ladder"]["animal"]["yard"] = "glance"  # explicit; default is Quiet
     settings["zone_overrides"] = {"driveway": {"animal": "log"}}
     policy_settings.apply_settings(settings)
 
@@ -358,7 +361,7 @@ def test_zone_override_does_not_affect_other_zones_in_the_same_place_class():
     # Another yard-classified zone, no override for it -- base table applies.
     assert evaluate_ladder(
         Snapshot(subject="animal", place="yard", zone="parking_spot")
-    ) == "quiet"  # animal x yard is Glance by default
+    ) == "quiet"  # animal x yard is Glance (set above)
 
 
 def test_validate_rejects_bad_camera_optics():
@@ -478,8 +481,8 @@ def test_v3_seeding_family_boolean_off_becomes_off_row(tmp_path: Path):
     assert all(v == "log" for v in settings["routing_table_v2"]["opening"].values())
     # Untouched booleans seed the (pre-v3) default rows, which the v3
     # migration then folds into `ladder` (notify -> silent, private -> yard).
-    assert settings["ladder"]["package"]["yard"] == "glance"
-    assert settings["ladder"]["package"]["off_limits"] == "silent"
+    assert settings["ladder"]["package"]["yard"] == "silent"
+    assert settings["ladder"]["package"]["off_limits"] == "glance"
     # Derived booleans reflect the seeded rows.
     assert settings["live_activities"]["openings"] is False
     assert settings["live_activities"]["package"] is True
@@ -512,12 +515,12 @@ def test_v3_seeding_is_idempotent_and_never_reseeds_user_edits(tmp_path: Path):
     # User tunes a seeded row; a later startup must not re-seed over it.
     doc = json.loads(path.read_text())
     assert doc["v"] == policy_settings.SETTINGS_VERSION
-    assert doc["ladder"]["bin"]["street"] == "glance"  # seeded from the pre-v3 default
-    doc["ladder"]["bin"]["street"] = "ignore"
+    assert doc["ladder"]["bin"]["doors"] == "silent"  # seeded from the default
+    doc["ladder"]["bin"]["doors"] = "ignore"
     path.write_text(json.dumps(doc))
     settings = policy_settings.startup(path)
-    assert settings["ladder"]["bin"]["street"] == "ignore"
-    assert settings["outcomes"]["bin"]["street"] == "off"
+    assert settings["ladder"]["bin"]["doors"] == "ignore"
+    assert settings["outcomes"]["bin"]["doors"] == "off"
     policy_settings.reset_for_tests()
 
 

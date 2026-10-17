@@ -12,20 +12,20 @@
   "geometric_dedup": false,
   "ladder": {
     "animal": {
-      "doors": "glance",
+      "doors": "silent",
       "off_limits": "glance",
       "street": "ignore",
-      "yard": "glance"
+      "yard": "silent"
     },
     "bin": {
-      "doors": "glance",
-      "off_limits": "glance",
-      "street": "glance",
-      "yard": "glance"
+      "doors": "silent",
+      "off_limits": "silent",
+      "street": "ignore",
+      "yard": "ignore"
     },
     "opening": {
       "doors": "glance",
-      "off_limits": "glance",
+      "off_limits": "urgent",
       "street": "ignore",
       "yard": "ignore"
     },
@@ -33,7 +33,7 @@
       "doors": "silent",
       "off_limits": "glance",
       "street": "ignore",
-      "yard": "glance"
+      "yard": "silent"
     },
     "person": {
       "doors": "glance",
@@ -42,16 +42,16 @@
       "yard": "glance"
     },
     "thing": {
-      "doors": "ignore",
-      "off_limits": "glance",
+      "doors": "silent",
+      "off_limits": "silent",
       "street": "ignore",
       "yard": "urgent"
     },
     "vehicle": {
-      "doors": "glance",
+      "doors": "silent",
       "off_limits": "glance",
       "street": "ignore",
-      "yard": "glance"
+      "yard": "silent"
     }
   },
   "live_activities": {
@@ -69,22 +69,22 @@
   "mute_sounds": true,
   "outcomes": {
     "animal": {
-      "doors": "glance",
+      "doors": "notify",
       "off_limits": "glance",
-      "private": "glance",
+      "private": "notify",
       "street": "off",
-      "yard": "glance"
+      "yard": "notify"
     },
     "bin": {
-      "doors": "glance",
-      "off_limits": "glance",
-      "private": "glance",
-      "street": "glance",
-      "yard": "glance"
+      "doors": "notify",
+      "off_limits": "notify",
+      "private": "off",
+      "street": "off",
+      "yard": "off"
     },
     "opening": {
       "doors": "glance",
-      "off_limits": "glance",
+      "off_limits": "alarm",
       "private": "off",
       "street": "off",
       "yard": "off"
@@ -92,9 +92,9 @@
     "package": {
       "doors": "notify",
       "off_limits": "glance",
-      "private": "glance",
+      "private": "notify",
       "street": "off",
-      "yard": "glance"
+      "yard": "notify"
     },
     "person": {
       "doors": "glance",
@@ -104,18 +104,18 @@
       "yard": "glance"
     },
     "thing": {
-      "doors": "off",
-      "off_limits": "glance",
+      "doors": "notify",
+      "off_limits": "notify",
       "private": "alarm",
       "street": "off",
       "yard": "alarm"
     },
     "vehicle": {
-      "doors": "glance",
+      "doors": "notify",
       "off_limits": "glance",
-      "private": "glance",
+      "private": "notify",
       "street": "off",
-      "yard": "glance"
+      "yard": "notify"
     }
   },
   "quiet_hours": {
@@ -129,11 +129,11 @@
   },
   "routing_table": {
     "animal": {
-      "doors": "quiet",
+      "doors": "notify",
       "off_limits": "quiet",
-      "private": "quiet",
+      "private": "notify",
       "street": "log",
-      "yard": "quiet"
+      "yard": "notify"
     },
     "known": {
       "doors": "quiet",
@@ -143,15 +143,15 @@
       "yard": "log"
     },
     "stranger": {
-      "doors": "notify",
+      "doors": "quiet",
       "off_limits": "urgent",
-      "private": "notify",
+      "private": "quiet",
       "street": "log",
       "yard": "quiet"
     },
     "thing": {
-      "doors": "log",
-      "off_limits": "quiet",
+      "doors": "notify",
+      "off_limits": "notify",
       "private": "log",
       "street": "log",
       "yard": "log"
@@ -159,22 +159,22 @@
   },
   "routing_table_v2": {
     "animal": {
-      "doors": "quiet",
+      "doors": "notify",
       "off_limits": "quiet",
-      "private": "quiet",
+      "private": "notify",
       "street": "log",
-      "yard": "quiet"
+      "yard": "notify"
     },
     "bin": {
-      "doors": "quiet",
-      "off_limits": "quiet",
-      "private": "quiet",
-      "street": "quiet",
-      "yard": "quiet"
+      "doors": "notify",
+      "off_limits": "notify",
+      "private": "log",
+      "street": "log",
+      "yard": "log"
     },
     "opening": {
       "doors": "quiet",
-      "off_limits": "quiet",
+      "off_limits": "urgent",
       "private": "log",
       "street": "log",
       "yard": "log"
@@ -182,9 +182,9 @@
     "package": {
       "doors": "notify",
       "off_limits": "quiet",
-      "private": "quiet",
+      "private": "notify",
       "street": "log",
-      "yard": "quiet"
+      "yard": "notify"
     },
     "person": {
       "doors": "quiet",
@@ -194,18 +194,18 @@
       "yard": "quiet"
     },
     "thing": {
-      "doors": "log",
-      "off_limits": "quiet",
+      "doors": "notify",
+      "off_limits": "notify",
       "private": "urgent",
       "street": "log",
       "yard": "urgent"
     },
     "vehicle": {
-      "doors": "quiet",
+      "doors": "notify",
       "off_limits": "quiet",
-      "private": "quiet",
+      "private": "notify",
       "street": "log",
-      "yard": "quiet"
+      "yard": "notify"
     }
   },
   "secure_area": null,

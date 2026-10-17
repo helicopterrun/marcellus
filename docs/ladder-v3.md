@@ -52,6 +52,21 @@ Unchanged: person, vehicle, animal, thing, package, bin, opening.
 ```
 
 All 7 subjects × 4 places, values in `ignore | silent | glance | urgent`.
+
+**Default (the owner-approved Balanced preset).** A fresh settings file starts
+here; every built-in fallback (the evaluator's own table and off cells, the
+derived legacy defaults, the one-time V3-subject seeding rows) agrees with it.
+Migration of an existing file is unaffected: it translates the stored table.
+
+| Subject | street | yard | doors | off_limits |
+|---------|--------|------|-------|------------|
+| person  | ignore | glance | glance | urgent |
+| vehicle | ignore | silent | silent | glance |
+| animal  | ignore | silent | silent | glance |
+| package | ignore | silent | glance | glance |
+| opening | ignore | silent | glance | urgent |
+| bin     | ignore | ignore | silent | silent |
+| thing   | ignore | ignore | silent | silent |
 On PUT, a `ladder` that is present must be complete for person, vehicle,
 animal, thing; package/bin/opening rows are optional (absent row = keep the
 stored row). Unknown subject, place or value → 400 `invalid_settings`, as
