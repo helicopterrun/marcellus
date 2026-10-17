@@ -322,7 +322,15 @@ CREATE TABLE IF NOT EXISTS push_cards (
     -- Ordered, distinct cameras this card's story has been seen on, in
     -- first-seen order, as a JSON list. Two or more entries turn the push
     -- body into the crossing path ("Alley Wide -> Stairway Wide").
-    cameras_path_json TEXT NOT NULL DEFAULT '[]'
+    cameras_path_json TEXT NOT NULL DEFAULT '[]',
+    -- Ladder v3 §5.2, sticky for the story's lifetime: a Quiet (`silent`) or
+    -- Urgent card push was delivered for it (`kept_row`), or a Glance card
+    -- reached a device without Live Activities as its silent fallback
+    -- (`fallback_row`). Either left a Notification Center row the owner
+    -- keeps until opened/cleared, so the resolve must not be ephemeral
+    -- (for `fallback_row`: on those devices only).
+    kept_row      INTEGER NOT NULL DEFAULT 0,
+    fallback_row  INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_push_cards_open
     ON push_cards(closed, level, last_sound_at);
@@ -711,6 +719,13 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # cameras the story has crossed, as JSON.
         ("encounter_id", "TEXT NOT NULL DEFAULT ''"),
         ("cameras_path_json", "TEXT NOT NULL DEFAULT '[]'"),
+        # Ladder v3 (2026-10-16): sticky "this story left a kept Notification
+        # Center row" flags, read at resolve time for `ephemeral`. Existing
+        # rows default to 0: an open story from before the upgrade resolves
+        # ephemeral unless it reached urgent or a zone override fired, which
+        # is how the pre-v3 rule judged it too.
+        ("kept_row", "INTEGER NOT NULL DEFAULT 0"),
+        ("fallback_row", "INTEGER NOT NULL DEFAULT 0"),
     ],
     "push_devices": [
         # v2 registration shape (notification-experience plan §8). Everything

@@ -436,10 +436,14 @@ class TestHoldUrgent:
 # -- §5 delivery -------------------------------------------------------------
 
 
-def _card(level: str, *, peak: str | None = None, zone_hit: bool = False) -> Card:
+def _card(
+    level: str, *, peak: str | None = None, zone_hit: bool = False,
+    kept_row: bool = False, fallback_row: bool = False,
+) -> Card:
     return Card(
         card_key="cam:person:t1", level=level, peak_level=peak or level,
         created_at=0.0, updated_at=0.0, state_since_at=0.0, zone_override_hit=zone_hit,
+        kept_row=kept_row, fallback_row=fallback_row,
     )
 
 
@@ -549,7 +553,8 @@ class TestGlanceDelivery:
     @pytest.mark.asyncio
     async def test_glance_fallback_resolve_is_kept(self, sidecar_db_path, tmp_path):
         sent, _ = await _send(
-            tmp_path, _card("quiet"), "resolve", [_dev("a", la=True), _dev("mac", la=False)],
+            tmp_path, _card("quiet", fallback_row=True), "resolve",
+            [_dev("a", la=True), _dev("mac", la=False)],
         )
         assert sent["d_a"]["ephemeral"] is True
         assert sent["d_mac"]["ephemeral"] is False
@@ -564,24 +569,111 @@ class TestGlanceDelivery:
 
 
 class TestEphemeralRule:
+    """`ephemeral = not kept_row and not zone_override_hit` (§5.2): a Quiet or
+    Urgent row stays until the owner opens or clears it."""
+
     @pytest.mark.parametrize(
-        "peak,zone_hit,ephemeral",
+        "card_kw,ephemeral",
         [
-            ("log", False, True),
-            ("quiet", False, True),
-            ("silent", False, False),
-            ("urgent", False, False),
-            ("quiet", True, False),
+            ({"level": "quiet"}, True),
+            ({"level": "quiet", "kept_row": True}, False),
+            ({"level": "silent", "kept_row": True}, False),
+            ({"level": "urgent", "kept_row": True}, False),
+            ({"level": "quiet", "zone_hit": True}, False),
         ],
     )
     @pytest.mark.asyncio
-    async def test_resolve_ephemeral(self, sidecar_db_path, tmp_path, peak, zone_hit, ephemeral):
-        card = _card(peak, peak=peak, zone_hit=zone_hit)
+    async def test_resolve_ephemeral(self, sidecar_db_path, tmp_path, card_kw, ephemeral):
+        card = _card(card_kw.pop("level"), **card_kw)
         sent, _ = await _send(tmp_path, card, "resolve", [_dev("a", la=True)])
-        if peak == "log":
-            assert sent == {}  # a log card is below every device's severity
-            return
         assert sent["d_a"]["ephemeral"] is ephemeral
+
+
+async def _story(tmp_path: Path, levels: list[str], devices: list[Device]) -> dict:
+    """Drive one story's mutations through the real card store and
+    `send_card_mutation` (so `kept_row` persists between steps), then resolve
+    it; returns the resolve payload per device id."""
+    conn = db.open_sidecar(tmp_path / "marcellus.db")
+    transport = LogTransport()
+    key = "cam:person:story"
+    try:
+        from marcellus.push import card_store
+
+        now = 0.0
+        for level in [*levels, None]:
+            now += 10.0
+            existing = card_store.get_card(conn, key)
+            card, mutation, _sound = advance_card(
+                existing, level or existing.level, card_key=key, now=now,
+                resolved=level is None,
+            )
+            transport.sent.clear()
+            await send_card_mutation(
+                conn, transport, devices, card, mutation, _payload(card, mutation),
+                camera="cam", subject_kind="person", now=now,
+            )
+        return {s["device_id"]: s["payload"] for s in transport.sent}
+    finally:
+        conn.close()
+
+
+class TestKeptRowSurvivesTheStory:
+    @pytest.mark.asyncio
+    async def test_silent_then_glance_then_resolve_keeps_the_row(self, sidecar_db_path, tmp_path):
+        sent = await _story(tmp_path, ["silent", "quiet"], [_dev("a", la=True)])
+        assert sent["d_a"]["ephemeral"] is False
+
+    @pytest.mark.asyncio
+    async def test_glance_only_resolve_is_ephemeral(self, sidecar_db_path, tmp_path):
+        sent = await _story(tmp_path, ["quiet"], [_dev("a", la=True)])
+        assert sent["d_a"]["ephemeral"] is True
+
+    @pytest.mark.asyncio
+    async def test_urgent_resolve_is_kept(self, sidecar_db_path, tmp_path):
+        sent = await _story(tmp_path, ["urgent"], [_dev("a", la=True)])
+        assert sent["d_a"]["ephemeral"] is False
+
+    @pytest.mark.asyncio
+    async def test_glance_fallback_row_is_kept_on_that_device_only(
+        self, sidecar_db_path, tmp_path
+    ):
+        sent = await _story(tmp_path, ["quiet"], [_dev("a", la=True), _dev("mac", la=False)])
+        assert sent["d_a"]["ephemeral"] is True
+        assert sent["d_mac"]["ephemeral"] is False
+
+
+def test_kept_row_columns_migrate_onto_an_existing_database(tmp_path: Path):
+    """A deployment whose `push_cards` predates the kept-row flags gets them
+    via `_ADDED_COLUMNS`; its existing rows read as not kept."""
+    import sqlite3
+
+    from marcellus.push import card_store
+
+    path = tmp_path / "old.db"
+    conn = db.open_sidecar(path)
+    card_store.upsert_card(conn, _card("urgent"), camera="cam", subject_kind="person")
+    conn.execute("ALTER TABLE push_cards DROP COLUMN kept_row")
+    conn.execute("ALTER TABLE push_cards DROP COLUMN fallback_row")
+    conn.commit()
+    conn.close()
+    raw = sqlite3.connect(path)
+    cols = {row[1] for row in raw.execute("PRAGMA table_info(push_cards)")}
+    raw.close()
+    assert "kept_row" not in cols
+
+    db._SCHEMA_APPLIED.discard(str(path.resolve()))  # a fresh process (restart)
+    conn = db.open_sidecar(path)
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(push_cards)")}
+        assert {"kept_row", "fallback_row"} <= cols
+        card = card_store.get_card(conn, "cam:person:t1")
+        assert card is not None and card.kept_row is False and card.fallback_row is False
+        card_store.mark_kept_rows(conn, card.card_key, kept_row=True, fallback_row=False)
+        card_store.mark_kept_rows(conn, card.card_key, kept_row=False, fallback_row=True)
+        again = card_store.get_card(conn, card.card_key)
+        assert again is not None and again.kept_row and again.fallback_row
+    finally:
+        conn.close()
 
 
 # -- §5.4 registration default, §2.7 capability ------------------------------

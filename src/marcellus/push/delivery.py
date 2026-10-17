@@ -100,25 +100,30 @@ def needs_card_payload(level: str, mutation: str) -> bool:
     return should_push(level) or mutation == RESOLVE or level in GLANCE_FALLBACK_LEVELS
 
 
-def ephemeral_exempt(card: Card) -> bool:
-    """Whether a story's resolve row is kept (§5.2): `ephemeral = peak_level
-    not in ("silent", "urgent") and not zone_override_hit`."""
-    return card.peak_level in PUSHABLE_LEVELS or card.zone_override_hit
+def ephemeral_exempt(card: Card, *, fallback_device: bool = False) -> bool:
+    """Whether a story's resolve keeps its Notification Center row (§5.2): the
+    owner's rule is that a Quiet or Urgent row stays until opened or cleared,
+    so `ephemeral = not kept_row and not zone_override_hit` -- `kept_row`
+    being sticky once any `silent`/`urgent` card push was delivered for the
+    story (even if it was later lifted to Glance). On a device that got the
+    Glance fallback (`fallback_device`), that silent row counts too."""
+    return (
+        card.kept_row
+        or card.zone_override_hit
+        or (fallback_device and card.fallback_row)
+    )
 
 
-def as_silent_card(payload: dict[str, Any], *, kept: bool = False) -> dict[str, Any]:
+def as_silent_card(payload: dict[str, Any]) -> dict[str, Any]:
     """A Glance card payload re-shaped as the `silent` card a device without
     Live Activity support gets instead (§5.3): passive, no sound,
-    `card.silent`, `level: "silent"`. `kept` (a resolve of such a story)
-    makes the resolve non-ephemeral -- the row it replaces was kept."""
+    `card.silent`, `level: "silent"`."""
     out = dict(payload)
     out["aps"] = dict(payload.get("aps", {}))
     out["aps"].pop("sound", None)
     out["aps"]["interruption-level"] = "passive"
     out["aps"]["category"] = "card.silent"
     out["level"] = "silent"
-    if "ephemeral" in out and kept:
-        out["ephemeral"] = False
     return out
 
 
@@ -479,11 +484,11 @@ async def send_card_mutation(
 
     # Resolve visibility (alerts-slice2 §E; ladder v3 §5.2): every resolve
     # gets one final silent (`.passive`, no sound) update. A story that
-    # never left a kept row -- it never reached Quiet (`silent`) or Urgent,
-    # and never tripped a zone override -- gets an *ephemeral* one (the app
-    # removes the delivered row at once); a Quiet/Urgent story keeps a
-    # non-ephemeral resolve so its row is replaced in place, never removed.
-    worth_keeping = False
+    # never left a kept row -- no Quiet (`silent`) or Urgent card push was
+    # ever delivered for it, and no zone override fired -- gets an
+    # *ephemeral* one (the app removes the delivered row at once); a story
+    # that did keeps a non-ephemeral resolve so its row is replaced in place,
+    # never removed (`ephemeral_exempt`).
     if mutation == RESOLVE:
         payload = dict(payload)
         payload["aps"] = dict(payload["aps"])
@@ -492,8 +497,7 @@ async def send_card_mutation(
         # Always explicit, never omitted: the app reads absent as "old
         # sidecar" and falls back to its 24 h sweep, while an explicit false
         # means "kept row, keep indefinitely".
-        worth_keeping = ephemeral_exempt(card)
-        payload["ephemeral"] = not worth_keeping
+        payload["ephemeral"] = not ephemeral_exempt(card)
 
     # Glance (§5.3): a `quiet` card is a Live Activity and pushes no card --
     # except to a device that can't show one (no push-to-start token, or
@@ -506,6 +510,8 @@ async def send_card_mutation(
 
     sent = 0
     fallback_sent: list[str] = []
+    kept_delivered = False
+    fallback_delivered = False
     for device in devices:
         if not _device_eligible(device, camera=camera, labels=labels, card_level=card.level):
             continue
@@ -513,14 +519,17 @@ async def send_card_mutation(
             continue
 
         dev_payload = payload
+        is_fallback = False
+        if mutation == RESOLVE and not device.can_live_activity and card.fallback_row:
+            dev_payload = dict(payload)
+            dev_payload["ephemeral"] = not ephemeral_exempt(card, fallback_device=True)
         if glance_card or (mutation == RESOLVE and glance_story):
             if device.can_live_activity:
                 if mutation != RESOLVE:
                     continue  # its Live Activity is the Glance surface
             else:
-                dev_payload = as_silent_card(
-                    payload, kept=(mutation == RESOLVE and glance_story) or worth_keeping,
-                )
+                dev_payload = as_silent_card(dev_payload)
+                is_fallback = mutation != RESOLVE
                 logger.info(
                     "push: glance fallback -> silent card device=%s card_key=%s "
                     "mutation=%s la_reason=device_not_la_capable",
@@ -538,7 +547,7 @@ async def send_card_mutation(
             )
             continue
         if demoted:
-            dev_payload = dict(payload)
+            dev_payload = dict(dev_payload)
             dev_payload["aps"] = dict(dev_payload["aps"])
             dev_payload["aps"].pop("sound", None)
             dev_payload["aps"]["interruption-level"] = "passive"
@@ -597,6 +606,17 @@ async def send_card_mutation(
         )
         conn.commit()
         sent += 1
+        if result.ok and mutation != RESOLVE:
+            if is_fallback:
+                fallback_delivered = True
+            elif card.level in PUSHABLE_LEVELS:
+                kept_delivered = True
+    if (kept_delivered and not card.kept_row) or (fallback_delivered and not card.fallback_row):
+        card.kept_row = card.kept_row or kept_delivered
+        card.fallback_row = card.fallback_row or fallback_delivered
+        card_store.mark_kept_rows(
+            conn, card.card_key, kept_row=kept_delivered, fallback_row=fallback_delivered,
+        )
     if fallback_out is not None:
         fallback_out.extend(fallback_sent)
     logger.info(

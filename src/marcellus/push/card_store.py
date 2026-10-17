@@ -42,6 +42,8 @@ def _row_to_card(row: sqlite3.Row) -> Card:
         closed=bool(row["closed"]),
         zone_override_hit=bool(row["zone_override_hit"]),
         media_handle=row["media_handle"],
+        kept_row=bool(row["kept_row"]),
+        fallback_row=bool(row["fallback_row"]),
     )
 
 
@@ -81,7 +83,7 @@ def upsert_card(
         zone_set.add(zone_name)
     existing = conn.execute(
         "SELECT zones_csv, zone_override_hit, media_handle, encounter_id, "
-        "cameras_path_json FROM push_cards WHERE card_key = ?",
+        "cameras_path_json, kept_row, fallback_row FROM push_cards WHERE card_key = ?",
         (card.card_key,),
     ).fetchone()
     if existing is not None and existing["zones_csv"]:
@@ -92,6 +94,12 @@ def upsert_card(
     zone_override_hit = card.zone_override_hit
     if existing is not None:
         zone_override_hit = zone_override_hit or bool(existing["zone_override_hit"])
+    # Sticky the same way (ladder v3 §5.2): once a story left a kept row, a
+    # later write of an in-memory card that predates the flag can't clear it.
+    kept_row = card.kept_row or (existing is not None and bool(existing["kept_row"]))
+    fallback_row = card.fallback_row or (
+        existing is not None and bool(existing["fallback_row"])
+    )
     # Sticky, same shape as zone_override_hit: a fresh handle (`card.media_handle`
     # non-empty) always wins, but a mutation that mints no media of its own
     # (escalate/resolve) falls back to whatever was last persisted instead of
@@ -119,8 +127,9 @@ def upsert_card(
         " zones_csv, "
         " created_at, updated_at, state_since_at, sound_count, handled, handled_at, "
         " last_sound_at, resound_count, resolved, closed, zone_override_hit, "
-        " label, family, media_handle, encounter_id, cameras_path_json) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " label, family, media_handle, encounter_id, cameras_path_json, "
+        " kept_row, fallback_row) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(card_key) DO UPDATE SET "
         "level=excluded.level, peak_level=excluded.peak_level, "
         "subject_kind=excluded.subject_kind, "
@@ -135,7 +144,8 @@ def upsert_card(
         "label=excluded.label, family=excluded.family, "
         "media_handle=excluded.media_handle, "
         "encounter_id=excluded.encounter_id, "
-        "cameras_path_json=excluded.cameras_path_json",
+        "cameras_path_json=excluded.cameras_path_json, "
+        "kept_row=excluded.kept_row, fallback_row=excluded.fallback_row",
         (
             card.card_key, card.level, card.peak_level, subject_kind, place_class,
             camera, zone_name, zones_csv,
@@ -143,6 +153,7 @@ def upsert_card(
             int(card.handled), card.handled_at, card.last_sound_at, card.resound_count,
             int(card.resolved), int(card.closed), int(zone_override_hit),
             label, family, media_handle, encounter_id, json.dumps(cameras_path),
+            int(kept_row), int(fallback_row),
         ),
     )
     conn.commit()
@@ -213,6 +224,19 @@ def find_open_card_by_encounter(
         (encounter_id, exclude_key),
     ).fetchone()
     return _row_to_card(row) if row is not None else None
+
+
+def mark_kept_rows(
+    conn: sqlite3.Connection, card_key: str, *, kept_row: bool, fallback_row: bool
+) -> None:
+    """Set (never clear) a card's sticky kept-row flags (ladder v3 §5.2) once
+    a push that leaves a Notification Center row has been delivered."""
+    conn.execute(
+        "UPDATE push_cards SET kept_row = MAX(kept_row, ?), "
+        "fallback_row = MAX(fallback_row, ?) WHERE card_key = ?",
+        (int(kept_row), int(fallback_row), card_key),
+    )
+    conn.commit()
 
 
 def mark_handled(conn: sqlite3.Connection, card_key: str, *, now: float) -> None:

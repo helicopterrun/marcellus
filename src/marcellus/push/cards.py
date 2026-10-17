@@ -117,6 +117,14 @@ class Card:
     #: cleared otherwise -- an escalate/resolve mutation mints no media of
     #: its own but the story keeps its picture. `""` means "none minted yet".
     media_handle: str = ""
+    #: Sticky (ladder v3 §5.2): a Quiet (`silent`) or Urgent card push was
+    #: delivered for this story -- it left a Notification Center row that
+    #: stays until opened/cleared, so its resolve is never ephemeral. Set by
+    #: `delivery.send_card_mutation`, never cleared.
+    kept_row: bool = False
+    #: Sticky: a Glance card reached a device without Live Activities as its
+    #: silent fallback (§5.3) -- a kept row on *those* devices only.
+    fallback_row: bool = False
 
     @property
     def sound_budget_remaining(self) -> bool:

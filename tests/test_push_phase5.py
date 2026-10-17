@@ -464,7 +464,7 @@ async def test_la_covered_resolve_row_is_deferred(
     card = Card(
         card_key="doorbell:person:trk1", level="silent", peak_level="silent",
         created_at=1.0, updated_at=9.0, state_since_at=1.0,
-        resolved=True, closed=True,
+        resolved=True, closed=True, kept_row=True,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
 
@@ -496,7 +496,7 @@ async def test_non_covered_device_resolve_row_is_immediate(sidecar_db_path: Path
     card = Card(
         card_key="doorbell:person:trk1", level="silent", peak_level="silent",
         created_at=1.0, updated_at=9.0, state_since_at=1.0,
-        resolved=True, closed=True,
+        resolved=True, closed=True, kept_row=True,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
     await send_card_mutation(
@@ -532,7 +532,7 @@ async def test_deferred_resolve_exception_is_logged_not_lost(
     card = Card(
         card_key="doorbell:person:trk1", level="silent", peak_level="silent",
         created_at=1.0, updated_at=9.0, state_since_at=1.0,
-        resolved=True, closed=True,
+        resolved=True, closed=True, kept_row=True,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
 
@@ -569,7 +569,7 @@ async def test_cancel_deferred_cancels_pending_tasks(sidecar_db_path: Path, monk
     card = Card(
         card_key="doorbell:person:trk1", level="silent", peak_level="silent",
         created_at=1.0, updated_at=9.0, state_since_at=1.0,
-        resolved=True, closed=True,
+        resolved=True, closed=True, kept_row=True,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
 
@@ -595,11 +595,11 @@ async def test_cancel_deferred_cancels_pending_tasks(sidecar_db_path: Path, monk
 
 @pytest.mark.asyncio
 async def test_resolve_push_not_ephemeral_for_silent_peak_story(sidecar_db_path: Path):
-    """Alerts-slice2 §E (sidecar policy change): a resolve push for a story
-    that peaked at `silent` (Quiet, v3) or `urgent` keeps its resolve push
-    around -- `ephemeral: false`, same collapse-id, quiet/passive -- so the
-    row is replaced in place rather than removed. Only a peak that never
-    exceeded `quiet` (and never tripped a zone override) is ephemeral."""
+    """Alerts-slice2 §E / ladder v3 §5.2: a story that delivered a Quiet
+    (`silent`) or Urgent card push (`kept_row`) keeps its resolve push around
+    -- `ephemeral: false`, same collapse-id, quiet/passive -- so the row is
+    replaced in place rather than removed. A story that never left a kept row
+    (and never tripped a zone override) is ephemeral."""
     from marcellus.push.cards import RESOLVE, Card
 
     conn = db.open_sidecar(sidecar_db_path)
@@ -608,7 +608,7 @@ async def test_resolve_push_not_ephemeral_for_silent_peak_story(sidecar_db_path:
     card = Card(
         card_key="doorbell:person:trk1", level="silent", peak_level="silent",
         created_at=1.0, updated_at=9.0, state_since_at=1.0,
-        resolved=True, closed=True,
+        resolved=True, closed=True, kept_row=True,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
     await send_card_mutation(
@@ -660,7 +660,7 @@ async def test_resolve_push_not_ephemeral_for_urgent_peak_story(sidecar_db_path:
     card = Card(
         card_key="doorbell:person:trk1", level="notify", peak_level="urgent",
         created_at=1.0, updated_at=9.0, state_since_at=1.0,
-        resolved=True, closed=True,
+        resolved=True, closed=True, kept_row=True,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
     await send_card_mutation(

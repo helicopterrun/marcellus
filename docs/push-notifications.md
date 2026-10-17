@@ -196,16 +196,22 @@ explicit signal. It rides on `frigate/events`' object `end` message
 Every resolve gets one final push: quiet (no sound, `interruption-level:
 passive`), same `apns-collapse-id` as the story it's closing. Whether that
 push is **ephemeral** (`ephemeral: true` — the app removes the delivered
-row from Notification Center at once) depends on the story's peak:
+row from Notification Center at once) depends on whether the story ever
+left a kept row:
 
-`ephemeral = peak_level not in ("silent", "urgent") and not
-zone_override_hit`
+`ephemeral = not kept_row and not zone_override_hit`
 
-| Story peak (`card.peak_level`) | Zone override ever hit | Resolve |
+`kept_row` is sticky on the card (`push_cards.kept_row`): true once any Quiet
+(`silent`) or Urgent card push was delivered for the story — even if it was
+later lifted to Glance. A Glance story that reached a device without Live
+Activities as a silent fallback card sets `fallback_row` instead, which keeps
+the resolve row on those devices only.
+
+| Story | Zone override ever hit | Resolve |
 |---|---|---|
-| `log` or `quiet` (Glance) | no | `ephemeral: true` — removed, scoped to the event's lifetime |
-| `silent` (Quiet) or `urgent` | — | `ephemeral: false` — row replaced in place, body `"…left after 4 min"`, kept until the person opens or clears it |
-| any | yes | `ephemeral: false`, regardless of peak |
+| never delivered a Quiet/Urgent card (e.g. Glance only) | no | `ephemeral: true` — removed, scoped to the event's lifetime |
+| delivered a Quiet (`silent`) or Urgent card | — | `ephemeral: false` — row replaced in place, body `"…left after 4 min"`, kept until the person opens or clears it |
+| any | yes | `ephemeral: false` |
 
 `ephemeral` is always explicit, never omitted — an app reading it absent
 treats the row as coming from an old sidecar and falls back to its own 24h

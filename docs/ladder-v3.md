@@ -221,9 +221,14 @@ Add this as a test fixture.
 
 ### 5.2 Notification Center rows that stay
 
-RESOLVE payloads: `ephemeral = peak_level not in ("silent", "urgent") and
-not zone_override_hit`. Quiet and Urgent rows are kept until the person opens
-or clears them (the app removes a row when its story is opened, unchanged).
+RESOLVE payloads: `ephemeral = not kept_row and not zone_override_hit`.
+`kept_row` (a sticky `push_cards` column) turns true once any `silent` or
+`urgent` card push has been delivered for the story, so a story that sent a
+Quiet row and was later lifted to Glance keeps that row. The Glance fallback
+(§5.3) sets a separate sticky `fallback_row`, which keeps the row on the
+devices that got the fallback only. Quiet and Urgent rows are kept until the
+person opens or clears them (the app removes a row when its story is opened,
+unchanged).
 
 ### 5.3 Glance on a device that can't show a Live Activity
 
