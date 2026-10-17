@@ -56,7 +56,7 @@ encounters:
   overlap: []                    # pairs that share a view (config wins)
   not_overlap: []                # pairs that never do (beats overlap)
   overlap_concurrent_max_s: 1.0  # gap <= this (or any overlap in time) = seen together
-  overlap_min_fraction: 0.6      # learned overlap when concurrent/total >= this
+  overlap_min_fraction: 0.65     # learned overlap when concurrent/total >= this
   retention_days: 30             # sealed encounters older than this are pruned hourly
 ```
 All fields must be mentioned in the guide topic (see test_guide.py rules).

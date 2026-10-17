@@ -63,7 +63,7 @@ class TransitionConfig:
     overlap: frozenset[frozenset[str]] = frozenset()
     not_overlap: frozenset[frozenset[str]] = frozenset()
     overlap_concurrent_max_s: float = 1.0
-    overlap_min_fraction: float = 0.6
+    overlap_min_fraction: float = 0.65
 
 
 @dataclass(frozen=True)

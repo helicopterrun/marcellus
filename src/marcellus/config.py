@@ -671,7 +671,10 @@ class EncountersSection(BaseModel):
 
     # A pair is learned as overlapping when at least this fraction of its
     # eligible samples were seen together (needs `transition_min_samples`).
-    overlap_min_fraction: float = 0.6
+    # 0.65, not 0.6: on the NVR's 14 days (2026-10-17) the same-place pairs
+    # sat at 0.69-0.98 and shed + stairway-wide (whose view only catches the
+    # stairway's edge) at 0.60.
+    overlap_min_fraction: float = 0.65
 
     # How long a sealed encounter (and its members/decisions) survives
     # before the reconciler's hourly prune drops it -- mirrors
