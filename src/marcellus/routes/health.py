@@ -84,10 +84,42 @@ def _recycle_stream_client(app: Any) -> None:
     if old is not None:
 
         async def _close_old() -> None:
+            # Bounded: the wedged transport is exactly what may hang on close.
             with contextlib.suppress(Exception):
-                await old.aclose()
+                await asyncio.wait_for(old.aclose(), timeout=30.0)
 
         asyncio.ensure_future(_close_old())
+
+
+def check_stream_pool(app: Any, now: float) -> tuple[dict[str, int], bool]:
+    """The stream pool's stats and whether it is saturated; recycles the client
+    once saturation has lasted `_STALLED_POOL_RECYCLE_S`.
+
+    Called by `/healthz` and, every few seconds, by the server's proxy
+    watchdog -- on 2026-10-17 nothing polled `/healthz` on the NVR, so a
+    recycle that only ran there never ran at all and the pool stayed wedged
+    for 40 minutes until a manual restart.
+    """
+    stream_client = getattr(app.state, "stream_http_client", None)
+    if stream_client is None:
+        return {}, False
+    stats = pool_stats(stream_client)
+    if not stats:
+        return {}, False
+    max_connections = _STREAM_LIMITS.max_connections
+    saturated = (
+        max_connections is not None
+        and stats.get("connections", 0) >= max_connections
+        and stats.get("idle", 0) == 0
+    )
+    if saturated:
+        _note_stalled_pool(app, now)
+        since = app.state._stalled_pool_since
+        if since is not None and now - since >= _STALLED_POOL_RECYCLE_S:
+            _recycle_stream_client(app)
+    else:
+        app.state._stalled_pool_since = None
+    return stats, saturated
 
 
 def get_stream_client_forced_fresh(app: Any) -> httpx.AsyncClient:
@@ -211,25 +243,11 @@ async def healthz(request: Request) -> JSONResponse:
         ok = False
         reason = frigate_reason
 
-    stream_client = getattr(app.state, "stream_http_client", None)
-    if stream_client is not None:
-        stats = pool_stats(stream_client)
-        if stats:
-            checks["upstream_pool"] = stats
-            max_connections = _STREAM_LIMITS.max_connections
-            saturated = (
-                max_connections is not None
-                and stats.get("connections", 0) >= max_connections
-                and stats.get("idle", 0) == 0
-            )
-            if saturated:
-                ok = False
-                _note_stalled_pool(app, now)
-                since = app.state._stalled_pool_since
-                if since is not None and now - since >= _STALLED_POOL_RECYCLE_S:
-                    _recycle_stream_client(app)
-            else:
-                app.state._stalled_pool_since = None
+    stream_stats, stream_saturated = check_stream_pool(app, now)
+    if stream_stats:
+        checks["upstream_pool"] = stream_stats
+    if stream_saturated:
+        ok = False
 
     http_client = getattr(app.state, "http_client", None)
     if http_client is not None:

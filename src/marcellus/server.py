@@ -384,6 +384,32 @@ async def _activity_sweep_loop(app: FastAPI) -> None:
             logger.exception("push: activity sweep failed")
 
 
+_PROXY_WATCHDOG_INTERVAL_S = 10.0
+
+
+async def _proxy_watchdog_loop(app: FastAPI) -> None:
+    """Keep the media proxy's stream pool from wedging for good.
+
+    Two jobs on a fixed cadence: close any upstream response that has been
+    open past its maximum life (`proxy.reap_stale_upstreams`, a leak), and run
+    the stalled-pool check that recycles the stream client (`check_stream_pool`)
+    -- which used to run only inside `/healthz`, and nothing on the NVR polls
+    that (2026-10-17: 64/64 connections wedged for 40 minutes).
+    """
+    from marcellus.routes import proxy as proxy_routes
+    from marcellus.routes.health import check_stream_pool
+
+    while True:
+        await asyncio.sleep(_PROXY_WATCHDOG_INTERVAL_S)
+        try:
+            await proxy_routes.reap_stale_upstreams(app)
+            check_stream_pool(app, time.time())
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("proxy watchdog: cycle failed")
+
+
 async def _face_enrich_loop(app: FastAPI) -> None:
     """Drive faces/enrich.py's run_cycle on a fixed cadence.
 
@@ -649,6 +675,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             "rings need registered push devices, which requires push.enabled"
         )
 
+    proxy_watchdog_task: asyncio.Task[None] | None = None
+    if settings.proxy.enabled:
+        proxy_watchdog_task = asyncio.create_task(_proxy_watchdog_loop(app))
+
     enrich_task: asyncio.Task[None] | None = None
     if settings.face_enrich.enabled:
         from marcellus.faces import enrich as _enrich
@@ -674,6 +704,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             enrich_task,
             encounters_task,
             encounters_worker_task,
+            proxy_watchdog_task,
         ):
             if pending is not None:
                 pending.cancel()
