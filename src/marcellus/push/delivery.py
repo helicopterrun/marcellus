@@ -539,10 +539,15 @@ async def sweep_urgent_resound(
     enabled: bool = True,
     max_resounds: int = 5,
     payload_for_resound: Any = None,
+    muted: bool = False,
 ) -> int:
     """Check every open `urgent` card for repeating re-sounds (§2). Each
-    re-sound counts against the global sounding rate cap."""
-    if not enabled or payload_for_resound is None:
+    re-sound counts against the global sounding rate cap.
+
+    `muted` (`mute_sounds`): no repeats are scheduled at all. A re-sound exists
+    to sound again; muted, it would only re-post the same alarm. The Alarm
+    still arrives once, without sound."""
+    if not enabled or muted or payload_for_resound is None:
         return 0
     now = time.time() if now is None else now
     resounded = 0
