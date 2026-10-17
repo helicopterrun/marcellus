@@ -60,7 +60,7 @@ async def test_two_stories_one_activity(sidecar_db_path: Path):
     device = make_device()
     config = PushSection(delivery_enabled=True)
 
-    # Story A: person at front_door -> notify, LA-eligible.
+    # Story A: person at front_door -> Glance, LA-eligible.
     await handle_delivery_event(
         make_event("doorbell", "trkA", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
@@ -106,7 +106,7 @@ async def test_primary_flips_on_escalation(sidecar_db_path: Path):
     device = make_device()
     config = PushSection(delivery_enabled=True)
 
-    # A: notify.
+    # A: Glance.
     await handle_delivery_event(
         make_event("doorbell", "trkA", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
@@ -114,7 +114,7 @@ async def test_primary_flips_on_escalation(sidecar_db_path: Path):
     attach_token(conn, device=device, card_key="doorbell:person:trkA", track_id="trkA",
                  token="perActivity1")
 
-    # B: joins at notify too.
+    # B: joins at Glance too.
     await handle_delivery_event(
         make_event("doorbell", "trkB", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=20.0,
@@ -255,7 +255,7 @@ async def test_escalate_keeps_create_thumbnail_handle(sidecar_db_path: Path):
     engine = PushEngine(db_path=str(sidecar_db_path), transport=transport, server_id="s_test")
     config = PushSection(delivery_enabled=True, external_base_url=EXTERNAL_BASE_URL)
 
-    # create: front_door -> notify, LA-eligible, mints media.
+    # create: front_door -> Glance, LA-eligible (should mint media).
     await handle_delivery_event(
         make_event("doorbell", "trkA", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config,
@@ -306,7 +306,7 @@ async def test_aggregate_uses_non_triggering_primarys_own_handle(sidecar_db_path
     attach_token(conn, device=device, card_key="doorbell:person:trkA", track_id="trkA",
                  token="perActivity1")
 
-    # Story B: a different, lower-level (notify) story joins and triggers
+    # Story B: a different, lower-level (Glance) story joins and triggers
     # this mutation -- it is NOT the primary (A outranks it at urgent).
     await handle_delivery_event(
         make_event("doorbell", "trkB", "person", zones=("front_door",)),
@@ -316,7 +316,7 @@ async def test_aggregate_uses_non_triggering_primarys_own_handle(sidecar_db_path
     updates = [r for r in la_sends(transport) if r["event"] == "update"]
     assert len(updates) == 1
     content_state = updates[0]["payload"]["aps"]["content-state"]
-    # A is still primary (urgent beats notify).
+    # A is still primary (urgent beats Glance).
     assert content_state["deep_link_card_key"] == "doorbell:person:trkA"
     assert content_state["thumbnail_handle"] == a_handle
 
@@ -515,9 +515,9 @@ async def test_la_first_demotion_covers_all_stories(sidecar_db_path: Path):
         make_event("doorbell", "trkA", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
-    # LA start accepted -- the card still delivers (NSE must still run) but
-    # demoted to passive.
-    _assert_all_passive(card_sends(transport))
+    # Glance (front_door default): the LA start carries the story and an
+    # LA-capable device gets no card push at all (v3).
+    assert card_sends(transport) == []
     attach_token(conn, device=device, card_key="doorbell:person:trkA", track_id="trkA",
                  token="perActivity1")
 
@@ -526,12 +526,12 @@ async def test_la_first_demotion_covers_all_stories(sidecar_db_path: Path):
         make_event("doorbell", "trkB", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=20.0,
     )
-    # B is a new story joining the already-live device activity -- the
-    # ordinary card push for B must be demoted too, not just A's.
-    new_sends = card_sends(transport)[before:]
-    _assert_all_passive(new_sends)
+    # B is a new Glance story joining the already-live device activity --
+    # it pushes no card either.
+    assert card_sends(transport)[before:] == []
 
-    # A further mutation of B (escalation) is still covered/demoted.
+    # A further mutation of B (escalation to urgent) pushes a card, but it
+    # is still covered/demoted to passive by the live activity.
     before = len(card_sends(transport))
     await handle_delivery_event(
         make_event("doorbell", "trkB", "person", zones=("pool",)),
@@ -675,7 +675,8 @@ async def test_full_cycle_token_posted_with_sentinel_situation_id(sidecar_db_pat
     `situation_id`/`track_id` straight off `attributes` (now correct, per
     the fix above). `find_activity` must still find the row, the next
     mutation must send an UPDATE (not a second start), and the device must
-    land in `covered` so the ordinary card push is demoted to passive.
+    land in `covered` (Glance pushes no card to an LA-capable device, so
+    nothing may leak out as an ordinary card push).
     """
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -704,10 +705,7 @@ async def test_full_cycle_token_posted_with_sentinel_situation_id(sidecar_db_pat
     updates = [r for r in la_sends(transport) if r["event"] == "update"]
     assert len(updates) == 1
 
-    new_card_sends = card_sends(transport)[before_card_sends:]
-    assert new_card_sends
-    for s in new_card_sends:
-        assert s["payload"]["aps"]["interruption-level"] == "passive"
+    assert card_sends(transport)[before_card_sends:] == []
 
 
 @pytest.mark.asyncio

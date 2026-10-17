@@ -41,29 +41,29 @@
       },
       {
         "mutation": "escalate",
-        "level": "quiet",
+        "level": "silent",
         "sound": false,
-        "push": false
+        "push": true
       },
       {
         "mutation": "resolve",
-        "level": "quiet",
+        "level": "silent",
         "sound": false,
-        "push": false
+        "push": true
       }
     ]
   },
   {
     "id": 2,
-    "name": "Person: stranger at door, identity resolves, leaves",
-    "card_key": "front:stranger:track-9",
+    "name": "Person: stranger at the pool, identity resolves, leaves",
+    "card_key": "pool:stranger:track-9",
     "steps": [
       {
         "kind": "snapshot",
         "now": 0,
         "inputs": {
           "subject": "stranger",
-          "place": "doors"
+          "place": "off_limits"
         }
       },
       {
@@ -71,7 +71,7 @@
         "now": 8,
         "inputs": {
           "subject": "known",
-          "place": "doors"
+          "place": "off_limits"
         }
       },
       {
@@ -79,7 +79,7 @@
         "now": 40,
         "inputs": {
           "subject": "known",
-          "place": "doors"
+          "place": "off_limits"
         },
         "resolved": true
       }
@@ -87,7 +87,7 @@
     "expected": [
       {
         "mutation": "create",
-        "level": "notify",
+        "level": "urgent",
         "sound": true,
         "push": true
       },
@@ -146,9 +146,9 @@
       },
       {
         "mutation": "escalate",
-        "level": "quiet",
+        "level": "silent",
         "sound": false,
-        "push": false
+        "push": true
       },
       {
         "mutation": "escalate",
@@ -237,9 +237,9 @@
     "expected": [
       {
         "mutation": "create",
-        "level": "notify",
-        "sound": true,
-        "push": true
+        "level": "quiet",
+        "sound": false,
+        "push": false
       },
       {
         "mutation": "suppressed",
@@ -281,6 +281,116 @@
         "mutation": "resolve",
         "level": "notify",
         "sound": false,
+        "push": true
+      }
+    ]
+  },
+  {
+    "id": 7,
+    "name": "Quiet: Ignore nudged to Quiet at night pushes passive, never sounds, calms back to Ignore",
+    "card_key": "street:stranger:track-12",
+    "steps": [
+      {
+        "kind": "snapshot",
+        "now": 0,
+        "inputs": {
+          "subject": "stranger",
+          "place": "street",
+          "night": true
+        }
+      },
+      {
+        "kind": "snapshot",
+        "now": 20,
+        "inputs": {
+          "subject": "stranger",
+          "place": "street"
+        }
+      },
+      {
+        "kind": "snapshot",
+        "now": 30,
+        "inputs": {
+          "subject": "stranger",
+          "place": "street"
+        },
+        "resolved": true
+      }
+    ],
+    "expected": [
+      {
+        "mutation": "create",
+        "level": "silent",
+        "sound": false,
+        "push": true
+      },
+      {
+        "mutation": "deescalate",
+        "level": "log",
+        "sound": false,
+        "push": false
+      },
+      {
+        "mutation": "resolve",
+        "level": "log",
+        "sound": false,
+        "push": false
+      }
+    ]
+  },
+  {
+    "id": 8,
+    "name": "Glance: behaviour stops at Glance; only a safety trigger reaches Urgent",
+    "card_key": "yard:stranger:track-13",
+    "steps": [
+      {
+        "kind": "snapshot",
+        "now": 0,
+        "inputs": {
+          "subject": "stranger",
+          "place": "yard",
+          "night": true,
+          "nobody_home": true
+        }
+      },
+      {
+        "kind": "snapshot",
+        "now": 10,
+        "inputs": {
+          "subject": "stranger",
+          "place": "yard",
+          "night": true,
+          "nobody_home": true,
+          "dwell_exceeded": true
+        }
+      },
+      {
+        "kind": "snapshot",
+        "now": 20,
+        "inputs": {
+          "subject": "stranger",
+          "place": "yard",
+          "ai_flagged": true
+        }
+      }
+    ],
+    "expected": [
+      {
+        "mutation": "create",
+        "level": "quiet",
+        "sound": false,
+        "push": false
+      },
+      {
+        "mutation": "enrich",
+        "level": "quiet",
+        "sound": false,
+        "push": false
+      },
+      {
+        "mutation": "escalate",
+        "level": "urgent",
+        "sound": true,
         "push": true
       }
     ]

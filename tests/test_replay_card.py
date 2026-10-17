@@ -145,7 +145,7 @@ def test_run_scenario_rejects_non_positive_speed():
 
 
 @pytest.mark.asyncio
-async def test_dry_run_scenario_notify_resolve():
+async def test_dry_run_scenario_glance_resolve():
     path = replay_card.resolve_scenario_path("card-notify-resolve")
     scenario = replay_card.load_scenario(path)
     messages = replay_card.build_messages(scenario, run_id="drytest")
@@ -153,19 +153,19 @@ async def test_dry_run_scenario_notify_resolve():
 
     assert len(decisions) == 3
     assert decisions[0]["mutation"] == "create"
-    assert decisions[0]["level"] == "notify"
-    # LA start accepted → the card push still delivers, demoted to passive
-    # (la_first); the NSE still runs on it, but the LA carries the alert.
-    assert decisions[0]["card"] == "demoted (LA covers)"
-    assert decisions[0]["interruption_level"] == "passive"
-    assert not decisions[0]["sounded"]
+    # v3: stranger+doors is Glance (quiet). The LA start carries the story
+    # and an LA-capable device gets no card push at all.
+    assert decisions[0]["level"] == "quiet"
+    assert decisions[0]["card"] == "no card send (LA covers)"
     assert decisions[0]["la_action"] == "start"
 
     assert decisions[1]["mutation"] == "enrich"
-    assert decisions[1]["card"] == "demoted (LA covers)"
+    assert decisions[1]["card"] == "no card send (LA covers)"
+    assert decisions[1]["la_action"] == "update"
 
     assert decisions[2]["mutation"] == "resolve"
-    assert decisions[2]["level"] == "notify"
+    assert decisions[2]["level"] == "quiet"
+    assert decisions[2]["la_action"] == "end"
 
 
 @pytest.mark.asyncio
@@ -179,9 +179,7 @@ async def test_dry_run_scenario_escalate_urgent():
     decisions = await replay_card.dry_run_scenario(messages, speed=100.0, camera="patio")
 
     mutations = [d["mutation"] for d in decisions]
-    # The quiet-level create still sends a card push -- demoted to passive
-    # once its LA covers the device, but delivered (2026-08-29: la_first
-    # demotion delivers passive instead of suppressing).
+    # The Glance-level create sends no card push (the LA covers the device).
     assert "create" in mutations
     assert "escalate" in mutations
 

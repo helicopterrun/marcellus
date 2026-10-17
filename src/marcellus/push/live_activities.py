@@ -48,7 +48,9 @@ from marcellus.push.payload import APNS_MAX_PAYLOAD_BYTES, payload_size
 #: this exact string -- it must equal the Swift type name.
 ATTRIBUTES_TYPE = "ElsinoreActivityAttributes"
 
-_RELEVANCE_SCORE = {"urgent": 1.0, "notify": 0.75, "quiet": 0.5, "log": 0.25}
+#: Content-state `level` -> `relevance-score` (ladder v3 §5.5: notify's 0.75
+#: dropped; content-state `level` never carries `silent`).
+_RELEVANCE_SCORE = {"urgent": 1.0, "quiet": 0.5, "log": 0.25}
 
 PACKAGE = "package"
 BINS = "bins"
@@ -113,6 +115,8 @@ def classify_family(
     `should_start_activity` itself, which the `la_only` fallback decision
     log needs to tell apart (`delivery_wire.py`).
 
+    A `silent` (Quiet) level matches no family at all (v3 §5.1).
+
     The person family is gated on the card's *routed level*, not a place
     class: the routing table is the single authority on what matters, and
     LA families follow it rather than second-guessing geography. The old
@@ -130,6 +134,10 @@ def classify_family(
     activity runs. The `thing`+label spelling is kept as a fallback for
     callers that still classify these cards as `thing` (an old applied
     table, direct test callers)."""
+    # A Quiet (`silent`) level never starts a Live Activity (v3 §5.1): it is
+    # a passive Notification Center row and nothing else.
+    if level == "silent":
+        return None
     if subject_kind == "package" or (subject_kind == "thing" and label == "package"):
         return PACKAGE if level != "log" else None
     if subject_kind == "bin" or (subject_kind == "thing" and label in BIN_LABELS):
@@ -138,7 +146,9 @@ def classify_family(
         return OPENINGS if level != "log" else None
     if subject_kind in ("stranger", "known", "person") and place_class == "off_limits":
         return PERSON_RESTRICTED
-    if subject_kind in ("stranger", "known", "person") and level in ("notify", "urgent"):
+    # v3 §5.5: the person family starts at Glance or Urgent (was notify or
+    # urgent), so Glance for a person uses the person family.
+    if subject_kind in ("stranger", "known", "person") and level in ("quiet", "urgent"):
         return PERSON
     return None
 
@@ -284,6 +294,12 @@ def build_content_state(
     widget's deep link needs the former: tapping the activity should land
     the scrub on the moment the story began, not on its latest escalation.
     """
+    # Content-state `level` never carries `silent` (v3 §5.5): a Quiet story
+    # never starts or headlines an activity, but an END built from a story
+    # that dropped to Quiet reads as `log` -- installed widget builds know
+    # only log/quiet/urgent (and the retired notify).
+    if level == "silent":
+        level = "log"
     state: dict[str, Any] = {
         "level": level,
         "mutation": mutation,

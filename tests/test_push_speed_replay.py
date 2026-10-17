@@ -27,10 +27,10 @@ def _front_settings():
         "front_door": "doors",
     }
     settings["camera_neighbors"] = {"garden": ["street"]}
-    # The captured walk is a sidewalk passer-by; route it to notify so the
+    # The captured walk is a sidewalk passer-by; route it to Glance (quiet) so the
     # person LA family (the motion carrier) engages. Test-only knob — the
     # subject here is speed/heading plumbing, not sidewalk policy.
-    settings["zone_overrides"] = {"sidewalk": {"person": "notify"}}
+    settings["zone_overrides"] = {"sidewalk": {"person": "quiet"}}
     settings["camera_headings"] = {
         "garden": {"dx": 0.0, "dy": -1.0}, "street": {"dx": 0.0, "dy": -1.0},
     }

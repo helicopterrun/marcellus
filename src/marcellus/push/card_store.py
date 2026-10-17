@@ -15,6 +15,7 @@ import time
 from typing import cast
 
 from marcellus.push.cards import Card
+from marcellus.push.ladder_policy import canonical_level
 
 
 def _row_to_card(row: sqlite3.Row) -> Card:
@@ -22,10 +23,13 @@ def _row_to_card(row: sqlite3.Row) -> Card:
         peak_level = row["peak_level"]
     except (IndexError, KeyError):
         peak_level = row["level"]
+    # A row written before ladder v3 may still say `notify`: §6 translates
+    # it to `silent` at this boundary so index arithmetic never meets it.
+    level = canonical_level(row["level"])
     return Card(
         card_key=row["card_key"],
-        level=row["level"],
-        peak_level=peak_level or row["level"],
+        level=level,
+        peak_level=canonical_level(peak_level) if peak_level else level,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         state_since_at=row["state_since_at"],

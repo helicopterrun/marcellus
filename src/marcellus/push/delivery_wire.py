@@ -40,20 +40,29 @@ from marcellus.push import (
     policy_settings,
     store,
 )
-from marcellus.push.cards import CREATE, DEESCALATE, ENRICH, ESCALATE, RESOLVE, Card
+from marcellus.push.cards import (
+    CREATE,
+    DEESCALATE,
+    ENRICH,
+    ESCALATE,
+    GLANCE_FALLBACK_LEVELS,
+    PUSHABLE_LEVELS,
+    RESOLVE,
+    Card,
+)
 from marcellus.push.cards import SUPPRESSED as SUPPRESSED_MUTATION
 from marcellus.push.delivery import (
     _device_eligible,
     _is_snoozed,
     build_card_key,
     build_card_payload,
+    needs_card_payload,
     send_card_mutation,
     should_push,
     sound_name_for_card,
 )
 from marcellus.push.delivery import advance_card as _advance_card
 from marcellus.push.ladder import (
-    SUPPRESSED,
     Snapshot,
     evaluate_ladder,
     evaluate_ladder_explained,
@@ -96,7 +105,7 @@ _LA_UPDATE_MIN_INTERVAL_SLOW_S = 15.0
 _LA_PATH_GROWTH_THRESHOLD = 3
 
 #: Place-class ordering outermost→innermost, for the zones.ladder.
-_PLACE_ORDER = ("street", "yard", "doors", "private", "off_limits")
+_PLACE_ORDER = ("street", "yard", "doors", "off_limits")
 
 logger = logging.getLogger(__name__)
 
@@ -187,8 +196,10 @@ def zone_place(zone: str, zone_classes: dict[str, str]) -> str:
     the user just added) get a reasonable class immediately instead of going
     silent until explicitly configured.
     """
+    from marcellus.push.ladder_policy import canonical_place
+
     if zone in zone_classes:
-        return zone_classes[zone]
+        return canonical_place(zone_classes[zone])
     return policy_settings.guess_zone_class(zone)
 
 
@@ -1111,7 +1122,7 @@ async def _deliver_live_activities(
     return covered
 
 
-_LEVEL_RANK = {"log": 0, "quiet": 1, "notify": 2, "urgent": 3}
+_LEVEL_RANK = {"log": 0, "silent": 1, "quiet": 2, "urgent": 3}
 
 
 def _pick_primary(
@@ -1428,27 +1439,19 @@ async def handle_delivery_event(
         event, zone_classes=policy["zone_classes"],
         nobody_home=nobody_home, night=night, dwell_exceeded=dwell_exceeded,
     )
+    # Quiet hours `hold_urgent` (ladder v3 §2.5) is the engine's last step
+    # (`ladder._apply_quiet_hours_hold`, after caps): Urgent is held at Glance
+    # except at off_limits and for safety triggers.
     snapshot = replace(
         snapshot, approaching_secure=approaching_secure,
         leaving_scene=leaving_scene, moving_fast=moving_fast,
+        quiet_hours_hold=qh_active and qh_mode == "hold_urgent",
     )
     ladder_result = evaluate_ladder_explained(snapshot)
     level = ladder_result.level
     decision_stage = ladder_result.stage
     decision_modifiers = list(ladder_result.modifiers)
-
-    # Quiet hours: cap_quiet caps level at quiet (urgent exempt). SUPPRESSED
-    # is not in ladder_policy.LEVELS -- a muted/suppressed snapshot has
-    # nothing to cap, so it must skip this block rather than hit .index().
-    qh_capped = False
-    if qh_active and qh_mode == "cap_quiet" and level not in ("urgent", SUPPRESSED):
-        from marcellus.push import ladder_policy
-        quiet_idx = ladder_policy.LEVELS.index("quiet")
-        level_idx = ladder_policy.LEVELS.index(level)
-        if level_idx > quiet_idx:
-            level = "quiet"
-            qh_capped = True
-            decision_modifiers.append("quiet_hours_cap")
+    qh_held = "quiet_hours_hold" in decision_modifiers
     zone_name = event.zones[0] if event.zones else ""
     track_ids = event.track_ids or (event.event_id,)
 
@@ -1462,8 +1465,8 @@ async def handle_delivery_event(
         trace_reasons.append("zone_override")
     else:
         trace_reasons.append("routing_table")
-    if qh_capped:
-        trace_reasons.append("quiet_hours_cap")
+    if qh_held:
+        trace_reasons.append("quiet_hours_hold")
     if approaching_secure:
         trace_reasons.append("approaching")
         if nearest_ft is not None and nearest_ft <= 100:
@@ -1616,7 +1619,10 @@ async def handle_delivery_event(
         warm_task = None
         media_handle = None
         media = None
-        if should_push(card.level):
+        # Media for every surface that shows a picture: a card push, and a
+        # Glance story's Live Activity (or its silent fallback card) -- the
+        # retired notify level used to mint it for the person family's LA.
+        if should_push(card.level) or card.level in GLANCE_FALLBACK_LEVELS:
             media_handle, media, warm_task = _media_for(
                 mutation, event, conn=conn, engine=engine, config=config,
             )
@@ -1634,24 +1640,26 @@ async def handle_delivery_event(
         # the card push demoted to a silent NC entry -- an LA that failed
         # anywhere along the way leaves the normal banner intact.
         la_only = bool(policy["live_activities"].get("la_only", False))
-        # la_only's catch-all is quiet+ by its own contract -- decoupled from
-        # should_push, which no longer includes quiet (2026-08-14).
-        # A "glance" outcome cell is la_only applied per-cell: the merged
-        # ladder promises a Live Activity with no banner, so the catch-all
-        # guarantees an activity for *uncurated* content (a quiet person in
-        # the yard matches no family today). Content a curated family
-        # claims runs under that family's own name -- and since the V3
-        # subjects, those families are routed by the same ladder cell as
-        # everything else, with opening picks as the one curation left.
-        cell_glance = policy_settings.outcome_for(subject_kind, place_class) == "glance"
-        if cell_glance and not la_only:
+        # la_only's catch-all covers Glance and Urgent by its own contract.
+        # A Glance ladder cell is la_only applied per-cell: the ladder
+        # promises a Live Activity with no card push, so the catch-all
+        # guarantees an activity for *uncurated* content (a vehicle in the
+        # yard matches no family). Content a curated family claims runs
+        # under that family's own name -- and since the V3 subjects, those
+        # families are routed by the same ladder cell as everything else,
+        # with opening picks as the one curation left. A story that is AT
+        # Glance (`quiet`) without a Glance cell (a Quiet cell nudged up, a
+        # zone override) gets the catch-all too: Glance pushes no card, so
+        # without an activity it would reach an iPhone as nothing at all.
+        # A Quiet (`silent`) level never starts one (v3 §5.5).
+        cell_glance = policy_settings.ladder_cell(subject_kind, place_class) == "glance"
+        if (cell_glance or card.level == "quiet") and not la_only:
             native = live_activities.classify_family(
                 subject_kind=subject_kind, label=snapshot.label,
                 place_class=place_class, level=card.level,
             )
-            if native is not None:
-                cell_glance = False
-        la_catch_all = (la_only or cell_glance) and card.level in ("quiet", "notify", "urgent")
+            cell_glance = native is None and (cell_glance or card.level == "quiet")
+        la_catch_all = (la_only or cell_glance) and card.level in ("quiet", "urgent")
         family = live_activities.should_start_activity(
             subject_kind=subject_kind, label=snapshot.label, place_class=place_class,
             level=card.level,
@@ -1717,7 +1725,7 @@ async def handle_delivery_event(
                 # no-family content.
                 content_family = live_activities.classify_family(
                     subject_kind=subject_kind, label=snapshot.label,
-                    place_class=place_class, level="notify",
+                    place_class=place_class, level="quiet",
                 )
                 if content_family is None:
                     la_reason = "no_family"
@@ -1749,7 +1757,7 @@ async def handle_delivery_event(
         # activity is open and this card independently qualifies as an
         # eligible story for that device, not a card-scoped row lookup.
         delivery_mode = policy["live_activities"].get("delivery", "la_first")
-        is_escalation = mutation == ESCALATE and card.level in ("notify", "urgent")
+        is_escalation = mutation == ESCALATE and card.level in PUSHABLE_LEVELS
         demote_tokens: set[str] = set(la_covered)
         if delivery_mode == "la_first" and not la_only and not is_escalation and family is not None:
             for device in devices:
@@ -1776,9 +1784,10 @@ async def handle_delivery_event(
         # reached a pushable one (alerts-slice2 §E): `send_card_mutation`'s
         # own RESOLVE branch decides ephemeral vs. non-ephemeral off the
         # story's peak, but it can only do that if it gets a payload to mark
-        # up in the first place. Every other mutation still gates on
-        # `should_push`.
-        if should_push(card.level) or mutation == RESOLVE:
+        # up in the first place. A Glance card builds one too: it goes, as a
+        # `silent` card, only to devices that can't show a Live Activity
+        # (v3 §5.3). Every other mutation gates on `should_push`.
+        if needs_card_payload(card.level, mutation):
             payload = build_card_payload(
                 card, mutation, sound=sound and not la_only,
                 subject_kind=subject_kind, place_class=place_class,
@@ -1791,6 +1800,7 @@ async def handle_delivery_event(
                 thread_by_encounter=bool(config.encounter_threading),
             )
 
+        fallback_devices: list[str] = []
         sent_count = await send_card_mutation(
             conn, transport, devices, card, mutation, payload,
             subject_kind=subject_kind, place_class=place_class,
@@ -1802,12 +1812,23 @@ async def handle_delivery_event(
             encounter_id=encounter_id or "",
             event_camera=event.camera,
             cameras_path=cameras_path or None,
+            fallback_out=fallback_devices,
         )
         if mutation in (CREATE, ESCALATE, DEESCALATE):
             decision_trace.annotate(
                 conn, event.event_id, sent=sent_count,
                 sound=bool(sound and not la_only and sent_count > 0),
             )
+            if fallback_devices:
+                # Glance delivered as a silent card to devices that can't
+                # show a Live Activity (§5.3). The per-device detail is in
+                # the "glance fallback" log lines; the decision row records
+                # that it happened.
+                decision_trace.annotate(
+                    conn, event.event_id,
+                    la_reason=None if la_covered else "device_not_la_capable",
+                    add_reason="glance_fallback",
+                )
         if warm_task is not None:
             # Runs concurrently with the sends above, not in series (plan §4
             # lever 4's rule, reused here): the push already carries the
@@ -1927,7 +1948,7 @@ async def handle_delivery_resolve(
         # ongoing-mutation demotion above does.
         demote_resolve: set[str] = set(la_covered)
         payload = None
-        if should_push(card.level) or mutation == RESOLVE:
+        if needs_card_payload(card.level, mutation):
             payload = build_card_payload(
                 card, mutation, sound=sound and not la_only, subject_kind=kind,
                 place_class="", camera=camera, zone_name=zone_name,
@@ -2168,7 +2189,7 @@ async def handle_recognition_event(
             ):
                 demote_recog.add(device.apns_token)
     payload = None
-    if should_push(card.level):
+    if needs_card_payload(card.level, mutation):
         payload = build_card_payload(
             card, mutation, sound=False, subject_kind=subject_kind,
             place_class=place_class, label=label, camera=owning_camera,

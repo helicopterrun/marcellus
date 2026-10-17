@@ -96,7 +96,7 @@ class Device:
     app_version: str = ""
     cameras: tuple[str, ...] = field(default_factory=tuple)  # () = all cameras
     labels: tuple[str, ...] = field(default_factory=tuple)  # () = all labels
-    min_severity: str = "alert"
+    min_severity: str = "detection"  # ladder v3 §5.4 (was "alert")
 
     # -- v2 registration (plan §8) --
     # 1 = the v1 camera+label+severity subscription; 2 = the situation shape.

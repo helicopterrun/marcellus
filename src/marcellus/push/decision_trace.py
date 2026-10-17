@@ -1,5 +1,8 @@
 """Durable routing decision log (alerts-slice1 §A).
 
+`level` values (ladder v3 §5.6): `off` (a suppressed Ignore cell), `log`,
+`silent`, `quiet`, `urgent`. Rows written before v3 may still read `notify`.
+
 One row per event decision (pre-fanout), in the sidecar SQLite DB
 (`push_decisions`, `db.SIDECAR_SCHEMA`) rather than an in-memory ring buffer
 -- restart no longer loses the trail. Same shape as `push/card_store.py`:
@@ -136,15 +139,18 @@ def annotate(
     la_reason: str | None = None,
     sent: int | None = None,
     sound: bool | None = None,
+    add_reason: str | None = None,
 ) -> None:
     """Patch the newest row for `event_id` with the Live Activity side of the
     decision (one alerts stack: the feed covers the whole stack, not just
     banner routing), or fields only known after the push actually went out
-    (`sent`, `sound`). No-op when no row matches. Never raises into the push
-    path."""
+    (`sent`, `sound`). `add_reason` appends one reason to the row's `reasons`
+    if it isn't there yet (e.g. `glance_fallback`, ladder v3 §5.3). No-op when
+    no row matches. Never raises into the push path."""
     try:
         row = conn.execute(
-            "SELECT rowid FROM push_decisions WHERE event_id = ? ORDER BY rowid DESC LIMIT 1",
+            "SELECT rowid, reasons_csv FROM push_decisions WHERE event_id = ? "
+            "ORDER BY rowid DESC LIMIT 1",
             (event_id,),
         ).fetchone()
         if row is None:
@@ -167,6 +173,11 @@ def annotate(
         if sound is not None:
             updates.append("sound = ?")
             params.append(1 if sound else 0)
+        if add_reason:
+            reasons = [r for r in (row["reasons_csv"] or "").split(",") if r]
+            if add_reason not in reasons:
+                updates.append("reasons_csv = ?")
+                params.append(",".join([*reasons, add_reason]))
         if not updates:
             return
         params.append(rowid)

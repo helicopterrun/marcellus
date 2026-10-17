@@ -26,8 +26,7 @@ def _device() -> Device:
 
 def _apply(*, mute: bool) -> None:
     s = policy_settings.default_settings()
-    key = "routing_table_v2" if "routing_table_v2" in s else "routing_table"
-    s[key]["package"]["yard"] = "urgent"
+    s["ladder"]["package"]["yard"] = "urgent"
     s["mute_sounds"] = mute
     policy_settings.apply_settings(s)
 

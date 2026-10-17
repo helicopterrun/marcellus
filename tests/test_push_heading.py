@@ -148,9 +148,11 @@ def test_ladder_reasons_include_direction_and_speed():
     assert "moving_fast" in ladder_policy.WORRY_REASONS
     assert "leaving_scene" in ladder_policy.CALM_REASONS
 
-    base = evaluate_ladder(Snapshot(subject="person", place="yard"))
+    # Street is the one place a stranger sits below Glance (log), so a worry
+    # nudge has headroom: v3 caps worry nudges at quiet (never urgent).
+    base = evaluate_ladder(Snapshot(subject="person", place="street"))
     bumped = evaluate_ladder(
-        Snapshot(subject="person", place="yard", approaching_secure=True)
+        Snapshot(subject="person", place="street", approaching_secure=True)
     )
     calmed = evaluate_ladder(
         Snapshot(subject="person", place="doors", leaving_scene=True)

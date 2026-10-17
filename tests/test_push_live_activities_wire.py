@@ -86,7 +86,7 @@ async def test_full_la_lifecycle_create_enrich_escalate_resolve(sidecar_db_path:
     config = PushSection(delivery_enabled=True)
     card_key = "doorbell:package:trk1"
 
-    # create: package at pool zone -> package/off_limits = notify (pushable)
+    # create: package at pool zone -> package/off_limits = Glance (LA start)
     await handle_delivery_event(
         make_event("doorbell", "trk1", "package", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
@@ -314,9 +314,9 @@ async def test_log_routed_cell_suppresses_just_that_family(sidecar_db_path: Path
     config = PushSection(delivery_enabled=True)
 
     disabled = policy_settings.default_settings()
-    for place in disabled["outcomes"]["package"]:
-        disabled["outcomes"]["package"][place] = "log"
-        disabled["routing_table_v2"]["package"][place] = "log"
+    # v3: `ladder` is authoritative (outcomes/routing_table_v2 are derived).
+    for place in disabled["ladder"]["package"]:
+        disabled["ladder"]["package"][place] = "ignore"
     policy_settings.apply_settings(disabled)
 
     await handle_delivery_event(
@@ -378,19 +378,14 @@ async def test_card_push_suppressed_while_la_confirmed(sidecar_db_path: Path):
     config = PushSection(delivery_enabled=True)
     card_key = "doorbell:person:trk1"
 
-    # create: person at front_door -> notify; LA start accepted by the mock
-    # transport, so the create card push delivers passive.
+    # create: person at front_door -> Glance (quiet): the LA start carries the
+    # story and an LA-capable device gets NO card push at all (v3).
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     assert la_sends(transport)[0]["event"] == "start"
-    create_card = card_sends(transport)[0]
-    create_aps = create_card["payload"]["aps"]
-    assert create_aps["interruption-level"] == "passive"
-    assert not create_aps.get("sound")
-    assert create_aps["mutable-content"] == 1
-    create_collapse_id = create_card["collapse_id"]
+    assert card_sends(transport) == []
 
     attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perActivity1")
 
@@ -410,15 +405,16 @@ async def test_card_push_suppressed_while_la_confirmed(sidecar_db_path: Path):
     assert esc_aps["interruption-level"] == "passive"
     assert not esc_aps.get("sound")
     assert esc_aps["mutable-content"] == 1
-    assert esc_cards[0]["collapse_id"] == create_collapse_id
+    assert esc_cards[0]["collapse_id"]
 
 
 @pytest.mark.asyncio
 async def test_card_push_not_demoted_when_la_unconfirmed(sidecar_db_path: Path):
     """The failure mode that forced the eaac866 revert: an LA that never
     materializes must not eat the banner. A device with no push-to-start
-    token gets a full-fat card push; so does an escalate whose LA row has
-    no per-activity token yet."""
+    token can't show a Live Activity, so its Glance story falls back to a
+    silent (passive, soundless) card; an urgent escalate whose LA row has
+    no per-activity token yet stays a full-fat banner."""
     from marcellus.push import policy_settings
     policy_settings.apply_settings(policy_settings.default_settings() | {"mute_sounds": False})
 
@@ -433,8 +429,10 @@ async def test_card_push_not_demoted_when_la_unconfirmed(sidecar_db_path: Path):
     )
     assert la_sends(transport) == []
     aps = card_sends(transport)[0]["payload"]["aps"]
-    assert aps["interruption-level"] == "active"  # notify level, undemoted
-    assert aps.get("sound")
+    # v3 Glance fallback: not LA-capable -> silent card (passive, no sound).
+    assert aps["interruption-level"] == "passive"
+    assert not aps.get("sound")
+    assert card_sends(transport)[0]["payload"]["level"] == "silent"
 
     # Second device: LA starts but the app never uploads a per-activity
     # token — the escalate card push must stay a real banner.
@@ -621,7 +619,7 @@ async def test_la_only_ineligible_family_falls_back_to_catch_all(sidecar_db_path
     settings["live_activities"]["opening_picks"] = ["front_gate"]
     policy_settings.apply_settings(settings)
 
-    # create: garage opening at the pool zone routes notify (pushable), but
+    # create: garage opening at the pool zone routes Glance (LA-eligible), but
     # the opening isn't on the curated picks list -- the one family-level
     # refinement left after the booleans dissolved into the ladder.
     await handle_delivery_event(
@@ -667,8 +665,8 @@ async def test_la_only_off_disabled_family_skips_without_fallback(sidecar_db_pat
     """The catch-all fallback is an `la_only`-only behavior. With `la_only`
     off, a disabled family must still just skip the LA -- and, since no LA
     covers it, the ordinary card push must alert normally, not be demoted.
-    Uses an opening routed to notify so a demoted payload (passive, no
-    sound) is visibly different from a normal one (active, sound present);
+    Uses an opening routed to urgent so a demoted payload (passive, no
+    sound) is visibly different from a normal one (time-sensitive, sound);
     the picks mismatch is the one family-skip left since the per-family
     booleans dissolved into the outcome ladder."""
     from marcellus.push import policy_settings
@@ -680,8 +678,7 @@ async def test_la_only_off_disabled_family_skips_without_fallback(sidecar_db_pat
 
     settings = policy_settings.default_settings()
     settings["mute_sounds"] = False
-    settings["outcomes"]["opening"]["doors"] = "notify"
-    settings["routing_table_v2"]["opening"]["doors"] = "notify"
+    settings["ladder"]["opening"]["doors"] = "urgent"
     settings["live_activities"]["opening_picks"] = ["front_gate"]
     policy_settings.apply_settings(settings)
 
@@ -694,7 +691,7 @@ async def test_la_only_off_disabled_family_skips_without_fallback(sidecar_db_pat
     assert len(cards) == 1
     # Not demoted: full alerting card (active + sound), since no LA covers
     # this device -- family-disabled must not silently downgrade the push.
-    assert cards[0]["payload"]["aps"]["interruption-level"] == "active"
+    assert cards[0]["payload"]["aps"]["interruption-level"] == "time-sensitive"
     assert cards[0]["payload"]["aps"].get("sound")
 
 
@@ -737,9 +734,9 @@ async def test_multi_device_demotion_is_per_device(sidecar_db_path: Path):
     dev_b = make_device(token="tokB", push_to_start="")    # no LA
     config = PushSection(delivery_enabled=True)
 
-    # person at front_door -> notify: A gets an LA start, B cannot.
+    # person at the pool (off_limits -> urgent): A gets an LA start, B cannot.
     await handle_delivery_event(
-        make_event("doorbell", "trk1", "person", zones=("front_door",)),
+        make_event("doorbell", "trk1", "person", zones=("pool",)),
         conn=conn, devices=[dev_a, dev_b], transport=transport, config=config, now=0.0,
     )
     starts = [r for r in la_sends(transport) if r["event"] == "start"]
@@ -752,32 +749,31 @@ async def test_multi_device_demotion_is_per_device(sidecar_db_path: Path):
     assert cards["d_tokA"]["payload"]["aps"]["interruption-level"] == "passive"
     assert not cards["d_tokA"]["payload"]["aps"].get("sound")
     assert cards["d_tokA"]["payload"]["aps"]["mutable-content"] == 1
-    assert cards["d_tokB"]["payload"]["aps"]["interruption-level"] == "active"
+    assert cards["d_tokB"]["payload"]["aps"]["interruption-level"] == "time-sensitive"
     assert cards["d_tokB"]["payload"]["aps"].get("sound")
 
 
 @pytest.mark.asyncio
 async def test_urgent_escalation_late_starts_la_with_sound(sidecar_db_path: Path):
-    """A person routed quiet at create qualifies for no LA (routing-gated
-    families). When the story escalates to urgent, the LA *late-starts* —
-    and its mandatory start alert carries the sound, doubling as the
-    escalation alert. The card push is demoted; the LA is the surface."""
-    from marcellus.push import ladder_policy, policy_settings
+    """A person routed Quiet (silent: passive kept NC row) at create has no
+    Live Activity family. When the story escalates to urgent, the LA
+    *late-starts* -- and its mandatory start alert carries the sound,
+    doubling as the escalation alert. The card push is demoted; the LA is
+    the surface."""
+    from marcellus.push import policy_settings
 
     settings = policy_settings.default_settings()
     settings["mute_sounds"] = False
+    settings["ladder"]["person"]["doors"] = "silent"
     policy_settings.apply_settings(settings)
-    custom_table = {k: dict(v) for k, v in ladder_policy.TABLE.items()}
-    custom_table["person"]["doors"] = "quiet"
-    ladder_policy.set_table(custom_table)
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = make_device()
     config = PushSection(delivery_enabled=True)
 
-    # Create at quiet (person at front_door, custom table): no LA — quiet
-    # people don't mint activities.
+    # Create at silent (person at front_door): no LA -- silent cards never
+    # mint activities.
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
@@ -802,11 +798,11 @@ async def test_urgent_escalation_late_starts_la_with_sound(sidecar_db_path: Path
 
 
 @pytest.mark.asyncio
-async def test_notify_escalation_la_update_alert_no_sound(sidecar_db_path: Path):
-    """Notify-level alerting updates (haptic pop) must NOT carry a sound —
-    only urgent escalation gets sound on the LA update. Verified via the
-    person-at-doors create: the LA start (required by iOS) has the start
-    sound, but any subsequent update at notify level carries no sound."""
+async def test_glance_la_start_and_update_carry_no_sound(sidecar_db_path: Path):
+    """Glance (quiet) Live Activities never sound -- only urgent escalation
+    gets a sound. Verified via the person-at-doors create: the LA start
+    (required by iOS) carries an alert but no sound, and a subsequent
+    enrich update carries neither alert nor sound."""
     from marcellus.push import policy_settings
     policy_settings.apply_settings(policy_settings.default_settings() | {"mute_sounds": False})
 
@@ -816,18 +812,18 @@ async def test_notify_escalation_la_update_alert_no_sound(sidecar_db_path: Path)
     config = PushSection(delivery_enabled=True)
     card_key = "doorbell:person:trk1"
 
-    # Create at notify: LA start carries a sound (at-the-door.caf).
+    # Create at Glance: the LA start alert carries no sound.
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     start = la_sends(transport)[0]
     assert start["event"] == "start"
-    assert start["payload"]["aps"]["alert"].get("sound") == "at-the-door.caf"
+    assert start["payload"]["aps"]["alert"].get("sound") is None
 
     attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perAct1")
 
-    # Enrich at notify: LA update has no alert (enrich never alerts) and no sound.
+    # Enrich at Glance: LA update has no alert (enrich never alerts) and no sound.
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=5.0,
@@ -840,17 +836,15 @@ async def test_notify_escalation_la_update_alert_no_sound(sidecar_db_path: Path)
 @pytest.mark.asyncio
 async def test_la_update_sound_suppressed_by_exhausted_budget(sidecar_db_path: Path):
     """The per-card sound budget (1) caps the LA update sound: after the
-    first sounded escalation (quiet→urgent), a re-escalation gets an alert
-    but no sound. Uses custom routing (person+doors=quiet) so the create
-    doesn't spend the budget while still qualifying for the person LA."""
-    from marcellus.push import ladder_policy, policy_settings
+    first sounded escalation (silent→urgent), a re-escalation gets an alert
+    but no sound. Uses custom routing (person+doors=silent) so the create
+    doesn't spend the budget (a silent card never sounds)."""
+    from marcellus.push import policy_settings
 
     settings = policy_settings.default_settings()
     settings["mute_sounds"] = False
+    settings["ladder"]["person"]["doors"] = "silent"
     policy_settings.apply_settings(settings)
-    custom_table = {k: dict(v) for k, v in ladder_policy.TABLE.items()}
-    custom_table["person"]["doors"] = "quiet"
-    ladder_policy.set_table(custom_table)
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -858,14 +852,14 @@ async def test_la_update_sound_suppressed_by_exhausted_budget(sidecar_db_path: P
     config = PushSection(delivery_enabled=True)
     card_key = "doorbell:person:trk1"
 
-    # Create at quiet (person at front_door, custom table): LA starts, no sound.
+    # Create at silent (person at front_door): passive card, no LA, no sound.
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
 
     # Sound #1: escalate to urgent — the LA late-starts and its start alert
-    # carries the sound (routing-gated families: quiet create minted no LA).
+    # carries the sound (silent create minted no LA).
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=10.0,
@@ -874,7 +868,7 @@ async def test_la_update_sound_suppressed_by_exhausted_budget(sidecar_db_path: P
     assert esc1["payload"]["aps"]["alert"]["sound"] == "urgent.caf"
     attach_token(conn, device=device, card_key=card_key, track_id="trk1", token="perAct1")
 
-    # Deescalate back to notify (no sound on deescalate).
+    # Deescalate back to silent (no sound on deescalate).
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=20.0,
@@ -885,8 +879,8 @@ async def test_la_update_sound_suppressed_by_exhausted_budget(sidecar_db_path: P
         make_event("doorbell", "trk1", "person", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=30.0,
     )
-    # The deescalate to front_door dropped below LA eligibility (device-scoped
-    # "quiet" is off the floor), so the activity ended in between -- the
+    # The deescalate to front_door dropped below LA eligibility (a silent
+    # card is off the LA floor), so the activity ended in between -- the
     # re-escalation is a fresh "start", not an "update". The sound budget is
     # per-card and survives the activity churn, so it still carries an alert
     # without a sound.
@@ -901,7 +895,7 @@ async def test_mute_sounds_strips_la_update_sound(sidecar_db_path: Path):
     """Global mute_sounds strips the sound key from urgent LA updates but
     still carries the alert dict (title/body) for haptic pop — muted is a
     sound-only control, not a suppression gate."""
-    from marcellus.push import ladder_policy, policy_settings
+    from marcellus.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -909,23 +903,22 @@ async def test_mute_sounds_strips_la_update_sound(sidecar_db_path: Path):
     config = PushSection(delivery_enabled=True)
     _card_key = "doorbell:person:trk1"
 
-    # Custom table: person+doors=quiet so create doesn't spend sound budget.
+    # person+doors=silent so create mints no LA and spends no sound budget.
     unmuted = policy_settings.default_settings()
     unmuted["mute_sounds"] = False
+    unmuted["ladder"]["person"]["doors"] = "silent"
     policy_settings.apply_settings(unmuted)
-    custom_table = {k: dict(v) for k, v in ladder_policy.TABLE.items()}
-    custom_table["person"]["doors"] = "quiet"
-    ladder_policy.set_table(custom_table)
 
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
-    assert la_sends(transport) == []  # quiet create mints no LA
+    assert la_sends(transport) == []  # silent create mints no LA
 
     # Enable mute_sounds, then send the escalation event — the LA
     # late-starts; its mandatory start alert pops but carries no sound.
     muted = policy_settings.default_settings()
+    muted["ladder"]["person"]["doors"] = "silent"
     muted["mute_sounds"] = True
     policy_settings.apply_settings(muted)
 
@@ -970,7 +963,7 @@ async def test_uncovered_urgent_card_keeps_card_push_sound(sidecar_db_path: Path
 async def test_muted_urgent_escalation_la_carries_alert_without_sound(sidecar_db_path: Path):
     """Change 1: muted urgent escalation LA update carries alert dict
     (title/body) for haptic pop but no sound key."""
-    from marcellus.push import ladder_policy, policy_settings
+    from marcellus.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -978,19 +971,17 @@ async def test_muted_urgent_escalation_la_carries_alert_without_sound(sidecar_db
     config = PushSection(delivery_enabled=True)
     _card_key = "doorbell:person:trk1"
 
-    # Custom table: person+doors=quiet so create doesn't spend sound budget.
+    # person+doors=silent so create mints no LA and spends no sound budget.
     settings = policy_settings.default_settings()
     settings["mute_sounds"] = False
+    settings["ladder"]["person"]["doors"] = "silent"
     policy_settings.apply_settings(settings)
-    custom_table = {k: dict(v) for k, v in ladder_policy.TABLE.items()}
-    custom_table["person"]["doors"] = "quiet"
-    ladder_policy.set_table(custom_table)
 
     await handle_delivery_event(
         make_event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
-    assert la_sends(transport) == []  # quiet create mints no LA
+    assert la_sends(transport) == []  # silent create mints no LA
 
     # Enable mute, then escalate to urgent — LA late-starts, alert muted.
     settings["mute_sounds"] = True
@@ -1036,8 +1027,9 @@ async def test_muted_urgent_uncovered_card_keeps_time_sensitive_no_sound(sidecar
 
 
 @pytest.mark.asyncio
-async def test_muted_notify_stays_non_alerting(sidecar_db_path: Path):
-    """Muted notify: card pushes without sound, no escalation to alerting."""
+async def test_muted_glance_fallback_stays_non_alerting(sidecar_db_path: Path):
+    """Muted Glance on a non-LA device: the silent fallback card pushes
+    passive without sound, no escalation to alerting."""
     from marcellus.push import policy_settings
 
     conn = db.open_sidecar(sidecar_db_path)
@@ -1056,7 +1048,7 @@ async def test_muted_notify_stays_non_alerting(sidecar_db_path: Path):
     cards = card_sends(transport)
     assert len(cards) == 1
     aps = cards[0]["payload"]["aps"]
-    assert aps["interruption-level"] == "active"
+    assert aps["interruption-level"] == "passive"
     assert "sound" not in aps
 
 
@@ -1199,7 +1191,7 @@ async def test_dismissal_tombstone_suppresses_create_and_undemotes_card_push(
     store.dismiss_activity(conn, tombstone_id, now=-50.0)
 
     await handle_delivery_event(
-        make_event("doorbell", track_id, "person", zones=("front_door",)),
+        make_event("doorbell", track_id, "person", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     assert la_sends(transport) == []
@@ -1211,11 +1203,12 @@ async def test_dismissal_tombstone_suppresses_create_and_undemotes_card_push(
     ).fetchall()
     assert [r["activity_id"] for r in rows] == [tombstone_id]
 
-    # Undemoted: the card push carries the full alert (active + sound), since
-    # no LA covers this device.
+    # Undemoted: the urgent card push carries the full alert (time-sensitive
+    # + sound), since no LA covers this device. (Urgent, not Glance: a Glance
+    # story pushes no card at all to an LA-capable device.)
     cards = card_sends(transport)
     assert len(cards) == 1
-    assert cards[0]["payload"]["aps"]["interruption-level"] == "active"
+    assert cards[0]["payload"]["aps"]["interruption-level"] == "time-sensitive"
     assert cards[0]["payload"]["aps"].get("sound")
 
 
@@ -1223,14 +1216,12 @@ async def test_dismissal_tombstone_suppresses_create_and_undemotes_card_push(
 async def test_escalate_clears_tombstone_and_starts_a_new_activity(sidecar_db_path: Path):
     """An ESCALATE mutation breaks through a dismissal tombstone: the
     tombstone is deleted and a fresh Live Activity starts."""
-    from marcellus.push import ladder_policy, policy_settings
+    from marcellus.push import policy_settings
 
     settings = policy_settings.default_settings()
     settings["mute_sounds"] = False
+    settings["ladder"]["person"]["doors"] = "silent"
     policy_settings.apply_settings(settings)
-    custom_table = {k: dict(v) for k, v in ladder_policy.TABLE.items()}
-    custom_table["person"]["doors"] = "quiet"
-    ladder_policy.set_table(custom_table)
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -1279,14 +1270,11 @@ async def test_escalation_bypasses_min_interval_throttle(sidecar_db_path: Path):
     card push be demoted (§1 of the ephemeral/escalation spec). Without the
     bypass, `min_interval` would swallow this update since it lands 1s after
     the create, far under the 3s fast-cadence floor."""
-    from marcellus.push import ladder_policy, policy_settings
+    from marcellus.push import policy_settings
 
     settings = policy_settings.default_settings()
     settings["mute_sounds"] = False
     policy_settings.apply_settings(settings)
-    custom_table = {k: dict(v) for k, v in ladder_policy.TABLE.items()}
-    custom_table["person"]["doors"] = "notify"
-    ladder_policy.set_table(custom_table)
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
@@ -1295,7 +1283,7 @@ async def test_escalation_bypasses_min_interval_throttle(sidecar_db_path: Path):
     card_key = "doorbell:person:trk1"
     track_id = "trk1"
 
-    # Create at notify -> LA start.
+    # Create at Glance (person at front_door default) -> LA start.
     await handle_delivery_event(
         make_event("doorbell", track_id, "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,

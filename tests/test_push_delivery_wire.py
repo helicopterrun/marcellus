@@ -29,6 +29,17 @@ def make_device(token: str = "tok1", min_severity: str = "detection") -> Device:
     )
 
 
+def make_la_device(token: str = "tok1") -> Device:
+    """A device that can show a Live Activity (push-to-start token + la_capable):
+    Glance (`quiet`) pushes no card to it. A plain `make_device()` has no
+    push-to-start token, so v3 sends it quiet cards as silent fallback cards."""
+    return Device(
+        apns_token=token, device_id=f"d_{token}", bundle_id="com.pondhouse.Elsinore",
+        environment="sandbox", min_severity="detection",
+        push_to_start_token=f"pts_{token}", la_capable=True,
+    )
+
+
 @pytest.mark.asyncio
 async def test_zone_change_mutates_same_card_not_a_new_one(sidecar_db_path: Path):
     conn = db.open_sidecar(sidecar_db_path)
@@ -86,7 +97,7 @@ async def test_media_present_on_create_and_points_at_external_base(sidecar_db_pa
     config = PushSection(delivery_enabled=True, external_base_url=EXTERNAL_BASE_URL)
     event = ReviewEvent(
         review_id="r1", camera="front", severity="alert", labels=("person",),
-        # doors -> notify: quiet no longer pushes (2026-08-14)
+        # doors -> Glance (v3): a device without an LA token gets the silent fallback card
         track_ids=("trk1",), zones=("front_door",),
     )
 
@@ -319,7 +330,7 @@ async def test_subject_changing_zones_enriches_the_same_card_no_new_one(sidecar_
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     config = PushSection(delivery_enabled=True)
-    device = make_device()
+    device = make_la_device()
 
     # Both zones guess to the same place class ("yard", Elsinore Phase 4's
     # name heuristic -- `policy_settings.guess_zone_class`), so the level is
@@ -337,8 +348,9 @@ async def test_subject_changing_zones_enriches_the_same_card_no_new_one(sidecar_
     rows = conn.execute("SELECT card_key, zone_name FROM push_cards").fetchall()
     assert len(rows) == 1
     assert rows[0]["zone_name"] == "parking_spot"
-    # person/yard routes quiet, and quiet no longer pushes (2026-08-14).
-    assert transport.sent == []
+    # person/yard routes Glance (`quiet`); Glance pushes no card to an
+    # LA-capable device (v3); only the Live Activity start goes out.
+    assert [r for r in transport.sent if not r.get("live_activity")] == []
 
 
 @pytest.mark.asyncio
@@ -421,8 +433,7 @@ async def test_changing_the_routing_table_via_settings_changes_the_level_applied
     device = make_device()
 
     new_settings = policy_settings.default_settings()
-    table_key = "routing_table_v2" if "routing_table_v2" in new_settings else "routing_table"
-    new_settings[table_key]["package"]["yard"] = "urgent"
+    new_settings["ladder"]["package"]["yard"] = "urgent"
     policy_settings.apply_settings(new_settings)
 
     await handle_delivery_event(
@@ -455,6 +466,8 @@ async def test_zone_classes_from_settings_take_priority_over_the_guess_heuristic
     # reflects the override, not the heuristic.
     new_settings = policy_settings.default_settings()
     new_settings["zone_classes"]["driveway"] = "doors"
+    # Make doors distinguishable from yard (both Glance by default).
+    new_settings["ladder"]["person"]["doors"] = "urgent"
     policy_settings.apply_settings(new_settings)
 
     await handle_delivery_event(
@@ -466,7 +479,7 @@ async def test_zone_classes_from_settings_take_priority_over_the_guess_heuristic
     )
     sent = transport.sent[0]["payload"]
     assert sent["place_class"] == "doors"
-    assert sent["level"] == "notify"  # person/doors per the default table
+    assert sent["level"] == "urgent"  # person/doors per the ladder (yard stays Glance)
 
 
 @pytest.mark.asyncio
@@ -482,10 +495,10 @@ async def test_zone_override_via_settings_is_applied_to_a_real_card(sidecar_db_p
     device = make_device()
 
     # Base table says "package"/"doors" is "quiet" (glance -- never a
-    # banner); the override forces "notify" for this specific zone.
+    # banner); the override forces "silent" (Quiet) for this specific zone.
     new_settings = policy_settings.default_settings()
     new_settings["zone_classes"]["front_entry_person"] = "doors"
-    new_settings["zone_overrides"] = {"front_entry_person": {"package": "notify"}}
+    new_settings["zone_overrides"] = {"front_entry_person": {"package": "silent"}}
     policy_settings.apply_settings(new_settings)
     assert new_settings["routing_table_v2"]["package"]["doors"] == "quiet"
 
@@ -500,8 +513,8 @@ async def test_zone_override_via_settings_is_applied_to_a_real_card(sidecar_db_p
     row = conn.execute(
         "SELECT level FROM push_cards WHERE card_key = 'cam-a:package:trkA'"
     ).fetchone()
-    assert row["level"] == "notify"
-    assert transport.sent[0]["payload"]["level"] == "notify"
+    assert row["level"] == "silent"
+    assert transport.sent[0]["payload"]["level"] == "silent"
 
 
 @pytest.mark.asyncio
@@ -649,12 +662,18 @@ async def test_label_flip_keeps_one_card(sidecar_db_path: Path):
 
 @pytest.mark.asyncio
 async def test_label_flip_escalation_routes_at_new_kind(sidecar_db_path: Path):
-    """animal/doors is quiet but person/doors is notify: the flip re-routes
-    the SAME card upward (escalate), pushing for the first time."""
+    """animal/doors is Glance but person/doors is Urgent (set here): the flip
+    re-routes the SAME card upward (escalate), pushing for the first time."""
+    from marcellus.push import policy_settings
+
+    settings = policy_settings.default_settings()
+    settings["ladder"]["person"]["doors"] = "urgent"
+    policy_settings.apply_settings(settings)
+
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     config = PushSection(delivery_enabled=True)
-    device = make_device()
+    device = make_la_device()
 
     animal_event = ReviewEvent(
         review_id="r1", camera="doorbell", severity="alert", labels=("cat",),
@@ -669,7 +688,7 @@ async def test_label_flip_escalation_routes_at_new_kind(sidecar_db_path: Path):
         animal_event, conn=conn, devices=[device], transport=transport,
         config=config, now=0.0,
     )
-    assert transport.sent == []  # animal/doors = quiet, quiet never pushes
+    assert [r for r in transport.sent if not r.get("live_activity")] == []  # Glance: no card push
 
     await handle_delivery_event(
         person_event, conn=conn, devices=[device], transport=transport,
@@ -680,7 +699,7 @@ async def test_label_flip_escalation_routes_at_new_kind(sidecar_db_path: Path):
     payload = sends[-1]["payload"]
     assert payload["card_key"] == "doorbell:animal:trk1"  # birth key kept
     assert payload["mutation"] == "escalate"
-    assert payload["level"] == "notify"
+    assert payload["level"] == "urgent"
 
 
 @pytest.mark.asyncio

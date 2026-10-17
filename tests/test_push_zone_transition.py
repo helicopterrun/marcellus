@@ -62,15 +62,15 @@ async def test_zone_transition_escalates_and_late_starts_la(sidecar_db_path: Pat
     device = make_device()
     config = PushSection(delivery_enabled=True)
 
-    # Story exists at quiet: person in the driveway (yard). The merged
-    # ladder's glance outcome (2026-08-16) starts a catch-all activity
-    # right here -- the quiet story is on the lock screen from the start.
+    # Story exists at quiet: person in the driveway (yard). The Glance cell
+    # starts a Live Activity right here (the v3 person family starts at
+    # quiet) -- the quiet story is on the lock screen from the start.
     await handle_delivery_event(
         review("stairway-tight", "trk1", ("driveway",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
     creates = [s for s in la_sends(transport) if s["event"] == "start"]
-    assert creates and creates[0]["payload"]["aps"]["attributes"]["family"] == "activity"
+    assert creates and creates[0]["payload"]["aps"]["attributes"]["family"] == "person"
 
     # Event stream: drifted into the charger (off_limits) — escalate. The
     # glance activity's per-activity token was never confirmed in this
