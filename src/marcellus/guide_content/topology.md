@@ -45,13 +45,26 @@ companion, so those still win when they also match. Pairs with only a
 Same-camera and shared-zone matches never use learned stats -- they're
 "still basically where the encounter already is," not a handoff.
 
+## Shared views (overlap)
+
+Two cameras that see the same place report near-zero "walks". The scan
+therefore also judges each adjacent pair: if at least `overlap_min_fraction`
+(0.6) of its samples were seen together (gap at or under
+`overlap_concurrent_max_s`, 1 s, including any negative gap) and there are
+`transition_min_samples` of them, the pair is `overlap` ('learned').
+`overlap` / `not_overlap` config pairs override that (`not_overlap` wins).
+For an overlapping pair the seen-together samples are left out of walking
+times; other pairs keep theirs. Verdicts live in `camera_overlap`.
+
 ## Topology API
 
 - `GET /v1/topology` -- the adjacency graph (same edges as
   `/v1/encounters/adjacency`) with each edge's `transitions` in both
-  directions, per family.
+  directions, per family, plus `overlap` (bool), `overlap_source`
+  (`config`|`learned`|`default`) and `overlap_stats` (`concurrent`,
+  `samples`). Config overrides apply at read time.
 - `GET /v1/cameras/{camera}/neighbours` -- one camera's directed edges and
-  their transition stats; 404 if the camera has no zones and no adjacency
+  their transition stats and `overlap`/`overlap_source`; 404 if the camera has no zones and no adjacency
   edges.
 
 ## Global timeline

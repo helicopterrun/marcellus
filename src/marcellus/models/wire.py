@@ -441,12 +441,20 @@ class TransitionStatsOut(_Wire):
     source: str
 
 
+class OverlapStatsOut(_Wire):
+    concurrent: int
+    samples: int
+
+
 class TopologyEdge(_Wire):
     a: str
     b: str
     zones: list[str]
     source: str
     transitions: dict[str, dict[str, TransitionStatsOut]]
+    overlap: bool
+    overlap_source: str
+    overlap_stats: OverlapStatsOut
 
 
 class TopologyResponse(_Wire):
@@ -458,6 +466,8 @@ class NeighbourCamera(_Wire):
     camera: str
     zones: list[str]
     transitions: dict[str, TransitionStatsOut]
+    overlap: bool
+    overlap_source: str
 
 
 class CameraNeighboursResponse(_Wire):
