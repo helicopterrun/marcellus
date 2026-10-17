@@ -13,6 +13,12 @@ transition_overrides` entry wins ('config'), else enough samples yields
 percentiles ('learned'), else `encounters.transition_default_s` is written
 with the (sub-threshold) sample count actually seen ('default'). Never
 raises into its caller (`service.reconcile`) -- see that module's catch.
+
+Overlap: the same eligibility walk also feeds `count_concurrency` /
+`overlap_verdict` -- a camera pair whose samples are mostly "seen together"
+(gap <= `overlap_concurrent_max_s`, incl. any negative gap) shares a view.
+`learn` stores the verdict in `camera_overlap` and, for overlapping pairs,
+keeps the concurrent samples out of walking times (same place, not a walk).
 """
 
 from __future__ import annotations
@@ -20,7 +26,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import statistics
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,7 +38,11 @@ __all__ = [
     "TransitionStats",
     "TransitionConfig",
     "MemberRow",
+    "OverlapStats",
     "collect_samples",
+    "count_concurrency",
+    "overlap_verdict",
+    "load_overlap",
     "summarise",
     "learn",
     "load_transitions",
@@ -50,6 +60,21 @@ class TransitionConfig:
     max_sample_s: float
     default: dict[str, float]  # {"p10":.., "p50":.., "p90":..}
     overrides: dict[str, dict[str, float]] = field(default_factory=dict)
+    overlap: frozenset[frozenset[str]] = frozenset()
+    not_overlap: frozenset[frozenset[str]] = frozenset()
+    overlap_concurrent_max_s: float = 1.0
+    overlap_min_fraction: float = 0.6
+
+
+@dataclass(frozen=True)
+class OverlapStats:
+    """Whether a camera pair shares a view. `source` is 'config', 'learned'
+    or 'default'; `concurrent`/`samples` are the evidence behind it."""
+
+    overlap: bool
+    source: str
+    concurrent: int
+    samples: int
 
 
 @dataclass(frozen=True)
@@ -74,30 +99,23 @@ def _override_for(
     return cfg.overrides.get(f"{cam_a}>{cam_b}")
 
 
-def collect_samples(
+def _eligible_pairs(
     members: Sequence[MemberRow],
     adjacency: Adjacency,
-    cfg: TransitionConfig,
     *,
     split_atoms: frozenset[str] = frozenset(),
-) -> dict[tuple[str, str, str], list[float]]:
-    """`{(cam_a, cam_b, family): [gap_seconds, ...]}` -- one sample per
-    (m1, m2, shared family) eligible pair, grouped by encounter and ordered
-    by `start_time`.
-
-    A pair (m1, m2) is a sample iff: same encounter_id; m2 is the FIRST
-    later member (by start_time) on a camera different from m1's, with no
-    member on m2's camera in between; m1.end_time is not None (an open atom
-    is skipped); `adjacency.adjacent(m1.camera, m2.camera)` and the cameras
-    differ; m1 and m2 share at least one label family (one sample per shared
-    family); neither atom has a human split decision; and the clamped gap
-    falls in `[-5, cfg.max_sample_s]`.
-    """
+) -> Iterator[tuple[MemberRow, MemberRow, set[str], float]]:
+    """Yield `(m1, m2, shared_families, raw_gap)` for every eligible pair:
+    same encounter_id; m2 is the FIRST later member (by start_time) on a
+    camera different from m1's; m1.end_time is not None (an open atom is
+    skipped); the cameras are adjacent and differ; m1 and m2 share at least
+    one label family; neither atom has a human split decision. `raw_gap` is
+    `m2.start_time - m1.end_time`, unclamped and unfiltered (negative when
+    the atoms overlap in time)."""
     by_encounter: dict[str, list[MemberRow]] = {}
     for m in members:
         by_encounter.setdefault(m.encounter_id, []).append(m)
 
-    out: dict[tuple[str, str, str], list[float]] = {}
     for rows in by_encounter.values():
         ordered = sorted(rows, key=lambda r: r.start_time)
         for i, m1 in enumerate(ordered):
@@ -122,18 +140,83 @@ def collect_samples(
             shared = m1_families & m2_families
             if not shared:
                 continue
-            gap = m2.start_time - m1.end_time
-            if gap < _MIN_GAP_S:
-                # Overlapping by more than the tolerance is co-presence
-                # (two cameras seeing the same thing at once), not a
-                # hand-off -- it would only teach a zero-second transition.
-                continue
-            gap = max(gap, 0.0)
-            if gap > cfg.max_sample_s:
-                continue
-            for family in shared:
-                out.setdefault((m1.camera, m2.camera, family), []).append(gap)
+            yield m1, m2, shared, m2.start_time - m1.end_time
+
+
+def collect_samples(
+    members: Sequence[MemberRow],
+    adjacency: Adjacency,
+    cfg: TransitionConfig,
+    *,
+    split_atoms: frozenset[str] = frozenset(),
+    skip_concurrent_for: frozenset[frozenset[str]] = frozenset(),
+) -> dict[tuple[str, str, str], list[float]]:
+    """`{(cam_a, cam_b, family): [gap_seconds, ...]}` -- one sample per
+    (m1, m2, shared family) eligible pair (see `_eligible_pairs`) whose
+    clamped gap falls in `[-5, cfg.max_sample_s]`. Pairs in
+    `skip_concurrent_for` (overlapping cameras) additionally drop samples
+    with raw gap <= `cfg.overlap_concurrent_max_s` -- same place, not a walk.
+    """
+    out: dict[tuple[str, str, str], list[float]] = {}
+    for m1, m2, shared, raw_gap in _eligible_pairs(members, adjacency, split_atoms=split_atoms):
+        if raw_gap < _MIN_GAP_S:
+            # Overlapping by more than the tolerance is co-presence
+            # (two cameras seeing the same thing at once), not a
+            # hand-off -- it would only teach a zero-second transition.
+            continue
+        if raw_gap > cfg.max_sample_s:
+            continue
+        if (
+            raw_gap <= cfg.overlap_concurrent_max_s
+            and frozenset((m1.camera, m2.camera)) in skip_concurrent_for
+        ):
+            continue
+        gap = max(raw_gap, 0.0)
+        for family in shared:
+            out.setdefault((m1.camera, m2.camera, family), []).append(gap)
     return out
+
+
+def count_concurrency(
+    members: Sequence[MemberRow],
+    adjacency: Adjacency,
+    cfg: TransitionConfig,
+    *,
+    split_atoms: frozenset[str] = frozenset(),
+) -> dict[frozenset[str], tuple[int, int]]:
+    """Per undirected pair, `(concurrent, total)`. Each eligible (m1, m2)
+    occurrence counts once (not per family). concurrent = raw gap <=
+    `overlap_concurrent_max_s` (any negative gap included); total =
+    concurrent + transit-eligible (concurrent_max < gap <= max_sample_s)."""
+    conc: dict[frozenset[str], int] = {}
+    total: dict[frozenset[str], int] = {}
+    for m1, m2, _shared, raw_gap in _eligible_pairs(members, adjacency, split_atoms=split_atoms):
+        pair = frozenset((m1.camera, m2.camera))
+        if raw_gap <= cfg.overlap_concurrent_max_s:
+            conc[pair] = conc.get(pair, 0) + 1
+            total[pair] = total.get(pair, 0) + 1
+        elif raw_gap <= cfg.max_sample_s:
+            total[pair] = total.get(pair, 0) + 1
+    return {pair: (conc.get(pair, 0), n) for pair, n in total.items()}
+
+
+def overlap_verdict(
+    pair: frozenset[str],
+    counts: dict[frozenset[str], tuple[int, int]],
+    cfg: TransitionConfig,
+) -> OverlapStats:
+    """Config `not_overlap` beats config `overlap` beats the learned
+    fraction (needs `min_samples`) beats the False default."""
+    concurrent, total = counts.get(pair, (0, 0))
+    if pair in cfg.not_overlap:
+        return OverlapStats(False, "config", concurrent, total)
+    if pair in cfg.overlap:
+        return OverlapStats(True, "config", concurrent, total)
+    if total >= cfg.min_samples and total > 0:
+        return OverlapStats(
+            concurrent / total >= cfg.overlap_min_fraction, "learned", concurrent, total
+        )
+    return OverlapStats(False, "default", concurrent, total)
 
 
 def summarise(samples: list[float]) -> tuple[float, float, float] | None:
@@ -216,7 +299,14 @@ def learn(
         for r in rows
     ]
 
-    samples = collect_samples(members, adjacency, cfg, split_atoms=split_atoms)
+    counts = count_concurrency(members, adjacency, cfg, split_atoms=split_atoms)
+    verdicts = {
+        edge: overlap_verdict(edge, counts, cfg) for edge in adjacency.edges if len(edge) == 2
+    }
+    overlapping = frozenset(edge for edge, v in verdicts.items() if v.overlap)
+    samples = collect_samples(
+        members, adjacency, cfg, split_atoms=split_atoms, skip_concurrent_for=overlapping
+    )
 
     families = set(LABEL_FAMILIES.keys())
     for _a, _b, family in samples:
@@ -270,16 +360,49 @@ def learn(
                 ),
             )
             written += 1
+    for edge, verdict in verdicts.items():
+        cam_a, cam_b = sorted(edge)
+        conn.execute(
+            "INSERT INTO camera_overlap (cam_a, cam_b, concurrent, samples, overlap, "
+            "source, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(cam_a, cam_b) DO UPDATE SET concurrent = excluded.concurrent, "
+            "samples = excluded.samples, overlap = excluded.overlap, "
+            "source = excluded.source, updated_at = excluded.updated_at",
+            (
+                cam_a,
+                cam_b,
+                verdict.concurrent,
+                verdict.samples,
+                1 if verdict.overlap else 0,
+                verdict.source,
+                now,
+            ),
+        )
     conn.commit()
     return written
+
+
+def load_overlap(conn: sqlite3.Connection) -> dict[frozenset[str], OverlapStats]:
+    """Every row in `camera_overlap`, keyed by the undirected pair."""
+    rows = conn.execute(
+        "SELECT cam_a, cam_b, concurrent, samples, overlap, source FROM camera_overlap"
+    ).fetchall()
+    return {
+        frozenset((str(r["cam_a"]), str(r["cam_b"]))): OverlapStats(
+            overlap=bool(r["overlap"]),
+            source=str(r["source"]),
+            concurrent=int(r["concurrent"]),
+            samples=int(r["samples"]),
+        )
+        for r in rows
+    }
 
 
 def load_transitions(conn: sqlite3.Connection) -> dict[tuple[str, str, str], TransitionStats]:
     """Every row in `camera_transitions`, for consumers (M3's linker,
     M5's UI)."""
     rows = conn.execute(
-        "SELECT cam_a, cam_b, family, samples, p10_s, p50_s, p90_s, source "
-        "FROM camera_transitions"
+        "SELECT cam_a, cam_b, family, samples, p10_s, p50_s, p90_s, source FROM camera_transitions"
     ).fetchall()
     out: dict[tuple[str, str, str], TransitionStats] = {}
     for r in rows:
@@ -300,4 +423,12 @@ def transition_config_from_settings(settings: Any) -> TransitionConfig:
         max_sample_s=enc.transition_max_sample_s,
         default=dict(enc.transition_default_s),
         overrides=dict(enc.transition_overrides),
+        overlap=_pairs(enc.overlap),
+        not_overlap=_pairs(enc.not_overlap),
+        overlap_concurrent_max_s=enc.overlap_concurrent_max_s,
+        overlap_min_fraction=enc.overlap_min_fraction,
     )
+
+
+def _pairs(raw: Sequence[Sequence[str]]) -> frozenset[frozenset[str]]:
+    return frozenset(frozenset(p) for p in raw if len(p) == 2 and p[0] != p[1])

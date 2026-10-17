@@ -202,6 +202,10 @@ cycle, with no restart; the others need a restart.
 | `min_copresence_s` | `3.0` | yes | Minimum span overlap for two atoms to count as companions with no shared label family. |
 | `adjacency` | `[]` | yes | Extra camera-pair edges (`[[a, b], ...]`) beyond what shared zone names already imply. |
 | `not_adjacent` | `[]` | yes | Camera-pair edges to remove despite a shared zone name; config always beats the zone-derived graph. |
+| `overlap` | `[]` | no | Camera pairs (`[[a, b], ...]`) that share a view; config wins over the learned verdict. Their "seen together" samples are kept out of walking times. |
+| `not_overlap` | `[]` | no | Pairs that never share a view; beats `overlap` and the learner. |
+| `overlap_concurrent_max_s` | `1.0` | no | A topology sample with gap at or under this (negative gaps included) counts as seen together. |
+| `overlap_min_fraction` | `0.6` | no | Share of a pair's samples seen together at which the learner calls it overlapping (needs `transition_min_samples`). |
 | `linger_s` | `60.0` | no | Seconds an encounter must last to be tagged notable ("lingered") rather than a passer-by. |
 | `latitude` | unset | no | Property latitude (-90 to 90), used with `longitude` to decide when it is night. Unset: night is 22:00-06:00 server time. |
 | `longitude` | unset | no | Property longitude (-180 to 180); see `latitude`. |

@@ -63,14 +63,25 @@ def test_topology_endpoint(client: TestClient, settings: Settings) -> None:
     body = resp.json()
     assert "alley-wide" in body["cameras"]
     assert "shed" in body["cameras"]
-    edge = next(
-        e for e in body["edges"] if {e["a"], e["b"]} == {"alley-wide", "shed"}
-    )
+    edge = next(e for e in body["edges"] if {e["a"], e["b"]} == {"alley-wide", "shed"})
     assert "alley-wide>shed" in edge["transitions"]
     assert "shed>alley-wide" in edge["transitions"]
     fwd = edge["transitions"]["alley-wide>shed"]
     assert "person" in fwd
     assert fwd["person"]["source"] == "default"
+    assert edge["overlap"] is False
+    assert edge["overlap_source"] == "default"
+    assert set(edge["overlap_stats"]) == {"concurrent", "samples"}
+    assert set(edge) == {
+        "a",
+        "b",
+        "zones",
+        "source",
+        "transitions",
+        "overlap",
+        "overlap_source",
+        "overlap_stats",
+    }
 
 
 def test_camera_neighbours_endpoint(client: TestClient, settings: Settings) -> None:
@@ -82,6 +93,8 @@ def test_camera_neighbours_endpoint(client: TestClient, settings: Settings) -> N
     assert any(n["camera"] == "shed" for n in body["neighbours"])
     shed = next(n for n in body["neighbours"] if n["camera"] == "shed")
     assert "person" in shed["transitions"]
+    assert shed["overlap"] is False
+    assert shed["overlap_source"] == "default"
 
 
 def test_camera_neighbours_404_unknown_camera(client: TestClient) -> None:
@@ -96,3 +109,37 @@ def test_adjacency_endpoint_unchanged(client: TestClient) -> None:
     assert set(body.keys()) == {"cameras", "edges"}
     for edge in body["edges"]:
         assert set(edge.keys()) == {"a", "b", "zones", "source"}
+
+
+def _edge(client: TestClient) -> dict:
+    body = client.get("/v1/topology").json()
+    return next(e for e in body["edges"] if {e["a"], e["b"]} == {"alley-wide", "shed"})
+
+
+def test_read_time_config_overrides(settings: Settings) -> None:
+    _learn_some(settings)
+    settings.encounters.overlap = [["shed", "alley-wide"]]
+    client = TestClient(create_app(settings))
+    edge = _edge(client)
+    assert (edge["overlap"], edge["overlap_source"]) == (True, "config")
+    nb = client.get("/v1/cameras/alley-wide/neighbours").json()["neighbours"][0]
+    assert (nb["overlap"], nb["overlap_source"]) == (True, "config")
+
+    settings.encounters.not_overlap = [["alley-wide", "shed"]]
+    edge = _edge(TestClient(create_app(settings)))
+    assert (edge["overlap"], edge["overlap_source"]) == (False, "config")
+
+
+def test_read_time_uses_stored_row(client: TestClient, settings: Settings) -> None:
+    _learn_some(settings)
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        conn.execute(
+            "UPDATE camera_overlap SET overlap=1, source='learned', concurrent=9, samples=10"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    edge = _edge(client)
+    assert edge["overlap"] is True and edge["overlap_source"] == "learned"
+    assert edge["overlap_stats"] == {"concurrent": 9, "samples": 10}
