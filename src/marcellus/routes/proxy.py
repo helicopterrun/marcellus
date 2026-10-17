@@ -29,12 +29,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
+import anyio
 import httpx
 from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
-from starlette.types import Send
+from starlette.types import Receive, Scope, Send
 
 from marcellus.errors import error_detail
 from marcellus.frigate_api import get_stream_client, pool_stats
@@ -106,6 +109,64 @@ assert _IDLE_CHUNK_TIMEOUT_S < _LATE_HEADER_ABANDON_S
 _CLIENT_STALL_TIMEOUT_S = 30.0
 _STREAM_MAX_DURATION_S = 600.0
 
+# Releasing the upstream must survive the response being cancelled. uvicorn
+# advertises ASGI spec 2.3, so Starlette runs the body next to
+# `listen_for_disconnect` in a task group and cancels it the moment the client
+# goes away (a player seeking, an app killed mid-segment). anyio cancellation
+# is level-triggered: every later `await` in that task is cancelled too, so an
+# unshielded `await resp.aclose()` in a `finally` never completes and the
+# connection stays ACTIVE in the pool -- in CLOSE-WAIT once Frigate hangs up.
+# On 2026-10-17 that filled all 64 stream-pool slots in ~45 minutes of
+# simulator testing (Python 3.10 / Starlette 1.0.0 / anyio 4.13 in prod; the
+# newer stack on the dev Mac did not reproduce it). The release is therefore
+# shielded, and bounded so a hung close can never pin the response either.
+_RELEASE_TIMEOUT_S = 5.0
+
+# Backstop for any path that still leaks: every upstream response is
+# registered while open, and `reap_stale_upstreams` (run by the server's
+# proxy watchdog) closes one still open this long after it was opened. No
+# legitimate response outlives `_STREAM_MAX_DURATION_S`, so anything past it
+# plus a minute is a leak -- logged with its path and progress so the next
+# one names its own cause, and closed so it can't hold a pool slot for good.
+_REAP_AFTER_S = _STREAM_MAX_DURATION_S + 60.0
+
+
+@dataclass
+class _OpenUpstream:
+    path: str
+    opened: float
+    resp: httpx.Response
+    body_started: bool = False
+    bytes_relayed: int = 0
+
+
+def _open_upstreams(app: Any) -> dict[int, _OpenUpstream]:
+    registry = getattr(app.state, "proxy_open_upstreams", None)
+    if registry is None:
+        registry = {}
+        app.state.proxy_open_upstreams = registry
+    return registry
+
+
+async def reap_stale_upstreams(app: Any, now: float | None = None) -> int:
+    """Close upstream responses open longer than `_REAP_AFTER_S`; returns how many."""
+    registry = _open_upstreams(app)
+    now = asyncio.get_event_loop().time() if now is None else now
+    stale = [(key, entry) for key, entry in registry.items() if now - entry.opened > _REAP_AFTER_S]
+    for key, entry in stale:
+        registry.pop(key, None)
+        logger.warning(
+            "proxy: reaped leaked upstream path=%s age=%.0fs body_started=%s bytes=%d",
+            entry.path,
+            now - entry.opened,
+            entry.body_started,
+            entry.bytes_relayed,
+        )
+        with anyio.move_on_after(_RELEASE_TIMEOUT_S, shield=True):
+            with contextlib.suppress(Exception):
+                await entry.resp.aclose()
+    return len(stale)
+
 
 class _BoundedStreamingResponse(StreamingResponse):
     """StreamingResponse that also bounds the client side and the total
@@ -117,9 +178,45 @@ class _BoundedStreamingResponse(StreamingResponse):
     upstream connection is always released back to the pool.
     """
 
-    def __init__(self, *args: Any, log_path: str, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        log_path: str,
+        release_upstream: Callable[[], Awaitable[None]] | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._log_path = log_path
+        self._release_upstream = release_upstream
+        self._released = False
+
+    async def _release(self) -> None:
+        """Close the body iterator and the upstream response, exactly once,
+        shielded from cancellation and bounded by `_RELEASE_TIMEOUT_S`.
+
+        Both steps matter: `aclose()` on a body iterator that never produced a
+        chunk does not run its `finally` (an un-started async generator), so
+        the upstream response is closed directly as well.
+        """
+        if self._released:
+            return
+        self._released = True
+        with anyio.move_on_after(_RELEASE_TIMEOUT_S, shield=True):
+            aclose = getattr(self.body_iterator, "aclose", None)
+            if aclose is not None:
+                with contextlib.suppress(Exception):
+                    await aclose()
+            if self._release_upstream is not None:
+                with contextlib.suppress(Exception):
+                    await self._release_upstream()
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # Covers the paths `stream_response` never reaches or never finishes:
+        # cancelled before it starts, or `send` of the start message failing.
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._release()
 
     async def stream_response(self, send: Send) -> None:
         loop = asyncio.get_event_loop()
@@ -151,15 +248,12 @@ class _BoundedStreamingResponse(StreamingResponse):
                 bytes_sent += len(chunk)
         finally:
             # Always release the upstream connection regardless of how the
-            # loop above ended -- client disconnect, any exception raised out
-            # of `send`/iteration, or a normal fall-through -- not just the
-            # stall/deadline paths. This is what actually returns the
-            # connection to the pool; skipping it on an unexpected exception
-            # is exactly what let CLOSE-WAIT sockets pile up.
-            aclose = getattr(self.body_iterator, "aclose", None)
-            if aclose is not None:
-                with contextlib.suppress(Exception):
-                    await aclose()
+            # loop above ended -- client disconnect (a cancellation, see
+            # `_RELEASE_TIMEOUT_S`), any exception raised out of
+            # `send`/iteration, or a normal fall-through. This is what returns
+            # the connection to the pool; skipping it is exactly what let
+            # CLOSE-WAIT sockets pile up.
+            await self._release()
 
         if reason is not None:
             logger.warning(
@@ -338,8 +432,17 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
         headers.pop("content-encoding", None)
         headers.pop("content-length", None)
 
+    registry = _open_upstreams(request.app)
+    entry = _OpenUpstream(path=path, opened=asyncio.get_event_loop().time(), resp=resp)
+    registry[id(resp)] = entry
+
+    async def release_upstream() -> None:
+        registry.pop(id(resp), None)
+        await resp.aclose()
+
     async def stream_body() -> Any:
         try:
+            entry.body_started = True
             if buffered:
                 yield resp.content
             else:
@@ -358,13 +461,14 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
                             upstream,
                         )
                         break
+                    entry.bytes_relayed += len(chunk)
                     yield chunk
         finally:
             # A cancelled `__anext__` (e.g. from `_BoundedStreamingResponse`'s
             # own stall/duration watchdog reaching in and closing this
             # generator) must never skip releasing the upstream connection.
             try:
-                await resp.aclose()
+                await release_upstream()
             except Exception:
                 logger.debug("proxy: resp.aclose() raised closing %s", upstream, exc_info=True)
 
@@ -374,6 +478,7 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
         headers=headers,
         media_type=resp.headers.get("content-type"),
         log_path=path,
+        release_upstream=release_upstream,
     )
     # Set-Cookie is the one header Frigate can legitimately send more than once
     # (login sets both the session and its refresh companion); reading it off
