@@ -19,7 +19,8 @@
     "openings": true,
     "package": true,
     "person": true,
-    "person_restricted": true
+    "person_restricted": true,
+    "summary_row": true
   },
   "map_scale_ft": null,
   "mute_sounds": true,

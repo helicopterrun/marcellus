@@ -303,6 +303,7 @@ def default_settings() -> dict[str, Any]:
             "delivery": "la_first",
             "alert_all_changes": False,
             "la_only": False,
+            "summary_row": True,
         },
         "escalation_sound": "urgent",
         "mute_sounds": True,
@@ -516,6 +517,9 @@ def validate_settings(data: Any) -> list[str]:
             lao = live_activities.get("la_only")
             if lao is not None and not isinstance(lao, bool):
                 errors.append("live_activities.la_only must be a boolean")
+            summary_row = live_activities.get("summary_row")
+            if summary_row is not None and not isinstance(summary_row, bool):
+                errors.append("live_activities.summary_row must be a boolean")
             delivery = live_activities.get("delivery")
             if delivery is not None and delivery not in ("la_first", "notifications"):
                 errors.append("live_activities.delivery must be 'la_first' or 'notifications'")
@@ -824,6 +828,8 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
             merged["live_activities"]["opening_picks"] = [str(p) for p in picks]
         if isinstance(live_activities.get("la_only"), bool):
             merged["live_activities"]["la_only"] = live_activities["la_only"]
+        if isinstance(live_activities.get("summary_row"), bool):
+            merged["live_activities"]["summary_row"] = live_activities["summary_row"]
         delivery = live_activities.get("delivery")
         if delivery in ("la_first", "notifications"):
             merged["live_activities"]["delivery"] = delivery
@@ -1215,6 +1221,8 @@ def save_and_apply(path: str | Path, body: dict[str, Any]) -> tuple[dict[str, An
     active_la = get_active().get("live_activities", {})
     if not (isinstance(la_body, dict) and isinstance(la_body.get("la_only"), bool)):
         merged["live_activities"]["la_only"] = bool(active_la.get("la_only", False))
+    if not (isinstance(la_body, dict) and isinstance(la_body.get("summary_row"), bool)):
+        merged["live_activities"]["summary_row"] = bool(active_la.get("summary_row", True))
     if not (isinstance(la_body, dict) and la_body.get("delivery") in ("la_first", "notifications")):
         merged["live_activities"]["delivery"] = active_la.get("delivery", "la_first")
     for sticky_key in (

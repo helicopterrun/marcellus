@@ -1802,6 +1802,7 @@ async def handle_delivery_event(
             encounter_id=encounter_id or "",
             event_camera=event.camera,
             cameras_path=cameras_path or None,
+            summary_row=bool(policy["live_activities"].get("summary_row", True)),
         )
         if mutation in (CREATE, ESCALATE, DEESCALATE):
             decision_trace.annotate(
@@ -1941,6 +1942,7 @@ async def handle_delivery_resolve(
             subject_kind=kind, camera=camera, zone_name=zone_name,
             now=now, demote_tokens=demote_resolve,
             suppress_demoted=delivery_mode == "la_first" and not la_only,
+            summary_row=bool(policy.get("live_activities", {}).get("summary_row", True)),
         )
         conn.commit()
         resolved += 1
@@ -2186,6 +2188,7 @@ async def handle_recognition_event(
         demote_tokens=demote_recog,
         suppress_demoted=_recog_la.get("delivery", "la_first") == "la_first"
         and not _recog_la.get("la_only", False),
+        summary_row=bool(_recog_la.get("summary_row", True)),
     )
     conn.commit()
     logger.info(

@@ -41,6 +41,7 @@ def test_default_settings_shape():
         "package": True, "bins": True, "openings": True, "person": True,
         "person_restricted": True, "opening_picks": [],
         "delivery": "la_first", "alert_all_changes": False, "la_only": False,
+        "summary_row": True,
     }
     assert settings["mute_sounds"] is True
     assert settings["quiet_hours"] is None

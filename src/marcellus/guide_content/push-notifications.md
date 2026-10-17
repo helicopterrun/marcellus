@@ -152,6 +152,12 @@ The `push:` config section:
 - `external_base_url` — phone-reachable base URL for this sidecar instance,
   used to build card-contract media URLs. Empty (default) omits `media`
   entirely.
+- **Summary row after Live Activity** (app: Alerts → Delivery & Display) —
+  on by default, this leaves one silent Notification Center row behind
+  after a Live Activity ends, so the story has a durable history entry.
+  Turn it off and that row is dropped entirely instead of just deferred —
+  the Live Activity was the whole story. Escalations (sound, banners) are
+  unaffected either way.
 - `delivery_la_families` — superseded by the user-editable
   `settings.live_activities` in the app; no longer read, kept only for
   backward-compatible YAML.
