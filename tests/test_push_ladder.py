@@ -28,7 +28,7 @@ def test_ladder_case(case):
 
 def test_golden_suite_is_complete():
     """Guards against a silently truncated fixture file."""
-    assert len(CASES) == 23
+    assert len(CASES) == 27
 
 
 class TestExplainedStages:
@@ -89,15 +89,26 @@ class TestExplainedModifiers:
 
     def test_reclass_dangerous_animal(self):
         result = evaluate_ladder_explained(
-            Snapshot(subject="animal", place="private", label="bear")
+            Snapshot(subject="animal", place="yard", label="bear")
         )
         assert "reclass_dangerous_animal" in result.modifiers
 
     def test_nudge_up(self):
+        # stranger/street is Ignore (log): a worry nudge lifts it one step.
+        result = evaluate_ladder_explained(
+            Snapshot(subject="stranger", place="street", nobody_home=True, night=True)
+        )
+        assert "nudge_up" in result.modifiers
+        assert result.level == "silent"
+
+    def test_nudge_up_never_reaches_urgent(self):
+        # v3 ceiling: behaviour alone takes a story to Glance (quiet) at most,
+        # so a worry nudge on a Glance cell changes nothing.
         result = evaluate_ladder_explained(
             Snapshot(subject="stranger", place="doors", nobody_home=True, night=True)
         )
-        assert "nudge_up" in result.modifiers
+        assert "nudge_up" not in result.modifiers
+        assert result.level == "quiet"
 
     def test_nudge_down(self):
         result = evaluate_ladder_explained(
@@ -106,28 +117,26 @@ class TestExplainedModifiers:
         assert "nudge_down" in result.modifiers
 
     def test_child_hazard_floor(self):
-        # Base table for stranger/yard is "quiet" -- below notify, so the
-        # floor visibly raises it.
+        # Base table for known/yard is "log" -- below quiet, so the v3 floor
+        # (Glance, was notify) visibly raises it.
         result = evaluate_ladder_explained(
-            Snapshot(subject="stranger", place="yard", child_hazard_zone=True)
+            Snapshot(subject="known", place="yard", child_hazard_zone=True)
         )
         assert "child_hazard_floor" in result.modifiers
-        assert ladder_policy.LEVELS.index(result.level) >= ladder_policy.LEVELS.index("notify")
+        assert result.level == "quiet"
 
-    def test_street_cap(self):
-        # The base table is always "log" on `street` for every subject, so
-        # the cap only has something to bite on once the child-hazard floor
-        # has already pushed the level up to "notify".
-        result = evaluate_ladder_explained(
-            Snapshot(subject="stranger", place="street", child_hazard_zone=True)
-        )
-        assert "child_hazard_floor" in result.modifiers
+    def test_street_cap(self, monkeypatch):
+        # The built-in table is "log" on `street` for every subject, and the
+        # v3 child-hazard floor tops out at quiet (the cap's own ceiling), so
+        # the cap only bites on a cell edited above quiet.
+        monkeypatch.setitem(ladder_policy.TABLE["stranger"], "street", "urgent")
+        result = evaluate_ladder_explained(Snapshot(subject="stranger", place="street"))
         assert "street_cap" in result.modifiers
         assert result.level == "quiet"
 
     def test_unconfirmed_cap(self):
         result = evaluate_ladder_explained(
-            Snapshot(subject="stranger", place="private", detector_confirmed=False)
+            Snapshot(subject="stranger", place="off_limits", detector_confirmed=False)
         )
         assert "unconfirmed_cap" in result.modifiers
         assert result.level == "quiet"

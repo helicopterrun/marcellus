@@ -137,10 +137,10 @@ def test_classify_place_follows_the_same_rule() -> None:
 
 
 def test_the_front_garden_now_outranks_the_sidewalk_it_touches() -> None:
-    """Same shape, front side: garden is private (notify), sidewalk is street
+    """Same shape, front side: garden is private (read as yard: Glance), sidewalk is street
     (log), and a visitor standing in the garden is in both."""
     snapshot, _, _ = snapshot_from_review(
         _event("sidewalk", "garden"), zone_classes=ZONE_CLASSES
     )
     assert snapshot.zone == "garden"
-    assert evaluate_ladder(snapshot) == "notify"
+    assert evaluate_ladder(snapshot) == "quiet"
