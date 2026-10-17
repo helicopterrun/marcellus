@@ -652,8 +652,16 @@ def test_kept_row_columns_migrate_onto_an_existing_database(tmp_path: Path):
     path = tmp_path / "old.db"
     conn = db.open_sidecar(path)
     card_store.upsert_card(conn, _card("urgent"), camera="cam", subject_kind="person")
-    conn.execute("ALTER TABLE push_cards DROP COLUMN kept_row")
-    conn.execute("ALTER TABLE push_cards DROP COLUMN fallback_row")
+    # Rebuild the table without the two columns, as a pre-v3 deployment has it.
+    # Not `ALTER TABLE ... DROP COLUMN`: CI's (older) SQLite rejects that here.
+    cols = [
+        row[1]
+        for row in conn.execute("PRAGMA table_info(push_cards)")
+        if row[1] not in ("kept_row", "fallback_row")
+    ]
+    conn.execute(f"CREATE TABLE push_cards_legacy AS SELECT {', '.join(cols)} FROM push_cards")
+    conn.execute("DROP TABLE push_cards")
+    conn.execute("ALTER TABLE push_cards_legacy RENAME TO push_cards")
     conn.commit()
     conn.close()
     raw = sqlite3.connect(path)
