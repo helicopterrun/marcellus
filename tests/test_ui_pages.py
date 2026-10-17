@@ -107,7 +107,29 @@ def test_settings_page_renders_with_off_cell(client: TestClient) -> None:
     finally:
         ladder_policy.set_off_cells(before)
     assert r.status_code == 200
-    assert "Off" in r.text
+    assert "Ignore" in r.text
+
+
+def test_ladder_matrix_prefers_ladder_and_falls_back_to_outcomes(monkeypatch) -> None:
+    from marcellus.routes import settings_page
+
+    base = {"zone_overrides": {"yard_z": {"person": "weird"}}}
+    ladder = {"person": {"street": "ignore", "yard": "urgent", "doors": "glance",
+                         "off_limits": "mystery"}}
+    monkeypatch.setattr(settings_page.policy_settings, "get_active",
+                        lambda: {**base, "ladder": ladder})
+    m = settings_page._ladder_matrix()
+    assert m["places"] == ["Public", "Grounds", "Entrances", "Restricted"]
+    assert [c["label"] for c in m["rows"][0]["cells"]] == [
+        "Ignore", "Urgent", "Glance", "mystery"]
+    assert m["overrides"][0]["label"] == "weird"
+
+    legacy = {"person": {"street": "off", "yard": "glance", "private": "alarm",
+                         "doors": "notify", "off_limits": "log"}}
+    monkeypatch.setattr(settings_page.policy_settings, "get_active",
+                        lambda: {**base, "outcomes": legacy})
+    cells = settings_page._ladder_matrix()["rows"][0]["cells"]
+    assert [c["label"] for c in cells] == ["Ignore", "Urgent", "Quiet", "Ignore"]
 
 
 def test_devices_page_lists_registered(

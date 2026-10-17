@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -40,34 +41,71 @@ from marcellus.push.live_activities import FAMILIES
 #: way the card payload contract does (`delivery.CONTRACT_VERSION`).
 #: v2 (2026-08-20): package/bin/opening outcome rows exist; the LA family
 #: booleans and alert_all_changes are derived, never authoritative.
-SETTINGS_VERSION = 2
+#: v3 (2026-10-16, `docs/ladder-v3.md`): `ladder` (4 levels x 4 places) is the
+#: source of truth; `outcomes`/`routing_table_v2` are derived legacy views.
+SETTINGS_VERSION = 3
 
 SUBJECTS = ("stranger", "known", "animal", "thing")
 SUBJECTS_V2 = ("person", "vehicle", "animal", "thing")
 #: V3 (2026-08-20, "one alerts stack"): the LA families that used to be
 #: booleans become routed subjects with their own outcome rows. Only these
 #: three moved -- person/person_restricted were already outcome-routed.
-#: `routing_table_v2`/`outcomes` accept all seven; the extra rows are
+#: `routing_table_v2`/`outcomes`/`ladder` accept all seven; the extra rows are
 #: optional in a PUT (an older app sends four and must keep working).
 SUBJECTS_V3 = SUBJECTS_V2 + ("package", "bin", "opening")
 SUBJECTS_V3_EXTRA = tuple(s for s in SUBJECTS_V3 if s not in SUBJECTS_V2)
-PLACES = ("street", "yard", "doors", "private", "off_limits")
+#: The four places (ladder v3). `private` is retired: wherever it still
+#: appears in input it is read as `yard` (louder wins where two cells
+#: collide).
+PLACES = ladder_policy.PLACES
+#: The pre-v3 five places -- the shape of the derived legacy views
+#: (`outcomes`/`routing_table_v2`, whose `private` column mirrors `yard`) and
+#: of what an older client may still send.
+LEGACY_PLACES = ("street", "yard", "doors", "private", "off_limits")
+#: Engine levels (v3): log < silent < quiet < urgent.
 LEVELS = ladder_policy.LEVELS
+#: The pre-v3 engine levels -- the vocabulary of the legacy `routing_table`
+#: (stored, untouched) and the derived `routing_table_v2`.
+LEGACY_LEVELS = ("log", "quiet", "notify", "urgent")
 RECOGNITION_MODES = ("off", "relax_one", "relax_to_quiet")
 
-#: The merged outcome ladder (content design 2026-08-16): one dial per
-#: subject x place answering "what happens?", folding the old level +
-#: LA-family choice together. Ordinal, low -> high.
+#: `ladder` cell values, quietest first (user-facing Ignore / Quiet / Glance /
+#: Urgent). The order is the "louder wins" order of the `private` -> `yard`
+#: merge (v3 §3.2).
+LADDER_VALUES = ("ignore", "silent", "glance", "urgent")
+#: `ladder` value -> engine level (v3 §1). Ignore for a non-person subject is
+#: additionally an off cell (suppressed before evaluation, `apply_settings`).
+LADDER_TO_LEVEL = {"ignore": "log", "silent": "silent", "glance": "quiet", "urgent": "urgent"}
+LEVEL_TO_LADDER = {level: value for value, level in LADDER_TO_LEVEL.items()}
+#: `ladder` value -> derived legacy `routing_table_v2` level (v3 §2.2).
+LADDER_TO_LEGACY_LEVEL = {
+    "ignore": "log", "silent": "notify", "glance": "quiet", "urgent": "urgent",
+}
+#: Legacy `routing_table_v2` level -> `ladder` value (v3 §2.3).
+LEGACY_LEVEL_TO_LADDER = {
+    "log": "ignore", "notify": "silent", "quiet": "glance", "urgent": "urgent",
+}
+
+#: Quiet-hours modes (v3 §2.5). `cap_quiet` (pre-v3) is accepted on input and
+#: stored as `hold_urgent`.
+QUIET_HOURS_MODES = ("hold_urgent", "mute_sounds")
+_LEGACY_QUIET_HOURS_MODES = {"cap_quiet": "hold_urgent"}
+
+#: The pre-v3 merged outcome ladder vocabulary -- now only the *derived*
+#: `outcomes` view served to installed app builds, and accepted from an older
+#: client's PUT (translated into `ladder`, v3 §2.3). Ordinal, low -> high.
 #:   off    -- suppressed entirely
 #:   log    -- recorded, visible in the app, no delivery
 #:   glance -- Live Activity only, never a banner or sound
-#:   notify -- banner + Live Activity
+#:   notify -- (v3: Quiet -- a passive, kept Notification Center row)
 #:   alarm  -- urgent: sound, re-sounds, time-sensitive
 OUTCOMES = ("off", "log", "glance", "notify", "alarm")
 
-#: Bijection with the routing levels the evaluator consumes ("off" has no
-#: level -- it is enforced as suppression before evaluation).
-LEVEL_TO_OUTCOME = {"log": "log", "quiet": "glance", "notify": "notify", "urgent": "alarm"}
+#: Engine level -> the legacy outcome word an installed app reads it as.
+#: `silent` shows as "notify" (v3 §2.2: the accepted cost; it reads back
+#: losslessly).
+LEVEL_TO_OUTCOME = {"log": "log", "silent": "notify", "quiet": "glance", "urgent": "alarm"}
+#: Legacy outcome -> legacy routing level (`routing_table_v2` vocabulary).
 OUTCOME_TO_LEVEL = {
     "off": "log",
     "log": "log",
@@ -75,17 +113,64 @@ OUTCOME_TO_LEVEL = {
     "notify": "notify",
     "alarm": "urgent",
 }
+#: Legacy outcome -> `ladder` value (v3 §2.3).
+OUTCOME_TO_LADDER = {
+    "off": "ignore", "log": "ignore", "notify": "silent", "glance": "glance", "alarm": "urgent",
+}
 
-#: The routing table a freshly onboarded settings file starts the user at
-#: (design doc §1, "match the v3 brief's §1.4 table exactly").
+
+def ladder_to_outcome(subject: str, value: str) -> str:
+    """`ladder` value -> derived legacy outcome (v3 §2.2): Ignore is `log` for
+    a person (still recorded, nudgeable) and `off` for every other subject
+    (suppressed)."""
+    if value == "ignore":
+        return "log" if subject == "person" else "off"
+    return {"silent": "notify", "glance": "glance", "urgent": "alarm"}[value]
+
+
+def _louder(a: str | None, b: str) -> str:
+    """The louder of two `ladder` values (v3 §3.2's `private` merge)."""
+    if a not in LADDER_VALUES:
+        return b
+    return max(a, b, key=LADDER_VALUES.index)
+
+
+#: The ladder a freshly onboarded settings file starts the user at (v3): the
+#: owner-approved "Balanced" preset (`docs/ladder-v3.md` §2.1). Every other
+#: built-in default below -- the legacy views, the V3-subject seeding rows,
+#: and `ladder_policy.TABLE`/`DEFAULT_OFF_CELLS` (the evaluator's fallback
+#: when no settings were ever applied) -- is derived from or agrees with it.
+DEFAULT_LADDER: dict[str, dict[str, str]] = {
+    "person": {"street": "ignore", "yard": "glance", "doors": "glance", "off_limits": "urgent"},
+    "vehicle": {"street": "ignore", "yard": "silent", "doors": "silent", "off_limits": "glance"},
+    "animal": {"street": "ignore", "yard": "silent", "doors": "silent", "off_limits": "glance"},
+    "package": {"street": "ignore", "yard": "silent", "doors": "glance", "off_limits": "glance"},
+    "opening": {"street": "ignore", "yard": "silent", "doors": "glance", "off_limits": "urgent"},
+    "bin": {"street": "ignore", "yard": "ignore", "doors": "silent", "off_limits": "silent"},
+    "thing": {"street": "ignore", "yard": "ignore", "doors": "silent", "off_limits": "silent"},
+}
+
+
+def _legacy_row(subject: str, *, outcome_words: bool) -> dict[str, str]:
+    """One `DEFAULT_LADDER` row in the pre-v3 five-place vocabulary."""
+    row = DEFAULT_LADDER[subject]
+    return {
+        place: (
+            ladder_to_outcome(subject, row["yard" if place == "private" else place])
+            if outcome_words
+            else LADDER_TO_LEGACY_LEVEL[row["yard" if place == "private" else place]]
+        )
+        for place in LEGACY_PLACES
+    }
+
+
+#: The legacy v1 `routing_table` (stranger/known/animal/thing) a fresh file
+#: carries -- stored untouched once written (v3 §2.2), and read only by a
+#: document predating every newer table. Rows with a v3 counterpart are the
+#: Balanced preset in legacy levels (stranger = person); `known` has none and
+#: keeps its pre-v3 default.
 DEFAULT_ROUTING_TABLE: dict[str, dict[str, str]] = {
-    "stranger": {
-        "street": "log",
-        "yard": "quiet",
-        "doors": "notify",
-        "private": "notify",
-        "off_limits": "urgent",
-    },
+    "stranger": _legacy_row("person", outcome_words=False),
     "known": {
         "street": "log",
         "yard": "log",
@@ -93,82 +178,22 @@ DEFAULT_ROUTING_TABLE: dict[str, dict[str, str]] = {
         "private": "quiet",
         "off_limits": "quiet",
     },
-    "animal": {
-        "street": "log",
-        "yard": "quiet",
-        "doors": "quiet",
-        "private": "quiet",
-        "off_limits": "quiet",
-    },
-    "thing": {
-        "street": "log",
-        "yard": "log",
-        "doors": "log",
-        "private": "log",
-        "off_limits": "quiet",
-    },
+    "animal": _legacy_row("animal", outcome_words=False),
+    "thing": _legacy_row("thing", outcome_words=False),
 }
 
+#: The Balanced preset as a legacy `routing_table_v2` (the derived view a
+#: fresh v3 file serves; kept as a named constant for callers predating v3).
 DEFAULT_ROUTING_TABLE_V2: dict[str, dict[str, str]] = {
-    "person": {
-        "street": "log",
-        "yard": "quiet",
-        "doors": "notify",
-        "private": "notify",
-        "off_limits": "urgent",
-    },
-    "vehicle": {
-        "street": "log",
-        "yard": "quiet",
-        "doors": "quiet",
-        "private": "quiet",
-        "off_limits": "notify",
-    },
-    "animal": {
-        "street": "log",
-        "yard": "quiet",
-        "doors": "quiet",
-        "private": "quiet",
-        "off_limits": "quiet",
-    },
-    "thing": {
-        "street": "log",
-        "yard": "log",
-        "doors": "log",
-        "private": "log",
-        "off_limits": "quiet",
-    },
+    subject: _legacy_row(subject, outcome_words=False) for subject in SUBJECTS_V2
 }
 
-#: Default outcome rows for the V3 subjects, chosen to reproduce what the
-#: retired family booleans did when on: the family ran a silent LA wherever
-#: it could fire (glance), with a heads-up in a restricted place (notify).
-#: Cells where the family was noise (a package "on the street", bins deep
-#: in a private area) idle at log. Authored in outcome vocabulary because
-#: these subjects exist for the merged ladder; their `routing_table_v2`
-#: rows are derived via `OUTCOME_TO_LEVEL` like every other lockstep row.
+#: Default outcome rows for the V3 subjects, in the pre-v3 outcome words: what
+#: the one-time v2 seeding (`_pre_v3_migrations`) writes for a document that
+#: predates the package/bin/opening rows -- the Balanced preset's rows, so a
+#: seeded file lands on the same defaults as a fresh one.
 DEFAULT_EXTRA_OUTCOMES: dict[str, dict[str, str]] = {
-    "package": {
-        "street": "log",
-        "yard": "glance",
-        "doors": "glance",
-        "private": "glance",
-        "off_limits": "notify",
-    },
-    "bin": {
-        "street": "glance",
-        "yard": "glance",
-        "doors": "glance",
-        "private": "log",
-        "off_limits": "notify",
-    },
-    "opening": {
-        "street": "log",
-        "yard": "glance",
-        "doors": "glance",
-        "private": "glance",
-        "off_limits": "notify",
-    },
+    subject: _legacy_row(subject, outcome_words=True) for subject in SUBJECTS_V3_EXTRA
 }
 
 DEFAULT_RECOGNITION: dict[str, str] = {
@@ -181,14 +206,16 @@ DEFAULT_RECOGNITION: dict[str, str] = {
 #: last. Two collisions this order exists to resolve: "front_entry_person"
 #: contains both a `yard` hint ("front") and a `doors` hint ("entry") -- the
 #: doc's own example expects `doors` to win, so it's checked first. And
-#: "sidewalk" (an explicit `street` pattern) contains "side" (a `private`
-#: pattern) as a substring -- `street` is checked before `private` so the
-#: doc's own literal example pattern wins over the coincidental substring.
+#: "sidewalk" (an explicit `street` pattern) contains "side" (a back-of-house
+#: pattern) as a substring -- `street` is checked before it so the doc's own
+#: literal example pattern wins over the coincidental substring. The
+#: back-of-house hints mapped to `private` before ladder v3; `private` is
+#: retired, so they map to `yard` (v3 §1).
 _GUESS_ORDER: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("doors", ("door", "gate", "entry", "entrance", "window")),
     ("off_limits", ("pool", "shed", "equipment", "restricted")),
     ("street", ("street", "road", "sidewalk", "curb", "highway")),
-    ("private", ("back", "side", "rear", "alley", "fence")),
+    ("yard", ("back", "side", "rear", "alley", "fence")),
     ("yard", ("driveway", "porch", "walk", "path", "front", "parking")),
 )
 
@@ -237,17 +264,19 @@ def _time_to_minutes(val: str) -> int:
 
 def is_quiet_hours(settings: dict[str, Any], now_minutes: int) -> tuple[bool, str]:
     """Check if `now_minutes` (minutes since midnight, local) falls in the
-    quiet-hours window. Returns `(active, mode)`. Wrap-around ranges
-    (e.g. 22:00–07:00) are supported."""
+    quiet-hours window. Returns `(active, mode)`, `mode` in
+    `QUIET_HOURS_MODES` (a legacy `cap_quiet` reads as `hold_urgent`).
+    Wrap-around ranges (e.g. 22:00–07:00) are supported."""
     qh = settings.get("quiet_hours")
     if not isinstance(qh, dict):
         return False, ""
     try:
         start = _time_to_minutes(qh["start"])
         end = _time_to_minutes(qh["end"])
-        mode = qh.get("mode", "cap_quiet")
+        mode = qh.get("mode", "hold_urgent")
     except (KeyError, ValueError, TypeError):
         return False, ""
+    mode = _LEGACY_QUIET_HOURS_MODES.get(str(mode), str(mode))
     if start <= end:
         active = start <= now_minutes < end
     else:
@@ -274,23 +303,52 @@ def _looks_like_opening(name: str) -> bool:
     return any(hint in low for hint in _OPENING_NAME_HINTS)
 
 
+def derive_legacy_views(
+    ladder: dict[str, dict[str, str]],
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
+    """`(outcomes, routing_table_v2)` derived from `ladder` (v3 §2.2): 7 x 5 in
+    the old words/levels, the `private` column mirroring `yard`, so installed
+    app builds keep working. Served, never authoritative."""
+    outcomes: dict[str, dict[str, str]] = {}
+    table_v2: dict[str, dict[str, str]] = {}
+    for subject in SUBJECTS_V3:
+        row = ladder[subject]
+        outcomes[subject] = {}
+        table_v2[subject] = {}
+        for place in LEGACY_PLACES:
+            value = row["yard" if place == "private" else place]
+            outcomes[subject][place] = ladder_to_outcome(subject, value)
+            table_v2[subject][place] = LADDER_TO_LEGACY_LEVEL[value]
+    return outcomes, table_v2
+
+
+def ladder_from_legacy_row(row: dict[str, Any], *, outcome_words: bool) -> dict[str, str]:
+    """One legacy `outcomes` row (`outcome_words=True`) or `routing_table_v2`
+    row (levels) as a `ladder` row (v3 §2.3): `private` merges into `yard`,
+    louder wins. Unknown/invalid cells are skipped (the caller's defaults
+    stay)."""
+    mapping = OUTCOME_TO_LADDER if outcome_words else LEGACY_LEVEL_TO_LADDER
+    out: dict[str, str] = {}
+    for place in LEGACY_PLACES:
+        cell = row.get(place)
+        value = mapping.get(cell) if isinstance(cell, str) else None
+        if value is None:
+            continue
+        target = "yard" if place == "private" else place
+        out[target] = _louder(out.get(target), value)
+    return out
+
+
 def default_settings() -> dict[str, Any]:
+    ladder = {subject: dict(row) for subject, row in DEFAULT_LADDER.items()}
+    outcomes, table_v2 = derive_legacy_views(ladder)
     return {
         "v": SETTINGS_VERSION,
+        "ladder": ladder,
         "routing_table": {subject: dict(row) for subject, row in DEFAULT_ROUTING_TABLE.items()},
-        "routing_table_v2": {
-            subject: dict(row) for subject, row in DEFAULT_ROUTING_TABLE_V2.items()
-        }
-        | {
-            subject: {place: OUTCOME_TO_LEVEL[outcome] for place, outcome in row.items()}
-            for subject, row in DEFAULT_EXTRA_OUTCOMES.items()
-        },
+        "routing_table_v2": table_v2,
         "recognition": dict(DEFAULT_RECOGNITION),
-        "outcomes": {
-            subject: {place: LEVEL_TO_OUTCOME[level] for place, level in row.items()}
-            for subject, row in DEFAULT_ROUTING_TABLE_V2.items()
-        }
-        | {subject: dict(row) for subject, row in DEFAULT_EXTRA_OUTCOMES.items()},
+        "outcomes": outcomes,
         "zone_classes": {},
         # zone key -> human display name for notification copy ("back_critter"
         # -> "the back walkway"). Wins over Frigate's friendly_name. Edited on
@@ -349,6 +407,56 @@ def default_settings() -> dict[str, Any]:
     }
 
 
+def _validate_legacy_level_row(where: str, row: dict[str, Any]) -> list[str]:
+    """A legacy level row (`routing_table`/`routing_table_v2`): the four v3
+    places required, `private` optional (retired, mirrors `yard`), values in
+    the pre-v3 level vocabulary."""
+    errors: list[str] = []
+    unknown_places = set(row) - set(LEGACY_PLACES)
+    if unknown_places:
+        errors.append(f"{where} has unknown place(s): {sorted(unknown_places)}")
+    for place in LEGACY_PLACES:
+        level = row.get(place)
+        if level is None and place == "private":
+            continue
+        if level not in LEGACY_LEVELS:
+            errors.append(f"{where}.{place} must be one of {LEGACY_LEVELS}, got {level!r}")
+    return errors
+
+
+def _validate_ladder(ladder: Any) -> list[str]:
+    """`ladder` (v3 §2.1): person/vehicle/animal/thing rows complete (all four
+    places), package/bin/opening rows optional (absent = keep the stored
+    row) but complete when present; values in `LADDER_VALUES`. A `private`
+    key is read as `yard` (retired place, v3 §1); any other unknown subject,
+    place or value is an error."""
+    if not isinstance(ladder, dict):
+        return ["ladder must be an object"]
+    errors: list[str] = []
+    unknown = set(ladder) - set(SUBJECTS_V3)
+    if unknown:
+        errors.append(f"ladder has unknown subject(s): {sorted(unknown)}")
+    for subject in SUBJECTS_V3:
+        row = ladder.get(subject)
+        if row is None and subject in SUBJECTS_V3_EXTRA:
+            continue
+        if not isinstance(row, dict):
+            errors.append(f"ladder.{subject} must be an object")
+            continue
+        unknown_places = set(row) - set(LEGACY_PLACES)
+        if unknown_places:
+            errors.append(f"ladder.{subject} has unknown place(s): {sorted(unknown_places)}")
+        for place, value in row.items():
+            if place in LEGACY_PLACES and value not in LADDER_VALUES:
+                errors.append(
+                    f"ladder.{subject}.{place} must be one of {LADDER_VALUES}, got {value!r}"
+                )
+        for place in PLACES:
+            if place not in row and not (place == "yard" and "private" in row):
+                errors.append(f"ladder.{subject}.{place} is required")
+    return errors
+
+
 def validate_settings(data: Any) -> list[str]:
     """Human-readable validation errors, empty if `data` is acceptable.
     Unknown *top-level* fields are ignored (forward compat, design doc §2);
@@ -360,8 +468,16 @@ def validate_settings(data: Any) -> list[str]:
         return ["settings must be an object"]
     errors: list[str] = []
 
+    ladder = data.get("ladder")
+    if ladder is not None:
+        errors.extend(_validate_ladder(ladder))
+    # A body carrying `ladder` has its legacy table keys ignored (re-derived,
+    # v3 §2.3), so they are not validated either: a client that edited the
+    # ladder and echoed stale derived keys must not be refused over them.
+    legacy_tables_matter = ladder is None
+
     routing_table = data.get("routing_table")
-    if routing_table is not None:
+    if routing_table is not None and legacy_tables_matter:
         if not isinstance(routing_table, dict):
             errors.append("routing_table must be an object")
         else:
@@ -373,21 +489,10 @@ def validate_settings(data: Any) -> list[str]:
                 if not isinstance(row, dict):
                     errors.append(f"routing_table.{subject} must be an object")
                     continue
-                unknown_places = set(row) - set(PLACES)
-                if unknown_places:
-                    errors.append(
-                        f"routing_table.{subject} has unknown place(s): {sorted(unknown_places)}"
-                    )
-                for place in PLACES:
-                    level = row.get(place)
-                    if level not in LEVELS:
-                        errors.append(
-                            f"routing_table.{subject}.{place} must be one of {LEVELS},"
-                            f" got {level!r}"
-                        )
+                errors.extend(_validate_legacy_level_row(f"routing_table.{subject}", row))
 
     routing_table_v2 = data.get("routing_table_v2")
-    if routing_table_v2 is not None:
+    if routing_table_v2 is not None and legacy_tables_matter:
         if not isinstance(routing_table_v2, dict):
             errors.append("routing_table_v2 must be an object")
         else:
@@ -405,18 +510,7 @@ def validate_settings(data: Any) -> list[str]:
                 if not isinstance(row, dict):
                     errors.append(f"routing_table_v2.{subject} must be an object")
                     continue
-                unknown_places = set(row) - set(PLACES)
-                if unknown_places:
-                    errors.append(
-                        f"routing_table_v2.{subject} has unknown place(s): {sorted(unknown_places)}"
-                    )
-                for place in PLACES:
-                    level = row.get(place)
-                    if level not in LEVELS:
-                        errors.append(
-                            f"routing_table_v2.{subject}.{place} must be one of {LEVELS}, "
-                            f"got {level!r}"
-                        )
+                errors.extend(_validate_legacy_level_row(f"routing_table_v2.{subject}", row))
 
     recognition = data.get("recognition")
     if recognition is not None:
@@ -431,7 +525,7 @@ def validate_settings(data: Any) -> list[str]:
                     )
 
     outcomes = data.get("outcomes")
-    if outcomes is not None:
+    if outcomes is not None and legacy_tables_matter:
         if not isinstance(outcomes, dict):
             errors.append("outcomes must be an object")
         else:
@@ -446,7 +540,7 @@ def validate_settings(data: Any) -> list[str]:
                     errors.append(f"outcomes.{subject} must be an object")
                     continue
                 for place, outcome in row.items():
-                    if place not in PLACES:
+                    if place not in LEGACY_PLACES:
                         errors.append(f"outcomes.{subject} has unknown place {place!r}")
                     elif outcome not in OUTCOMES:
                         errors.append(
@@ -467,8 +561,9 @@ def validate_settings(data: Any) -> list[str]:
         if not isinstance(zone_classes, dict):
             errors.append("zone_classes must be an object")
         else:
+            # `private` (retired) is still accepted and read as `yard`.
             for zone, place in zone_classes.items():
-                if place not in PLACES:
+                if place not in LEGACY_PLACES:
                     errors.append(f"zone_classes.{zone} must be one of {PLACES}, got {place!r}")
 
     zone_overrides = data.get("zone_overrides")
@@ -491,7 +586,11 @@ def validate_settings(data: Any) -> list[str]:
                             f"must be one of {sorted(valid_subjects)}"
                         )
                         continue
-                    if level not in LEVELS:
+                    # Legacy `notify` is accepted and stored as `silent`.
+                    canonical = (
+                        ladder_policy.canonical_level(level) if isinstance(level, str) else None
+                    )
+                    if canonical not in LEVELS:
                         errors.append(
                             f"zone_overrides.{zone}.{subject} must be one of {LEVELS}, "
                             f"got {level!r}"
@@ -538,9 +637,9 @@ def validate_settings(data: Any) -> list[str]:
                 if not isinstance(val, str) or not _valid_time(val):
                     errors.append(f"quiet_hours.{field} must be HH:MM (got {val!r})")
             mode = quiet_hours.get("mode")
-            if mode not in ("cap_quiet", "mute_sounds"):
+            if mode not in QUIET_HOURS_MODES and mode not in _LEGACY_QUIET_HOURS_MODES:
                 errors.append(
-                    f"quiet_hours.mode must be 'cap_quiet' or 'mute_sounds', got {mode!r}"
+                    f"quiet_hours.mode must be 'hold_urgent' or 'mute_sounds', got {mode!r}"
                 )
 
     camera_neighbors = data.get("camera_neighbors")
@@ -698,6 +797,75 @@ def _derived_family_booleans(outcomes: dict[str, dict[str, str]]) -> dict[str, A
     }
 
 
+def _stored_ladder() -> dict[str, Any]:
+    """The live policy's ladder, for rows a PUT body may omit (the optional
+    package/bin/opening rows): an older or four-subject client must never
+    quietly reset them to defaults."""
+    if isinstance(_active, dict) and isinstance(_active.get("ladder"), dict):
+        return dict(_active["ladder"])
+    return {}
+
+
+def _normalized_ladder(
+    data: dict[str, Any], defaults: dict[str, dict[str, str]]
+) -> dict[str, dict[str, str]]:
+    """The `ladder` a document resolves to (v3 §2.1, §2.3).
+
+    Source, in order: the body's own `ladder` (legacy keys then ignored);
+    else its `outcomes`; else its `routing_table_v2` (an older client's
+    legacy body); else defaults. An omitted package/bin/opening row keeps
+    the *stored* row. `private` merges into `yard`, louder wins."""
+    ladder = {subject: dict(row) for subject, row in defaults.items()}
+    stored = _stored_ladder()
+
+    def keep_stored(subject: str) -> None:
+        row = stored.get(subject)
+        if isinstance(row, dict):
+            for place in PLACES:
+                if row.get(place) in LADDER_VALUES:
+                    ladder[subject][place] = row[place]
+
+    body_ladder = data.get("ladder")
+    if isinstance(body_ladder, dict):
+        for subject in SUBJECTS_V3:
+            row = body_ladder.get(subject)
+            if not isinstance(row, dict):
+                if subject in SUBJECTS_V3_EXTRA:
+                    keep_stored(subject)
+                continue
+            merged_row: dict[str, str] = {}
+            for place in LEGACY_PLACES:
+                value = row.get(place)
+                if value not in LADDER_VALUES:
+                    continue
+                target = "yard" if place == "private" else place
+                merged_row[target] = _louder(merged_row.get(target), value)
+            ladder[subject].update(merged_row)
+        return ladder
+
+    outcomes = data.get("outcomes")
+    table_v2 = data.get("routing_table_v2")
+    if not isinstance(outcomes, dict) and not isinstance(table_v2, dict):
+        return ladder
+    outcomes = outcomes if isinstance(outcomes, dict) else {}
+    table_v2 = table_v2 if isinstance(table_v2, dict) else {}
+    # Per subject: the `outcomes` row (the pre-v3 authority), else the
+    # `routing_table_v2` row (an even older client's legacy body), else --
+    # for an omitted package/bin/opening row -- the stored row.
+    for subject in SUBJECTS_V3:
+        row = outcomes.get(subject)
+        if isinstance(row, dict):
+            ladder[subject].update(ladder_from_legacy_row(row, outcome_words=True))
+            continue
+        row = table_v2.get(subject)
+        if isinstance(row, dict) and subject not in SUBJECTS_V3_EXTRA:
+            ladder[subject].update(ladder_from_legacy_row(row, outcome_words=False))
+            continue
+        if subject in SUBJECTS_V3_EXTRA:
+            keep_stored(subject)
+    return ladder
+
+
 def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
     """Fill in anything missing or invalid from a persisted-but-partial
     document with defaults, so a settings file written before a schema
@@ -707,21 +875,13 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
 
     routing_table = data.get("routing_table")
     if isinstance(routing_table, dict):
+        # The legacy v1 table stays as stored, untouched (v3 §2.2).
         for subject in SUBJECTS:
             row = routing_table.get(subject)
             if isinstance(row, dict):
-                for place in PLACES:
-                    if row.get(place) in LEVELS:
+                for place in LEGACY_PLACES:
+                    if row.get(place) in LEGACY_LEVELS:
                         merged["routing_table"][subject][place] = row[place]
-
-    routing_table_v2 = data.get("routing_table_v2")
-    if isinstance(routing_table_v2, dict):
-        for subject in SUBJECTS_V3:
-            row = routing_table_v2.get(subject)
-            if isinstance(row, dict):
-                for place in PLACES:
-                    if row.get(place) in LEVELS:
-                        merged["routing_table_v2"][subject][place] = row[place]
 
     recognition = data.get("recognition")
     if isinstance(recognition, dict):
@@ -730,55 +890,8 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
             if val in RECOGNITION_MODES:
                 merged["recognition"][key] = val
 
-    outcomes = data.get("outcomes")
-    stored_outcomes = (_active or {}).get("outcomes", {}) if isinstance(_active, dict) else {}
-    if isinstance(outcomes, dict):
-        # Outcomes are the authority: copy valid cells over the defaults,
-        # then derive the legacy routing levels from them so the evaluator
-        # (and an older app build reading routing_table_v2) stays in step.
-        # A body that omits a V3 subject entirely (a four-subject app build)
-        # keeps the *stored* row, not the default -- otherwise every PUT
-        # from an older app would quietly reset the new rows.
-        for subject in SUBJECTS_V3:
-            row = outcomes.get(subject)
-            if not isinstance(row, dict) and subject in SUBJECTS_V3_EXTRA:
-                row = stored_outcomes.get(subject)
-            if isinstance(row, dict):
-                for place in PLACES:
-                    if row.get(place) in OUTCOMES:
-                        merged["outcomes"][subject][place] = row[place]
-        for subject in SUBJECTS_V3:
-            for place in PLACES:
-                merged["routing_table_v2"][subject][place] = OUTCOME_TO_LEVEL[
-                    merged["outcomes"][subject][place]
-                ]
-    else:
-        # Legacy body (an older app build): derive outcomes from its levels.
-        # "off" survives a legacy round trip: the legacy shape renders an
-        # off cell as "log", so a stored off + incoming log stays off.
-        for subject in SUBJECTS_V2:
-            for place in PLACES:
-                level = merged["routing_table_v2"][subject][place]
-                derived = LEVEL_TO_OUTCOME[level]
-                was_off = (
-                    isinstance(stored_outcomes.get(subject), dict)
-                    and stored_outcomes[subject].get(place) == "off"
-                )
-                merged["outcomes"][subject][place] = (
-                    "off" if derived == "log" and was_off else derived
-                )
-        # Legacy bodies predate the V3 subjects entirely: preserve the
-        # stored rows (or fall back to defaults) and keep v2 in lockstep.
-        for subject in SUBJECTS_V3_EXTRA:
-            row = stored_outcomes.get(subject)
-            if isinstance(row, dict):
-                for place in PLACES:
-                    if row.get(place) in OUTCOMES:
-                        merged["outcomes"][subject][place] = row[place]
-            for place in PLACES:
-                merged["routing_table_v2"][subject][place] = OUTCOME_TO_LEVEL[
-                    merged["outcomes"][subject][place]
-                ]
+    merged["ladder"] = _normalized_ladder(data, merged["ladder"])
+    merged["outcomes"], merged["routing_table_v2"] = derive_legacy_views(merged["ladder"])
 
     zone_names = data.get("zone_names")
     if isinstance(zone_names, dict):
@@ -790,8 +903,11 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
 
     zone_classes = data.get("zone_classes")
     if isinstance(zone_classes, dict):
+        # `private` (retired, v3 §1/§3.2) reads as `yard`.
         merged["zone_classes"] = {
-            str(zone): place for zone, place in zone_classes.items() if place in PLACES
+            str(zone): ladder_policy.canonical_place(place)
+            for zone, place in zone_classes.items()
+            if place in LEGACY_PLACES
         }
 
     zone_overrides = data.get("zone_overrides")
@@ -801,10 +917,13 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(row, dict):
                 continue
             valid_subjects = set(SUBJECTS) | set(SUBJECTS_V3)
+            # Legacy `notify` -> `silent` (v3 §2.4); still no `off`.
             valid_row = {
-                subject: level
+                subject: ladder_policy.canonical_level(level)
                 for subject, level in row.items()
-                if subject in valid_subjects and level in LEVELS
+                if subject in valid_subjects
+                and isinstance(level, str)
+                and ladder_policy.canonical_level(level) in LEVELS
             }
             # An override that ends up empty after filtering (or was saved
             # empty to begin with) is removed, not kept as a no-op entry
@@ -827,6 +946,11 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
         delivery = live_activities.get("delivery")
         if delivery in ("la_first", "notifications"):
             merged["live_activities"]["delivery"] = delivery
+        # Keys this sidecar doesn't know yet (e.g. a future `summary_row`)
+        # are carried through untouched (v3 §2.6).
+        for key, value in live_activities.items():
+            if key not in merged["live_activities"]:
+                merged["live_activities"][key] = value
     merged["live_activities"] |= _derived_family_booleans(merged["outcomes"])
 
     escalation_sound = data.get("escalation_sound")
@@ -845,8 +969,9 @@ def normalize_settings(data: dict[str, Any]) -> dict[str, Any]:
     elif isinstance(quiet_hours, dict):
         start = quiet_hours.get("start", "")
         end = quiet_hours.get("end", "")
-        mode = quiet_hours.get("mode", "cap_quiet")
-        if _valid_time(start) and _valid_time(end) and mode in ("cap_quiet", "mute_sounds"):
+        mode = quiet_hours.get("mode", "hold_urgent")
+        mode = _LEGACY_QUIET_HOURS_MODES.get(mode, mode)
+        if _valid_time(start) and _valid_time(end) and mode in QUIET_HOURS_MODES:
             merged["quiet_hours"] = {"start": start, "end": end, "mode": mode}
 
     camera_neighbors = data.get("camera_neighbors")
@@ -1147,36 +1272,75 @@ def save_settings(path: str | Path, settings: dict[str, Any]) -> int:
 _active: dict[str, Any] | None = None
 
 
+def engine_table(
+    settings: dict[str, Any],
+) -> tuple[dict[str, dict[str, str]], set[tuple[str, str]]]:
+    """`(table, off_cells)` the evaluator consumes for a settings document.
+
+    `ladder` is the authority (v3): each cell's engine level via
+    `LADDER_TO_LEVEL`, and Ignore for a non-person subject is an off cell
+    (suppressed before evaluation, v3 §4.1 step 6). A document predating
+    `ladder` (a hand-built test dict, say) falls back to its legacy table,
+    `notify` read as `silent` and `private` as `yard`, with `off` outcomes as
+    the off cells -- the pre-v3 behaviour."""
+    ladder = settings.get("ladder")
+    if isinstance(ladder, dict) and ladder:
+        table = {
+            subject: {
+                place: LADDER_TO_LEVEL.get(row.get(place, "ignore"), "log") for place in PLACES
+            }
+            for subject, row in ladder.items()
+            if isinstance(row, dict)
+        }
+        off = {
+            (subject, place)
+            for subject, row in ladder.items()
+            if isinstance(row, dict) and subject != "person"
+            for place in PLACES
+            if row.get(place) == "ignore"
+        }
+        return table, off
+    legacy = settings.get("routing_table_v2") or settings.get("routing_table") or {}
+    table = {}
+    for subject, row in legacy.items():
+        if not isinstance(row, dict):
+            continue
+        cells = {place: ladder_policy.canonical_level(str(level)) for place, level in row.items()}
+        if "private" in cells:
+            yard, private = cells.get("yard", "log"), cells.pop("private")
+            if private in LEVELS and yard in LEVELS:
+                cells["yard"] = max(yard, private, key=LEVELS.index)
+        table[subject] = cells
+    outcomes = settings.get("outcomes", {})
+    off = {
+        (subject, ladder_policy.canonical_place(place))
+        for subject, row in outcomes.items()
+        if isinstance(row, dict)
+        for place, outcome in row.items()
+        if outcome == "off"
+    }
+    return table, off
+
+
 def apply_settings(settings: dict[str, Any]) -> None:
     """Make `settings` the live policy. `ladder_policy.set_table`/
-    `set_zone_overrides` are called with fresh copies (never the caller's
-    own dicts) so a later in-place edit on the caller's side can't silently
-    mutate what the evaluator is using. Everything else
+    `set_off_cells`/`set_zone_overrides` are called with fresh copies (never
+    the caller's own dicts) so a later in-place edit on the caller's side
+    can't silently mutate what the evaluator is using. Everything else
     (`zone_classes`/`live_activities`) is read through `get_active()` at
     call time by `delivery_wire.py`, so there's nothing further to push.
 
-    The user-facing authority is `outcomes` (merge_settings derives
-    `routing_table_v2` from it), so by the time we get here the two agree;
-    the evaluator consumes `routing_table_v2` when present — v2 subjects
-    (person/vehicle/animal/thing) — falling back to the legacy
-    `routing_table` (stranger/known/animal/thing) otherwise. `off` cells
-    exist only in `outcomes` and are applied as pre-evaluation suppression
-    via `set_off_cells`."""
+    The authority is `ladder` (v3); see `engine_table` for the translation
+    and the legacy fallback."""
     global _active
-    table = settings.get("routing_table_v2") or settings["routing_table"]
-    ladder_policy.set_table({s: dict(row) for s, row in table.items()})
-    outcomes = settings.get("outcomes", {})
-    ladder_policy.set_off_cells(
-        {
-            (subject, place)
-            for subject, row in outcomes.items()
-            if isinstance(row, dict)
-            for place, outcome in row.items()
-            if outcome == "off"
-        }
-    )
+    table, off_cells = engine_table(settings)
+    ladder_policy.set_table(table)
+    ladder_policy.set_off_cells(off_cells)
     ladder_policy.set_zone_overrides(
-        {zone: dict(row) for zone, row in settings.get("zone_overrides", {}).items()}
+        {
+            zone: {subject: ladder_policy.canonical_level(level) for subject, level in row.items()}
+            for zone, row in settings.get("zone_overrides", {}).items()
+        }
     )
     _active = settings
 
@@ -1217,6 +1381,15 @@ def save_and_apply(path: str | Path, body: dict[str, Any]) -> tuple[dict[str, An
         merged["live_activities"]["la_only"] = bool(active_la.get("la_only", False))
     if not (isinstance(la_body, dict) and la_body.get("delivery") in ("la_first", "notifications")):
         merged["live_activities"]["delivery"] = active_la.get("delivery", "la_first")
+    # Unknown live_activities keys (e.g. a future `summary_row`, v3 §2.6) are
+    # sticky the same way: a client whose fixed model drops them must not
+    # reset them.
+    known_la = set(default_settings()["live_activities"])
+    for key, value in active_la.items():
+        if key in known_la:
+            continue
+        if not (isinstance(la_body, dict) and key in la_body):
+            merged["live_activities"][key] = value
     for sticky_key in (
         "camera_neighbors",
         "camera_headings",
@@ -1240,11 +1413,18 @@ def startup(path: str | Path) -> dict[str, Any]:
     file yet, so the very first `GET` on a fresh install both answers the
     request and creates the file (design doc §4).
 
-    Triggers the v1→v2 routing table migration if ``routing_table_v2`` is
-    absent from the loaded settings (design brief: "derives it once from
-    the legacy table")."""
+    Migrates a pre-v3 file (`v` < 3, or no `ladder`) to the v3 ladder once
+    (`docs/ladder-v3.md` §3): the file is first copied to
+    `<path>.v2.bak` (never overwriting an existing backup), the older
+    one-time migrations it may still owe run on the raw document (v1 -> v2
+    routing table; package/bin/opening rows seeded from the retired family
+    booleans), then it is normalized -- `ladder` from `outcomes` via §2.3,
+    `private` merged into `yard` (louder wins), `zone_classes` private ->
+    yard, `zone_overrides` notify -> silent, quiet hours cap_quiet ->
+    hold_urgent -- and saved with `v = 3`. A v3 file is left alone."""
     import logging
 
+    log = logging.getLogger(__name__)
     p = Path(path)
     raw: dict[str, Any] = {}
     if p.exists():
@@ -1256,35 +1436,76 @@ def startup(path: str | Path) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raw = {}
 
-    needs_migration = "routing_table_v2" not in raw
-    settings = normalize_settings(raw) if raw else default_settings()
+    stored_v = raw.get("v")
+    needs_v3 = bool(raw) and (
+        "ladder" not in raw or not isinstance(stored_v, int) or stored_v < 3
+    )
 
-    if needs_migration and raw.get("routing_table"):
-        v2_table, recognition, log_msg = migrate_v1_to_v2(raw["routing_table"])
-        settings["routing_table_v2"] = v2_table
-        settings["recognition"] = recognition
-        logging.getLogger(__name__).info(log_msg)
+    if needs_v3:
+        backup = p.with_name(p.name + ".v2.bak")
+        if p.exists() and not backup.exists():
+            shutil.copy2(p, backup)
+        settings = normalize_settings(_pre_v3_migrations(raw, log))
+        settings["v"] = SETTINGS_VERSION
+        log.info(
+            "settings v3 migration: ladder derived from %s; backup at %s",
+            "outcomes" if isinstance(raw.get("outcomes"), dict) else "routing tables",
+            backup,
+        )
+        save_settings(path, settings)
+    else:
+        settings = normalize_settings(raw) if raw else default_settings()
+
+    # Seed camera_optics once from the deployed-fleet literals. Keyed on the
+    # raw file *lacking* the key entirely (not on emptiness), so a user who
+    # later edits — or deletes — cameras is never re-seeded over.
+    if "camera_optics" not in raw:
+        settings["camera_optics"] = seeded_camera_optics()
+        log.info(
+            "camera_optics seeded from DEPLOYMENT_SEED (%d cameras)",
+            len(settings["camera_optics"]),
+        )
         save_settings(path, settings)
 
-    # One-time v2 seeding (one alerts stack): a doc written before the V3
-    # subject rows existed carries the user's family booleans and
-    # alert_all_changes as the authority -- fold them into outcome rows
-    # once, then the booleans are derived forever after. Keyed on the raw
-    # doc's outcomes lacking the rows (not on "v") so a hand-edited file is
-    # never re-seeded over.
+    apply_settings(settings)
+    return settings
+
+
+def _pre_v3_migrations(raw: dict[str, Any], log: Any) -> dict[str, Any]:
+    """The one-time migrations a pre-v3 document may still owe, applied to
+    the raw document (so the v3 normalize that follows derives `ladder` from
+    their result):
+
+    - v1 -> v2: a file with no `routing_table_v2` derives one from the legacy
+      `routing_table` (design brief: "derives it once from the legacy
+      table").
+    - v2 seeding (one alerts stack): a doc written before the V3 subject rows
+      existed carries the user's family booleans and alert_all_changes as the
+      authority -- fold them into package/bin/opening outcome rows. Keyed on
+      the raw doc's outcomes lacking the rows (not on "v") so a hand-edited
+      file is never re-seeded over.
+    """
+    doc = dict(raw)
+    if "routing_table_v2" not in raw and raw.get("routing_table"):
+        v2_table, recognition, log_msg = migrate_v1_to_v2(raw["routing_table"])
+        doc["routing_table_v2"] = v2_table
+        doc["recognition"] = recognition
+        log.info(log_msg)
+
     raw_outcomes_val = raw.get("outcomes")
     raw_outcomes: dict[str, Any] = raw_outcomes_val if isinstance(raw_outcomes_val, dict) else {}
-    if raw and not any(subject in raw_outcomes for subject in SUBJECTS_V3_EXTRA):
+    if not any(subject in raw_outcomes for subject in SUBJECTS_V3_EXTRA):
         stored_la = raw.get("live_activities")
         stored_la = stored_la if isinstance(stored_la, dict) else {}
         alert_all = stored_la.get("alert_all_changes") is True
+        seeded: dict[str, Any] = dict(raw_outcomes)
         for bool_key, subject in (
             ("package", "package"),
             ("bins", "bin"),
             ("openings", "opening"),
         ):
             if stored_la.get(bool_key) is False:
-                row = {place: "off" for place in PLACES}
+                row = {place: "off" for place in LEGACY_PLACES}
             else:
                 row = dict(DEFAULT_EXTRA_OUTCOMES[subject])
                 if alert_all:
@@ -1294,13 +1515,9 @@ def startup(path: str | Path) -> dict[str, Any]:
                         place: "notify" if outcome == "glance" else outcome
                         for place, outcome in row.items()
                     }
-            settings["outcomes"][subject] = row
-            settings["routing_table_v2"][subject] = {
-                place: OUTCOME_TO_LEVEL[outcome] for place, outcome in row.items()
-            }
-        settings["live_activities"] |= _derived_family_booleans(settings["outcomes"])
-        settings["v"] = SETTINGS_VERSION
-        logging.getLogger(__name__).info(
+            seeded[subject] = row
+        doc["outcomes"] = seeded
+        log.info(
             "outcomes v3 seeding: package/bin/opening rows from booleans "
             "(package=%s bins=%s openings=%s alert_all=%s)",
             stored_la.get("package", True),
@@ -1308,21 +1525,7 @@ def startup(path: str | Path) -> dict[str, Any]:
             stored_la.get("openings", True),
             alert_all,
         )
-        save_settings(path, settings)
-
-    # Seed camera_optics once from the deployed-fleet literals. Keyed on the
-    # raw file *lacking* the key entirely (not on emptiness), so a user who
-    # later edits — or deletes — cameras is never re-seeded over.
-    if "camera_optics" not in raw:
-        settings["camera_optics"] = seeded_camera_optics()
-        logging.getLogger(__name__).info(
-            "camera_optics seeded from DEPLOYMENT_SEED (%d cameras)",
-            len(settings["camera_optics"]),
-        )
-        save_settings(path, settings)
-
-    apply_settings(settings)
-    return settings
+    return doc
 
 
 def reset_for_tests() -> None:
@@ -1350,7 +1553,7 @@ def migrate_v1_to_v2(
       averaged one tier below ``stranger``, else ``off``
     - ``recognition.known_vehicle``: ``relax_one`` (no legacy equivalent)
     """
-    level_idx = {lvl: i for i, lvl in enumerate(LEVELS)}
+    level_idx = {lvl: i for i, lvl in enumerate(LEGACY_LEVELS)}
 
     stranger_row = legacy.get("stranger", DEFAULT_ROUTING_TABLE["stranger"])
     known_row = legacy.get("known", DEFAULT_ROUTING_TABLE["known"])
@@ -1362,8 +1565,8 @@ def migrate_v1_to_v2(
     vehicle_row = dict(thing_row)
     for place in ("doors", "off_limits"):
         idx = level_idx.get(vehicle_row.get(place, "log"), 0)
-        bumped = min(idx + 1, len(LEVELS) - 1)
-        vehicle_row[place] = LEVELS[bumped]
+        bumped = min(idx + 1, len(LEGACY_LEVELS) - 1)
+        vehicle_row[place] = LEGACY_LEVELS[bumped]
 
     v2_table = {
         "person": person_row,
@@ -1372,8 +1575,9 @@ def migrate_v1_to_v2(
         "thing": dict(thing_row),
     }
 
-    stranger_avg = sum(level_idx.get(stranger_row.get(p, "log"), 0) for p in PLACES) / len(PLACES)
-    known_avg = sum(level_idx.get(known_row.get(p, "log"), 0) for p in PLACES) / len(PLACES)
+    n = len(LEGACY_PLACES)
+    stranger_avg = sum(level_idx.get(stranger_row.get(p, "log"), 0) for p in LEGACY_PLACES) / n
+    known_avg = sum(level_idx.get(known_row.get(p, "log"), 0) for p in LEGACY_PLACES) / n
     gap = stranger_avg - known_avg
     known_person_mode = "relax_one" if gap >= 0.8 else "off"
 
@@ -1484,14 +1688,22 @@ def build_available_openings(config_path: str | Path) -> list[str]:
     return sorted(names)
 
 
-def outcome_for(subject: str, place: str) -> str:
-    """The merged-ladder outcome for a subject x place cell, for delivery
-    surface decisions (delivery_wire's glance gating). Falls back to the
-    level-derived outcome when the active doc predates the outcomes table."""
-    outcomes = get_active().get("outcomes", {})
-    row = outcomes.get(subject)
-    if isinstance(row, dict) and row.get(place) in OUTCOMES:
+def ladder_cell(subject: str, place: str) -> str:
+    """The `ladder` value (ignore/silent/glance/urgent) for a subject x place
+    cell, for delivery surface decisions (delivery_wire's Glance catch-all).
+    `private` reads as `yard`; an unknown subject or a doc predating `ladder`
+    reads through the level-derived value."""
+    place = ladder_policy.canonical_place(place)
+    ladder = get_active().get("ladder")
+    row = ladder.get(subject) if isinstance(ladder, dict) else None
+    if isinstance(row, dict) and row.get(place) in LADDER_VALUES:
         return str(row[place])
-    table = get_active().get("routing_table_v2") or get_active().get("routing_table", {})
+    table, _off = engine_table(get_active())
     level = table.get(subject, {}).get(place, "log")
-    return LEVEL_TO_OUTCOME.get(level, "log")
+    return LEVEL_TO_LADDER.get(level, "ignore")
+
+
+def outcome_for(subject: str, place: str) -> str:
+    """The derived legacy outcome word for a subject x place cell (v3 §2.2's
+    `outcomes` view)."""
+    return ladder_to_outcome(subject, ladder_cell(subject, place))

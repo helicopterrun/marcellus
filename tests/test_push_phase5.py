@@ -237,7 +237,8 @@ class TestQuietHours:
         settings["quiet_hours"] = {"start": "09:00", "end": "17:00", "mode": "cap_quiet"}
         active, mode = policy_settings.is_quiet_hours(settings, 600)  # 10:00
         assert active is True
-        assert mode == "cap_quiet"
+        # Legacy `cap_quiet` input is stored as `hold_urgent` in v3.
+        assert mode == "hold_urgent"
         active2, _ = policy_settings.is_quiet_hours(settings, 480)  # 08:00
         assert active2 is False
 
@@ -371,7 +372,13 @@ def test_routing_table_defaults_agree():
     settings_table = policy_settings.DEFAULT_ROUTING_TABLE
     for subject in settings_table:
         for place in settings_table[subject]:
-            assert ladder_table[subject][place] == settings_table[subject][place], (
+            if place == "private":
+                continue  # retired in v3: read as yard
+            # The legacy routing_table still carries `notify`, which is the
+            # Balanced preset's Quiet (`silent`) in the engine's built-in table.
+            legacy = settings_table[subject][place]
+            legacy = "silent" if legacy == "notify" else legacy
+            assert ladder_table[subject][place] == legacy, (
                 f"{subject}.{place}: ladder={ladder_table[subject][place]} "
                 f"settings={settings_table[subject][place]}"
             )
@@ -455,9 +462,9 @@ async def test_la_covered_resolve_row_is_deferred(
     transport = LogTransport()
     device = make_device()
     card = Card(
-        card_key="doorbell:person:trk1", level="notify", peak_level="notify",
+        card_key="doorbell:person:trk1", level="silent", peak_level="silent",
         created_at=1.0, updated_at=9.0, state_since_at=1.0,
-        resolved=True, closed=True,
+        resolved=True, closed=True, kept_row=True,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
 
@@ -487,9 +494,9 @@ async def test_non_covered_device_resolve_row_is_immediate(sidecar_db_path: Path
     transport = LogTransport()
     device = make_device()
     card = Card(
-        card_key="doorbell:person:trk1", level="notify", peak_level="notify",
+        card_key="doorbell:person:trk1", level="silent", peak_level="silent",
         created_at=1.0, updated_at=9.0, state_since_at=1.0,
-        resolved=True, closed=True,
+        resolved=True, closed=True, kept_row=True,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
     await send_card_mutation(
@@ -523,9 +530,9 @@ async def test_deferred_resolve_exception_is_logged_not_lost(
     transport = BoomTransport()
     device = make_device()
     card = Card(
-        card_key="doorbell:person:trk1", level="notify", peak_level="notify",
+        card_key="doorbell:person:trk1", level="silent", peak_level="silent",
         created_at=1.0, updated_at=9.0, state_since_at=1.0,
-        resolved=True, closed=True,
+        resolved=True, closed=True, kept_row=True,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
 
@@ -560,9 +567,9 @@ async def test_cancel_deferred_cancels_pending_tasks(sidecar_db_path: Path, monk
     transport = LogTransport()
     device = make_device()
     card = Card(
-        card_key="doorbell:person:trk1", level="notify", peak_level="notify",
+        card_key="doorbell:person:trk1", level="silent", peak_level="silent",
         created_at=1.0, updated_at=9.0, state_since_at=1.0,
-        resolved=True, closed=True,
+        resolved=True, closed=True, kept_row=True,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
 
@@ -587,21 +594,21 @@ async def test_cancel_deferred_cancels_pending_tasks(sidecar_db_path: Path, monk
 
 
 @pytest.mark.asyncio
-async def test_resolve_push_not_ephemeral_for_notify_peak_story(sidecar_db_path: Path):
-    """Alerts-slice2 §E (sidecar policy change): a resolve push for a story
-    that peaked at `notify` (not just `quiet`) keeps its resolve push around
-    -- `ephemeral: false`, same collapse-id, quiet/passive -- so the banner
-    is replaced in place rather than removed. Only a peak that never
-    exceeded `quiet` (and never tripped a zone override) is ephemeral."""
+async def test_resolve_push_not_ephemeral_for_silent_peak_story(sidecar_db_path: Path):
+    """Alerts-slice2 §E / ladder v3 §5.2: a story that delivered a Quiet
+    (`silent`) or Urgent card push (`kept_row`) keeps its resolve push around
+    -- `ephemeral: false`, same collapse-id, quiet/passive -- so the row is
+    replaced in place rather than removed. A story that never left a kept row
+    (and never tripped a zone override) is ephemeral."""
     from marcellus.push.cards import RESOLVE, Card
 
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = make_device()
     card = Card(
-        card_key="doorbell:person:trk1", level="notify", peak_level="notify",
+        card_key="doorbell:person:trk1", level="silent", peak_level="silent",
         created_at=1.0, updated_at=9.0, state_since_at=1.0,
-        resolved=True, closed=True,
+        resolved=True, closed=True, kept_row=True,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
     await send_card_mutation(
@@ -653,7 +660,7 @@ async def test_resolve_push_not_ephemeral_for_urgent_peak_story(sidecar_db_path:
     card = Card(
         card_key="doorbell:person:trk1", level="notify", peak_level="urgent",
         created_at=1.0, updated_at=9.0, state_since_at=1.0,
-        resolved=True, closed=True,
+        resolved=True, closed=True, kept_row=True,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
     await send_card_mutation(
@@ -676,7 +683,7 @@ async def test_resolve_push_not_ephemeral_for_zone_override_story(sidecar_db_pat
     transport = LogTransport()
     device = make_device()
     card = Card(
-        card_key="doorbell:person:trk1", level="notify", peak_level="notify",
+        card_key="doorbell:person:trk1", level="silent", peak_level="silent",
         created_at=1.0, updated_at=9.0, state_since_at=1.0,
         resolved=True, closed=True, zone_override_hit=True,
     )
@@ -749,7 +756,7 @@ async def test_card_send_prunes_unregistered_device(sidecar_db_path: Path):
     dead = make_device(token="tok_dead")
     alive = make_device(token="tok_alive")
     card = Card(
-        card_key="doorbell:person:trk1", level="notify", peak_level="notify",
+        card_key="doorbell:person:trk1", level="silent", peak_level="silent",
         created_at=1.0, updated_at=1.0, state_since_at=1.0,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "now"}}}

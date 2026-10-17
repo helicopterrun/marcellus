@@ -106,7 +106,7 @@ broken by id, so pages are stable).
 | `severity` | `alert` or `detection`: exact match on the encounter's peak severity. Anything else is a 422. |
 | `tag` | `notable` or `background` (see below). `notable` also returns encounters that were never stamped. Anything else is a 422. |
 | `label` | Comma-separated; matches encounters whose labels or recognised identities include any of them (case-insensitive). |
-| `place` | Comma-separated place keys (`street` Public, `yard` Semi-private, `doors` Entry / exit, `private` Private, `off_limits` Restricted): encounters whose most private place is any of them. An unknown key is a 422. |
+| `place` | Comma-separated place keys (`street` Public, `yard` Grounds, `doors` Entrances, `off_limits` Restricted; `private` is still accepted and means `yard`): encounters whose most private place is any of them. An unknown key is a 422. |
 
 All filters combine with AND.
 
@@ -142,9 +142,11 @@ for now, `tags` says encounters carry the background/notable tag, and
 
 Marcellus tags every encounter as **background** (a passer-by you rarely
 need to look at) or **notable**, and records the most private place it
-reached (Public, Semi-private, Entry / exit, Private or Restricted) and the
+reached (Public, Grounds, Entrances or Restricted) and the
 loudest answer the alert settings would give it (off, log, glance, notify or
-alarm). The feed carries these as `tag`, `place` and `outcome`.
+alarm). The `outcome` field still uses these older words: `notify` now means
+Quiet and `alarm` means Urgent. The feed carries these as `tag`, `place` and
+`outcome`.
 
 The first rule that matches decides, in this order:
 

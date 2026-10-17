@@ -253,6 +253,11 @@ async def capabilities(request: Request) -> dict[str, Any]:
             # accept. The app hides the V3 ladder rows -- and omits their
             # keys from PUTs -- unless this list says they're routable.
             "attention_subjects": list(policy_settings.SUBJECTS_V3),
+            # Attention ladder v3 (`docs/ladder-v3.md` §2.7): settings carry
+            # the authoritative `ladder` (4 levels x 4 places). The app uses
+            # `ladder` only when it sees this; otherwise it treats the
+            # sidecar as v2. Additive.
+            "ladder_version": policy_settings.SETTINGS_VERSION,
         },
         "decisions": {"enabled": True},
         "search": {"enabled": True, "related_events": True},

@@ -49,6 +49,9 @@ _NIGHT_ELEVATION_DEG = -0.833
 #: Outcomes that do not, on their own, make an encounter notable.
 _QUIET_OUTCOMES = ("off", "log")
 
+#: Engine levels loudest-last, with `off` (suppressed) below them all.
+_LEVEL_ORDER = ("off", *ladder_policy.LEVELS)
+
 _DOG = "dog"
 _PERSON = "person"
 
@@ -155,7 +158,9 @@ def _strs(member: Mapping[str, Any], key: str) -> list[str]:
 
 
 def _loudest(outcomes: Sequence[str]) -> str:
-    order = policy_settings.OUTCOMES
+    """Loudest of several members' outcome words, by the v3 engine order
+    (`notify` -- Quiet -- sits below `glance` now)."""
+    order = ("off", "log", "notify", "glance", "alarm")
     return max(outcomes, key=order.index, default="off")
 
 
@@ -167,7 +172,7 @@ def _member_outcome(
     subjects: dict[str, str] = {}  # subject -> a label that maps to it
     for label in labels:
         subjects.setdefault(delivery_wire.subject_for_labels([label]), label)
-    outcomes: list[str] = []
+    levels: list[str] = []
     for subject, label in subjects.items():
         zone, place = delivery_wire.most_severe_zone(
             zones, subject=subject, zone_classes=zone_classes
@@ -175,10 +180,12 @@ def _member_outcome(
         level = ladder.evaluate_ladder(
             ladder.Snapshot(subject=subject, place=place, zone=zone, label=label)
         )
-        outcomes.append(
-            "off" if level == ladder.SUPPRESSED else policy_settings.LEVEL_TO_OUTCOME[level]
-        )
-    return _loudest(outcomes)
+        levels.append("off" if level == ladder.SUPPRESSED else level)
+    # Loudest by the v3 engine order, then named in the outcome vocabulary
+    # the encounters wire has always carried (ladder v3 §5.6:
+    # `LEVEL_TO_OUTCOME`, where Quiet -- `silent` -- reads as "notify").
+    loudest = max(levels, key=_LEVEL_ORDER.index, default="off")
+    return "off" if loudest == "off" else policy_settings.LEVEL_TO_OUTCOME[loudest]
 
 
 def stamp(

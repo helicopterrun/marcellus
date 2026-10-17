@@ -777,6 +777,8 @@ body.map-full-open { overflow: hidden; }
 .sub-title { margin: 1.4em 0 0.4em; font-size: 14px; }
 .lvl { display: inline-block; padding: 1px 8px; border-radius: 3px; font-size: 11px; font-weight: 600; }
 .lvl-log { background: var(--surface-2); color: var(--muted); }
+.lvl-ignore, .lvl-suppressed { background: var(--surface-2); color: var(--muted); }
+.lvl-silent { background: var(--surface-2); color: var(--text); }
 .lvl-quiet { background: var(--mixed-bg); color: var(--mixed-text); }
 .lvl-notify { background: var(--warn-bg); color: var(--warn-text); }
 .lvl-urgent { background: var(--danger-bg); color: var(--danger-text); }
@@ -817,6 +819,9 @@ body.map-full-open { overflow: hidden; }
 select[data-level="off"] { background: var(--surface-2); color: var(--muted-2); }
 select[data-level="log"] { background: var(--surface-2); color: var(--muted); }
 select[data-level="glance"] { background: var(--mixed-bg); color: var(--mixed-text); }
+select[data-level="ignore"] { background: var(--surface-2); color: var(--muted); }
+select[data-level="silent"] { background: var(--warn-bg); color: var(--warn-text); }
+select[data-level="urgent"] { background: var(--danger-bg); color: var(--danger-text); }
 select[data-level="notify"] { background: var(--warn-bg); color: var(--warn-text); }
 select[data-level="alarm"] { background: var(--danger-bg); color: var(--danger-text); }
 /* Settings › Tuning/Effective configuration (tuning.js). */

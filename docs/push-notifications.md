@@ -5,46 +5,64 @@ Activities. This is the current-state design doc for everything under
 `marcellus/push/`; the wire contract for card payloads lives in
 `docs/apns-payload-spec.md`.
 
-## The routing model: the merged outcome ladder
+## The routing model: the four-level ladder (v3)
 
-One dial per **subject × place** answering "what happens?". Subjects are
-`person` / `vehicle` / `animal` / `thing`; places are `street` / `yard` /
-`doors` / `private` / `off_limits`. Each cell holds one of five ordinal
-outcomes (`policy_settings.OUTCOMES`):
+Full spec: [`docs/ladder-v3.md`](ladder-v3.md). One dial per **subject ×
+place** answering "what happens?". Subjects are `person` / `vehicle` /
+`animal` / `thing` / `package` / `bin` / `opening`; places are `street`
+(Public) / `yard` (Grounds) / `doors` (Entrances) / `off_limits`
+(Restricted). The old `private` place is retired and read as `yard`. Each
+cell holds one of four levels. The user-facing word, the `ladder` wire value
+and the engine level (`ladder_policy.LEVELS`, order `log < silent < quiet <
+urgent`) differ, because installed app builds still read the engine names:
 
-| Outcome | Meaning |
-|---|---|
-| `off` | suppressed entirely — never evaluated, never logged as a card |
-| `log` | recorded, visible in the app, no delivery |
-| `glance` | Live Activity only — never a banner or sound |
-| `notify` | banner + Live Activity |
-| `alarm` | urgent: sound, re-sounds, time-sensitive |
+| Level | `ladder` value | Engine level | What happens |
+|---|---|---|---|
+| Ignore | `ignore` | `log` | recorded, visible in the app, nothing on the phone (non-person subjects are suppressed outright, traced as `off`) |
+| Quiet | `silent` | `silent` | passive push, never a sound, row kept in Notification Center |
+| Glance | `glance` | `quiet` | Live Activity only — no card push, banner or sound |
+| Urgent | `urgent` | `urgent` | time-sensitive banner, sound per mute and budget |
 
-In the settings document, **`outcomes` is authoritative**. The evaluator
-itself still consumes four routing *levels* (`log < quiet < notify <
-urgent`, `ladder_policy.LEVELS`), so `routing_table_v2` is derived from
-`outcomes` on every save (`glance → quiet`, `alarm → urgent`, `off → log`)
-— older app builds reading `routing_table_v2` and the evaluator stay in
-step by construction. `off` has no legacy level, so it is enforced as
-**pre-evaluation suppression**: `apply_settings` collects every `off` cell
-into `ladder_policy.set_off_cells`, and the evaluator answers `SUPPRESSED`
-for them before any nudge could raise the result. A legacy settings body
-(no `outcomes` block) has its outcomes derived from its levels, and a
-stored `off` cell survives that round trip: the legacy shape renders `off`
-as `log`, so stored-off + incoming-log stays off.
+`notify` is retired from routing; legacy input `notify` is translated to
+`silent` at the boundary. System cards (test pushes, the Connection Doctor
+round trip) are a separate path and still send an active push with sound.
 
-**Zone overrides outrank table cells** — including `off` cells. An
+In the settings document, **`ladder` is authoritative** (7 subjects × 4
+places, values `ignore | silent | glance | urgent`). `outcomes` (the old
+five-word grid) and `routing_table_v2` (old levels) are still served but are
+**derived** from `ladder` on every normalize, so installed app builds keep
+working:
+
+| `ladder` | `outcomes` | `routing_table_v2` |
+|---|---|---|
+| `ignore` | `log` (person) / `off` (others) | `log` |
+| `silent` | `notify` | `notify` |
+| `glance` | `glance` | `quiet` |
+| `urgent` | `alarm` | `urgent` |
+
+The legacy `private` column in both is the `yard` value. A PUT from an
+older client with no `ladder` key has its `outcomes` (or `routing_table_v2`)
+translated into `ladder` (`off`/`log` → `ignore`, `notify` → `silent`,
+`glance` → `glance`, `alarm` → `urgent`; `private` merges into `yard`,
+louder wins). If a body carries both, `ladder` wins. An Ignore cell for a
+non-person subject is enforced as **pre-evaluation suppression**:
+`apply_settings` collects those cells into `ladder_policy.set_off_cells` and
+the evaluator answers `SUPPRESSED` before any nudge could raise the result.
+Ignore for a person is plain `log` and can still be nudged.
+
+**Zone overrides outrank table cells** — including Ignore cells. An
 explicit per-zone rule is the user's most specific statement.
 
 The legacy `routing_table` (subjects `stranger`/`known`/`animal`/`thing`)
 is still stored and validated for old clients; `startup` migrates a v1-only
 file to v2 once (`migrate_v1_to_v2`: `person` := stranger row, `vehicle` :=
 thing row bumped one tier at doors/off_limits, `recognition` inferred from
-the stranger/known gap). The evaluator uses `routing_table_v2` when
-present, falling back to `routing_table`.
+the stranger/known gap), and a v2 file to v3 once (see "Migration to v3").
+The evaluator uses the table derived from `ladder`.
 
 **Recognition** (`recognition.known_person` / `known_vehicle`, one of
-`off` / `relax_one` / `relax_to_quiet`) replaces the old `known` subject
+`off` / `relax_one` / `relax_to_quiet`; `relax_one` drops one step,
+`relax_to_quiet` caps at Glance) replaces the old `known` subject
 row: a recognized subject relaxes the person/vehicle cell rather than
 routing through a separate table row. `probe_recognition_available` checks
 Frigate's config for face recognition and LPR so the app can hide the
@@ -74,7 +92,7 @@ choice) with the event's own `label` used for label filtering.
 websocket subscription to a UniFi OS console's Protect Integration API
 (`/proxy/protect/integration/v1/subscribe/events`), turning "ring" events
 into calls into `push/doorbell.py`. It does not feed the attention ladder
-above -- a doorbell ring skips the card pipeline, the outcomes table, and
+above -- a doorbell ring skips the card pipeline, the ladder, and
 the rate limiter entirely and goes straight to a `doorbell.ring` payload
 (`docs/apns-payload-spec.md` § "A fourth family"), because a ring is a
 person at the door, not a detection to weigh subject×place odds on. See
@@ -84,7 +102,8 @@ for setup and troubleshooting.
 ## The attention ladder (evaluation)
 
 `push/ladder.py` answers one question, statelessly: given a detection
-snapshot, how loud is it? Output is one routing level or `SUPPRESSED`. All
+snapshot, how loud is it? Output is one engine level (`log` / `silent` /
+`quiet` / `urgent`) or `SUPPRESSED`. All
 policy is data in `ladder_policy.py` — the live subject × place `TABLE`,
 `OFF_CELLS`, `ZONE_OVERRIDES`, `WORRY_REASONS` / `CALM_REASONS` nudges,
 `DANGEROUS_ANIMAL_LABELS` (reclassify as stranger/person),
@@ -96,10 +115,23 @@ Evaluation order: mute → system-card short-circuit (`source == "system"`
 has no subject/place and returns a fixed level) → safety exceptions
 (`audio_safety`, `ai_flagged` → unconditional `urgent`) → dangerous-animal
 reclassification → zone override (replaces the table result outright,
-bypassing nudges/floor/caps — "always" is the point) → off-cell suppression
-→ base table lookup → one net worry/calm nudge (`animal` never nudges;
-recognized subjects never nudge up) → child-hazard-zone floor (at least
-`notify`) → street/unconfirmed-detector caps (at most `quiet`).
+bypassing nudges/floor/caps — "always" is the point) → Ignore-cell
+suppression (non-person subjects) → base table lookup → one net worry/calm
+nudge (`animal` never nudges; recognized subjects never nudge up) →
+child-hazard-zone floor (a person there is raised to at least Glance) →
+street/unconfirmed-detector caps (at most Glance) → quiet-hours hold
+(below).
+
+**The nudge stops at Glance.** One step per evaluation over `log < silent <
+quiet < urgent`, but a worry nudge never produces `urgent`: nudging up from
+Glance stays Glance, and a cell already at Urgent stays Urgent (calm can
+lower it). Escalation over time follows the same ceiling, so behaviour alone
+takes a story to Glance at most. Urgent comes from the table, a zone
+override, a Restricted place or a safety trigger.
+
+**Quiet hours `hold_urgent`.** Applied last. During the window Urgent is
+held at Glance (modifier `quiet_hours_hold`), except for place `off_limits`
+and safety triggers.
 
 To change built-in policy: edit `ladder_policy.py`, then run
 `pytest tests/test_push_ladder.py`. `fixtures/ladder/ladder_cases.json` is
@@ -113,9 +145,11 @@ deliberately, in the same commit.
 `sub_labels` (known if present, never the reverse), `_VEHICLE_LABELS`,
 `_ANIMAL_LABELS`, else `thing`. `classify_place` checks the user's
 `settings.zone_classes` first, then `policy_settings.guess_zone_class` — a
-name heuristic checking doors → off_limits → street → private → yard
+name heuristic checking doors → off_limits → street → yard
 patterns in that order (most specific/alarming first; the order resolves
-real collisions like "front_entry_person" and "sidewalk"), falling back to
+real collisions like "front_entry_person" and "sidewalk"; names that used to
+map to `private` — back, side, rear, alley, fence — now map to `yard`),
+falling back to
 the camera name, defaulting to `yard`. Tightening either is a data change
 in `delivery_wire.py`, never a change to `ladder.py`.
 
@@ -145,7 +179,7 @@ Each new ladder evaluation against a card key is classified
 
 | Mutation | Condition | Push |
 |---|---|---|
-| `create` | no existing (or closed) card | alert at the routed level, sound per budget |
+| `create` | no existing (or closed) card | push at the routed level (Quiet passive, Urgent time-sensitive with sound per budget); Glance pushes no card |
 | `enrich` | same level, new facts | silent, same collapse id |
 | `escalate` | new level > old | alert with sound, subject to the budget |
 | `deescalate` | new level < old | silent, same collapse id |
@@ -153,7 +187,7 @@ Each new ladder evaluation against a card key is classified
 | `suppressed` | ladder returns `SUPPRESSED` | no push; card closes |
 
 `resolved` is never derived from the level — a `thing` at a non-street
-place never evaluates below `quiet`, so "the subject is gone" must be an
+place can evaluate at Glance or above, so "the subject is gone" must be an
 explicit signal. It rides on `frigate/events`' object `end` message
 (`handle_delivery_resolve`). Mute beats resolve.
 
@@ -162,46 +196,65 @@ explicit signal. It rides on `frigate/events`' object `end` message
 Every resolve gets one final push: quiet (no sound, `interruption-level:
 passive`), same `apns-collapse-id` as the story it's closing. Whether that
 push is **ephemeral** (`ephemeral: true` — the app removes the delivered
-row from Notification Center at once) or not depends on the story's peak:
+row from Notification Center at once) depends on whether the story ever
+left a kept row:
 
-| Story peak (`card.peak_level`) | Zone override ever hit | Resolve |
+`ephemeral = not kept_row and not zone_override_hit`
+
+`kept_row` is sticky on the card (`push_cards.kept_row`): true once any Quiet
+(`silent`) or Urgent card push was delivered for the story — even if it was
+later lifted to Glance. A Glance story that reached a device without Live
+Activities as a silent fallback card sets `fallback_row` instead, which keeps
+the resolve row on those devices only.
+
+| Story | Zone override ever hit | Resolve |
 |---|---|---|
-| ≤ `quiet` | no | `ephemeral: true` — removed, scoped to the event's lifetime |
-| `notify` or `urgent` | — | `ephemeral: false` — banner replaced in place, body `"…left after 4 min"` |
-| any | yes | `ephemeral: false`, regardless of peak |
+| never delivered a Quiet/Urgent card (e.g. Glance only) | no | `ephemeral: true` — removed, scoped to the event's lifetime |
+| delivered a Quiet (`silent`) or Urgent card | — | `ephemeral: false` — row replaced in place, body `"…left after 4 min"`, kept until the person opens or clears it |
+| any | yes | `ephemeral: false` |
 
 `ephemeral` is always explicit, never omitted — an app reading it absent
 treats the row as coming from an old sidecar and falls back to its own 24h
 sweep, while an explicit `false` means "user-visible story, keep it around
-until the user acts or the sweep ages it out". This is a sidecar policy
-change from the previous slice: a peak-`quiet` story used to get no resolve
-push at all (the row was left to the app's own 24h sweep); it now gets an
-ephemeral one, so a "Noted" card that never became a banner is still
-cleaned up promptly instead of lingering for up to a day.
+until the user acts or the sweep ages it out".
 
 ### Sound accounting — the entire anti-spam policy
 
-Sound at most twice per card: once at `create` (only if `notify`/`urgent` —
-a `quiet` create never sounds), once at the first escalation past `quiet`.
-Budget is spent by sounds *emitted*, not beats. Further escalations update
-level and content silently. An `urgent` card unhandled after
+Sound at most twice per card: once at `create` (only if `urgent` — Quiet
+and Glance never sound), once at the first escalation to `urgent`. Budget is
+spent by sounds *emitted*, not beats. Further escalations update level and
+content silently. An `urgent` card unhandled after
 `push.delivery_urgent_resound_s` (default 120s) may re-alert exactly once
 (`push.delivery_urgent_resound_enabled`, its own sweep loop in
 `server.py`); this third sound doesn't touch `sound_count`. Settings-side,
 `mute_sounds` and `quiet_hours` (below) can further quiet all of this.
 
-### Level → APNs mapping
+### Level → APNs mapping (delivery table, ladder-v3 §5.1)
 
-| Level | Push? | `interruption-level` | Sound |
-|---|---|---|---|
-| `urgent` | yes | `time-sensitive` | default (no Critical Alerts entitlement; `critical` is never attempted) |
-| `notify` | yes | `active` | default |
-| `quiet` | yes | `passive` | none |
-| `log` | no | — | recorded for the decision trace/timeline |
+| Engine level | Card push | `interruption-level` | Sound | Live Activity | Category |
+|---|---|---|---|---|---|
+| `log` | no | — | — | no | — |
+| `silent` (Quiet) | yes | `passive` | never | no (never a catch-all trigger) | `card.silent` |
+| `quiet` (Glance) | no, for a device that can show a Live Activity | — | — | catch-all or family | — |
+| `urgent` | yes | `time-sensitive` | default; per mute and budget (no Critical Alerts entitlement; `critical` is never attempted) | family as usual | `card.urgent` |
 
-Silent mutations reuse the alert channel with `aps.sound` omitted and the
-same collapse id, so the card replaces in place. A `glance` outcome cell
-demotes the card's banner entirely — Live Activity only (see below).
+`SOUNDED_LEVELS` is `urgent`; `PUSHABLE_LEVELS` is `silent` and `urgent`
+plus the Glance fallback below (one definition shared by `cards` and
+`delivery`). Silent mutations reuse the alert channel with `aps.sound`
+omitted and the same collapse id, so the card replaces in place.
+
+**Glance fallback.** A device that cannot show a Live Activity (no
+push-to-start token, or `la_capable` false, e.g. the Mac) gets a Glance
+story as a Quiet card instead: passive, no sound, `card.silent`, kept. The
+decision trace records `glance_fallback` and la_reason
+`device_not_la_capable`. With Live Activities switched off server-wide
+(`push.delivery_la_enabled: false`) every device gets this fallback (la_reason
+`la_disabled`), so Glance never silently delivers nothing.
+
+**Eligibility.** Device registration `min_severity` now defaults to
+`"detection"` (it was `"alert"`, which silently dropped Glance for clients
+that omitted the field). Level → severity: `urgent` alert; `silent` and
+`quiet` detection; `log` log.
 
 ### Cross-camera deduplication
 
@@ -307,12 +360,15 @@ deferred end immediately (`end_activity_if_card_closed`).
 **Families** (`should_start_activity`, gated by the per-family booleans in
 `settings.live_activities`): `package`, `bins`, `openings` (with
 `opening_picks` — empty means "nothing curated yet, everything qualifies",
-not "nothing qualifies"), `person` (person at `doors`), and an `activity`
-catch-all used when Live Activities are the sole surface.
+not "nothing qualifies"), `person` (starts at Glance or Urgent), `person_restricted` (any level at
+`off_limits`), and an `activity` catch-all. The catch-all starts for any
+Glance-level story with no native family, or when Live Activities are the
+sole surface; a Quiet (`silent`) card never starts one. The content-state
+`level` never carries `silent`. Relevance score: urgent 1.0, quiet 0.5,
+log 0.25.
 
-**Glance / la_only.** A `glance` outcome cell is la_only applied per cell:
-the card runs a Live Activity and its banner push is demoted to
-passive/silent. The global `live_activities.la_only` flag does the same for
+**Glance / la_only.** A Glance ladder cell is la_only applied per cell:
+the card runs a Live Activity and pushes no card banner. The global `live_activities.la_only` flag does the same for
 every pushable card — starts carry no sound, updates never carry an alert
 dict, the urgent re-sound is silent. Both `la_only` and
 `live_activities.delivery` (`la_first` | `notifications`) are **sticky**
@@ -367,17 +423,17 @@ application. Top-level keys, per `default_settings()`:
 
 | Key | Contents |
 |---|---|
-| `v` | `SETTINGS_VERSION` (1), bumped only on breaking shape changes |
-| `outcomes` | **authoritative** subject × place → outcome grid (v2 subjects) |
-| `routing_table_v2` | derived levels the evaluator consumes |
+| `v` | `SETTINGS_VERSION` (3), bumped only on breaking shape changes |
+| `ladder` | **authoritative** subject × place → `ignore \| silent \| glance \| urgent` (7 subjects × 4 places) |
+| `outcomes`, `routing_table_v2` | derived from `ladder` on every normalize, served for older app builds (see above) |
 | `routing_table` | legacy v1 (stranger/known) table, kept for old clients |
 | `recognition` | `known_person` / `known_vehicle`: `off` \| `relax_one` \| `relax_to_quiet` |
-| `zone_classes` | zone → place class (user-confirmed) |
+| `zone_classes` | zone → place class (user-confirmed); a stored `private` reads as `yard` |
 | `zone_names` | zone → display name for notification copy; wins over Frigate's `friendly_name` |
-| `zone_overrides` | `{zone: {subject: level}}` — outranks everything but mute/system/safety |
-| `live_activities` | per-family booleans, `opening_picks`, `delivery`, `alert_all_changes`, `la_only` |
+| `zone_overrides` | `{zone: {subject: level}}`, level `log \| silent \| quiet \| urgent` (`notify` accepted → `silent`) — outranks everything but mute/system/safety |
+| `live_activities` | per-family booleans, `opening_picks`, `delivery`, `la_only` (unknown keys kept) |
 | `escalation_sound`, `mute_sounds` | sound tuning |
-| `quiet_hours` | `null` or `{start, end, mode}` (HH:MM, wrap-around ok; `cap_quiet` \| `mute_sounds`) |
+| `quiet_hours` | `null` or `{start, end, mode}` (HH:MM, wrap-around ok; `hold_urgent` \| `mute_sounds`; input `cap_quiet` is stored as `hold_urgent`) |
 | `camera_neighbors` | camera → adjacent cameras, for cross-camera dedup |
 | `camera_headings` | camera → unit `{dx, dy}` "toward home" vector (LA heading chip) |
 | `camera_layout` | camera → `{x, y[, azimuth, fov]}` on the layout map |
@@ -406,7 +462,7 @@ no second call: `available_cameras`, `available_zones` (each with cameras,
 `guessed_class`, `friendly_name`), `available_openings`, `derived_headings`,
 `placement_deployments`, `recognition_available`.
 
-`PUT` validates, normalizes, persists, and applies immediately
+`PUT` validates, normalizes, persists, and applies immediately (a `ladder` that is present must be complete for person/vehicle/animal/thing; package/bin/opening rows are optional, absent = keep stored)
 (`apply_settings` → `set_table` / `set_off_cells` / `set_zone_overrides`;
 everything else is read via `get_active()` per card event). Config-side
 keys the app has no UI for (`camera_neighbors`, `camera_headings`,
@@ -416,13 +472,27 @@ explicitly sent, as are `la_only` and `delivery`; `secure_area` /
 null (clear). `placement_deployments` in the `GET` response is the
 settings-backed `camera_optics` table under its historical name.
 
+`GET /v1/capabilities` advertises `push.ladder_version: 3` (additive); the
+app uses `ladder` only when it sees it, otherwise it treats the sidecar as
+v2.
+
+### Migration to v3
+
+In `startup()`, once, when the stored file's `v` < 3 (or `ladder` is
+absent): copy the file to `<settings path>.v2.bak` (never overwriting an
+existing backup), then normalize and save with `v = 3`. A v3 file is left
+alone. Rules: `ladder` is built from stored `outcomes`; `private` merges
+into `yard` (louder cell wins); `zone_classes` `private` → `yard`;
+`zone_overrides` `notify` → `silent`; `quiet_hours.mode` `cap_quiet` →
+`hold_urgent`; everything else carried over.
+
 ## Decision trace and the tuning loop
 
 `GET /v1/push/decisions` serves `push/decision_trace.py`: a durable log in
 the sidecar SQLite DB (`push_decisions`, 30-day retention, 200 served max
 per page, `before`/`card_key` cursor+filter) of routing decisions, one per
 event pre-fanout, newest first — a restart no longer loses the trail. Each
-entry: `id`, `ts`, `camera`, `label`, `subject`, `zones`, `place`, `level`,
+entry: `id`, `ts`, `camera`, `label`, `subject`, `zones`, `place`, `level` (`off` for a suppressed Ignore, else `log`/`silent`/`quiet`/`urgent`),
 `reasons`, `event_id`, plus `stage`, `modifiers`, `card_key`, `mutation`,
 `zone`, `sound`, `sent` (and, once annotated, `family`/`la_started`/
 `la_reason`) and a `silenced` field computed at read time against
@@ -435,14 +505,14 @@ entry: `id`, `ts`, `camera`, `label`, `subject`, `zones`, `place`, `level`,
 | `system` | Server notice |
 | `safety` | Safety exception: always urgent |
 | `zone_override` | Your rule for {subject} in {zone} |
-| `off_cell` | {subject} in {place} is set to Off |
+| `off_cell` | {subject} in {place} is set to Ignore |
 | `table` | {subject} in {place} is set to {level} |
 | `nudge_up` | raised one step (nobody home / night / approaching …) |
 | `nudge_down` | lowered one step (known / leaving …) |
-| `child_hazard_floor` | at least Notify: child-hazard zone |
-| `street_cap` | capped at Quiet: street |
-| `unconfirmed_cap` | capped at Quiet: detector unconfirmed |
-| `quiet_hours_cap` | capped at Quiet: quiet hours |
+| `child_hazard_floor` | at least Glance: child-hazard zone |
+| `street_cap` | capped at Glance: street |
+| `unconfirmed_cap` | capped at Glance: detector unconfirmed |
+| `quiet_hours_hold` | held at Glance: quiet hours |
 | `reclass_dangerous_animal` | treated as a person: dangerous animal |
 
 Append never raises and a write failure is
@@ -450,7 +520,7 @@ logged and swallowed rather than dropping the notification it's describing.
 This feeds the app's Recent Decisions screen — the tuning loop is: see a
 decision you disagree with, see which cell/override/reason produced it,
 change that cell (or one-tap **Quiet this** via `POST /v1/push/silence`),
-and the next evaluation uses the new policy. Events silenced by an `off`
+and the next evaluation uses the new policy. Events silenced by an Ignore
 cell are traced too (level `"off"`, reason `suppressed`, once per track) —
 otherwise the feed goes dark for exactly the cells the user silenced and
 there is no evidence trail to dial one back up. `POST /v1/push/feedback`
@@ -470,14 +540,16 @@ logs a per-card verdict (tuning trace only; no routing changes yet).
   record updated by `push/transport.py`'s `RelayTransport` on every relay
   HTTP response (a restart resets it — a "since last restart" snapshot).
 - `POST /v1/push/silence` — `{"card_key": ...}` drops the cell that card
-  routed through (its zone override, or its outcomes-table cell if it has no
-  zone) to `quiet`, through the same validate → normalize → save → apply
+  routed through (its zone override, or its ladder cell if it has no
+  zone) to `silent` (Quiet), responding `applied: "silent"`, through the same validate → normalize → save → apply
   path as `PUT /settings`, and records a `push_silences` audit row. 404
   `card_not_found` for an unknown key.
 - `PUT /v1/push/overrides` — the fine-grained editor: set or clear one
   `zone_override` cell (`level: null` removes it), or set one `outcome_cell`
-  directly (`level` may not be `null` there — an outcomes cell always has a
-  current value). 422 for a bad `kind`/`level` enum or missing required
+  directly (`level` may not be `null` there — a ladder cell always has a
+  current value). `level` is `log | silent | quiet | urgent`; legacy
+  `notify` is accepted as `silent` and `off` as Ignore. Outcome-cell edits
+  write `settings["ladder"][subject][place]`. 422 for a bad `kind`/`level` enum or missing required
   fields for the given `kind`.
 
 ## HTTP surface (`routes/push.py`)

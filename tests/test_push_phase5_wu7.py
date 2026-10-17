@@ -256,36 +256,37 @@ async def test_resound_stops_on_resolve(sidecar_db_path: Path):
 # ── 4. Quiet hours integration ──────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_quiet_hours_cap_quiet_caps_notify_to_quiet(sidecar_db_path: Path):
+async def test_quiet_hours_hold_urgent_holds_urgent_at_glance(sidecar_db_path: Path):
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = _device()
     config = PushSection(delivery_enabled=True)
 
     settings = policy_settings.default_settings()
-    settings["quiet_hours"] = {"start": "00:00", "end": "23:59", "mode": "cap_quiet"}
+    settings["ladder"]["person"]["doors"] = "urgent"
+    settings["quiet_hours"] = {"start": "00:00", "end": "23:59", "mode": "hold_urgent"}
     policy_settings.apply_settings(settings)
 
     await handle_delivery_event(
         _event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=100.0,
     )
-    # quiet no longer pushes at all (user feedback 2026-08-14): a story
-    # capped to quiet is recorded, not announced.
+    # v3 hold_urgent: an Urgent cell is held at Glance (quiet) during the
+    # window; Glance pushes no card to an LA-capable device.
     assert _sit_sends(transport) == []
     card = card_store.get_card(conn, "doorbell:person:trk1")
     assert card is not None and card.level == "quiet"
 
 
 @pytest.mark.asyncio
-async def test_quiet_hours_cap_quiet_exempts_urgent(sidecar_db_path: Path):
+async def test_quiet_hours_hold_urgent_exempts_off_limits(sidecar_db_path: Path):
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = _device(push_to_start="")
     config = PushSection(delivery_enabled=True)
 
     settings = policy_settings.default_settings()
-    settings["quiet_hours"] = {"start": "00:00", "end": "23:59", "mode": "cap_quiet"}
+    settings["quiet_hours"] = {"start": "00:00", "end": "23:59", "mode": "hold_urgent"}
     policy_settings.apply_settings(settings)
 
     # stranger + off_limits = urgent
@@ -299,11 +300,11 @@ async def test_quiet_hours_cap_quiet_exempts_urgent(sidecar_db_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_quiet_hours_cap_quiet_with_mute_sounds_does_not_crash(sidecar_db_path: Path):
-    """mute_sounds + cap_quiet: mute is now a sound-only control (not
-    suppression), so the card evaluates normally, cap_quiet caps notify→quiet,
-    and mute strips sound. Quiet never pushes (2026-08-14), so the card
-    advances silently with no send and no crash."""
+async def test_quiet_hours_hold_urgent_with_mute_sounds_does_not_crash(sidecar_db_path: Path):
+    """mute_sounds + hold_urgent: mute is a sound-only control (not
+    suppression), so the card evaluates normally, hold_urgent holds urgent at
+    Glance (quiet), and Glance pushes no card to an LA-capable device, so the
+    card advances silently with no send and no crash."""
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = _device()
@@ -311,7 +312,8 @@ async def test_quiet_hours_cap_quiet_with_mute_sounds_does_not_crash(sidecar_db_
 
     settings = policy_settings.default_settings()
     settings["mute_sounds"] = True
-    settings["quiet_hours"] = {"start": "00:00", "end": "23:59", "mode": "cap_quiet"}
+    settings["ladder"]["person"]["doors"] = "urgent"
+    settings["quiet_hours"] = {"start": "00:00", "end": "23:59", "mode": "hold_urgent"}
     policy_settings.apply_settings(settings)
 
     await handle_delivery_event(
@@ -324,7 +326,7 @@ async def test_quiet_hours_cap_quiet_with_mute_sounds_does_not_crash(sidecar_db_
 
 
 @pytest.mark.asyncio
-async def test_quiet_hours_mute_sounds_strips_sound(sidecar_db_path: Path):
+async def test_quiet_hours_mute_sounds_non_urgent_card_has_no_sound(sidecar_db_path: Path):
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = _device(push_to_start="")
@@ -334,14 +336,15 @@ async def test_quiet_hours_mute_sounds_strips_sound(sidecar_db_path: Path):
     settings["quiet_hours"] = {"start": "00:00", "end": "23:59", "mode": "mute_sounds"}
     policy_settings.apply_settings(settings)
 
-    # stranger + doors = notify (would normally sound)
+    # stranger + doors = Glance (quiet); this device has no push-to-start
+    # token, so it gets the v3 silent fallback card (never sounds).
     await handle_delivery_event(
         _event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=100.0,
     )
     sends = _sit_sends(transport)
     assert len(sends) == 1
-    assert sends[0]["payload"]["level"] == "notify"
+    assert sends[0]["payload"]["level"] == "silent"
     assert "sound" not in sends[0]["payload"]["aps"]
 
 
@@ -369,14 +372,14 @@ async def test_quiet_hours_mute_sounds_exempts_urgent(sidecar_db_path: Path):
 
 def test_quiet_hours_boundary_start_is_inclusive():
     settings = policy_settings.default_settings()
-    settings["quiet_hours"] = {"start": "09:00", "end": "17:00", "mode": "cap_quiet"}
+    settings["quiet_hours"] = {"start": "09:00", "end": "17:00", "mode": "hold_urgent"}
     active, _ = policy_settings.is_quiet_hours(settings, 540)  # exactly 09:00
     assert active is True
 
 
 def test_quiet_hours_boundary_end_is_exclusive():
     settings = policy_settings.default_settings()
-    settings["quiet_hours"] = {"start": "09:00", "end": "17:00", "mode": "cap_quiet"}
+    settings["quiet_hours"] = {"start": "09:00", "end": "17:00", "mode": "hold_urgent"}
     active, _ = policy_settings.is_quiet_hours(settings, 1020)  # exactly 17:00
     assert active is False
 
@@ -385,7 +388,7 @@ def test_quiet_hours_boundary_end_is_exclusive():
 
 class TestLaPayloadContract:
     def test_la_start_relevance_score_by_level(self):
-        for level, expected in [("urgent", 1.0), ("notify", 0.75), ("quiet", 0.5), ("log", 0.25)]:
+        for level, expected in [("urgent", 1.0), ("quiet", 0.5), ("log", 0.25)]:
             state = build_content_state(
                 level=level, mutation="create", glyph="g", primary="P",
                 secondary="S", elapsed_seconds=0, card_key="k",
@@ -761,7 +764,7 @@ def test_fresh_settings_default_muted():
 
 
 @pytest.mark.asyncio
-async def test_unmuted_story_sounded_at_start_silent_at_escalation(sidecar_db_path: Path):
+async def test_unmuted_story_sounded_at_start_silent_afterwards(sidecar_db_path: Path):
     """Change 3: one sound per story — a card that sounded at create doesn't
     sound again at escalation."""
     conn = db.open_sidecar(sidecar_db_path)
@@ -771,9 +774,10 @@ async def test_unmuted_story_sounded_at_start_silent_at_escalation(sidecar_db_pa
 
     settings = policy_settings.default_settings()
     settings["mute_sounds"] = False
+    settings["ladder"]["person"]["doors"] = "urgent"
     policy_settings.apply_settings(settings)
 
-    # Create at notify: sounds (budget spent).
+    # Create at urgent (person at doors, set to Urgent): sounds (budget spent).
     await handle_delivery_event(
         _event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
@@ -781,13 +785,13 @@ async def test_unmuted_story_sounded_at_start_silent_at_escalation(sidecar_db_pa
     create_aps = _sit_sends(transport)[0]["payload"]["aps"]
     assert create_aps.get("sound")
 
-    # Escalate to urgent: no sound (budget exhausted).
+    # Story moves to another urgent zone (pool): no second sound (budget
+    # exhausted). Urgent is the ceiling in v3, so this is not an escalation.
     await handle_delivery_event(
         _event("doorbell", "trk1", "person", zones=("pool",)),
         conn=conn, devices=[device], transport=transport, config=config, now=10.0,
     )
     esc_aps = _sit_sends(transport)[-1]["payload"]["aps"]
-    assert esc_aps["interruption-level"] == "time-sensitive"
     assert "sound" not in esc_aps
 
 
@@ -804,13 +808,16 @@ async def test_unmuted_story_silent_at_start_sounds_at_urgent(sidecar_db_path: P
     settings["mute_sounds"] = False
     policy_settings.apply_settings(settings)
 
-    # Create at quiet (person at yard): no sound.
+    # Create at quiet (person at yard): this device has no push-to-start
+    # token, so Glance arrives as the v3 silent fallback card: no sound.
     await handle_delivery_event(
         _event("doorbell", "trk1", "person", zones=("yard",)),
         conn=conn, devices=[device], transport=transport, config=config, now=0.0,
     )
-    # quiet create no longer pushes at all (2026-08-14).
-    assert _sit_sends(transport) == []
+    first = _sit_sends(transport)
+    assert len(first) == 1
+    assert first[0]["payload"]["level"] == "silent"
+    assert not first[0]["payload"]["aps"].get("sound")
 
     # Escalate to urgent (pool): sounds (budget still available).
     await handle_delivery_event(

@@ -277,7 +277,11 @@ async def encounters_list(
     cameras = _csv(camera)
     labels = _csv(label)
     places = _csv(place)
-    unknown = [p for p in places if p not in policy_settings.PLACES]
+    # Ladder v3 retired `private` into `yard`: accept it, and match both
+    # spellings either way -- encounters stamped before v3 still say private.
+    unknown = [p for p in places if p not in policy_settings.LEGACY_PLACES]
+    if places and ("yard" in places or "private" in places):
+        places = [*dict.fromkeys([*places, "yard", "private"])]
     if unknown:
         raise HTTPException(
             status_code=422,

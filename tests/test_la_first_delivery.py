@@ -142,13 +142,14 @@ def test_classify_family_off_limits_is_person_restricted():
 
 def test_classify_family_routed_person_is_person():
     assert la.classify_family(
-        subject_kind="stranger", label="person", place_class="doors", level="notify",
+        subject_kind="stranger", label="person", place_class="doors", level="quiet",
     ) == la.PERSON
     assert la.classify_family(
         subject_kind="stranger", label="person", place_class="private", level="urgent",
     ) == la.PERSON
+    # A Quiet (silent) card never has a Live Activity family.
     assert la.classify_family(
-        subject_kind="stranger", label="person", place_class="doors", level="quiet",
+        subject_kind="stranger", label="person", place_class="doors", level="silent",
     ) is None
 
 

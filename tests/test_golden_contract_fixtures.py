@@ -195,7 +195,7 @@ def _content_state_full() -> dict[str, Any]:
 
 def _content_state_minimal() -> dict[str, Any]:
     return live_activities.build_content_state(
-        level="notify",
+        level="quiet",
         mutation=CREATE,
         glyph="figure.walk",
         primary="Person at the doorbell",
@@ -281,17 +281,20 @@ def _build_la_end() -> dict[str, Any]:
 
 
 def _canonical_put_body() -> dict[str, Any]:
-    """The canonical PUT document: the full 7-subject one-alerts-stack shape
-    with a handful of non-default cells so derivation is visible."""
+    """The canonical PUT document (ladder v3): the full 7-subject `ladder`
+    with a handful of non-default cells -- one of each level -- so the derived
+    legacy `outcomes`/`routing_table_v2` views are visible, plus a Quiet zone
+    override and `hold_urgent` quiet hours."""
     doc = policy_settings.default_settings()
     doc["zone_classes"]["front_door"] = "doors"
     doc["zone_classes"]["garage"] = "off_limits"
-    doc["zone_overrides"] = {"sidewalk": {"person": "notify"}}
-    doc["outcomes"]["package"]["doors"] = "notify"
-    doc["outcomes"]["opening"]["yard"] = "off"
-    doc["outcomes"]["thing"]["yard"] = "alarm"
+    doc["zone_overrides"] = {"sidewalk": {"person": "silent"}}
+    doc["ladder"]["package"]["doors"] = "silent"
+    doc["ladder"]["opening"]["yard"] = "ignore"
+    doc["ladder"]["thing"]["yard"] = "urgent"
+    doc["quiet_hours"] = {"start": "22:00", "end": "07:00", "mode": "hold_urgent"}
     doc["camera_neighbors"] = {"doorbell": ["street"]}
-    return doc
+    return policy_settings.normalize_settings(doc)
 
 
 def _build_push_settings_put() -> dict[str, Any]:
@@ -310,6 +313,7 @@ def _build_push_settings_get() -> dict[str, Any]:
 
 
 SECOND_EVENT_ID = "1755550002.654321-def456"
+THIRD_EVENT_ID = "1755550003.111111-ghi789"
 
 
 def _build_push_decisions() -> dict[str, Any]:
@@ -321,6 +325,8 @@ def _build_push_decisions() -> dict[str, Any]:
         conn = db_mod.open_sidecar(tmp / "marcellus.db")
         try:
             decision_trace.reset_for_tests(conn)
+            # Ladder v3 levels: a Quiet (`silent`) card -- passive, no sound,
+            # no Live Activity -- and a suppressed Ignore cell (`off`).
             decision_trace.append(
                 conn,
                 camera=CAMERA,
@@ -328,25 +334,24 @@ def _build_push_decisions() -> dict[str, Any]:
                 subject="package",
                 zones=["front_door"],
                 place="doors",
-                level="notify",
-                reasons=["outcomes[package][doors]=notify"],
+                level="silent",
+                reasons=["routing_table"],
                 event_id=EVENT_ID,
                 stage="table",
                 modifiers=("nudge_up",),
                 card_key=CARD_KEY,
                 mutation="create",
                 zone="front_door",
-                sound=True,
+                sound=False,
                 sent=1,
             )
             decision_trace.annotate(
                 conn,
                 EVENT_ID,
-                family=live_activities.PACKAGE,
-                la_started=True,
-                la_reason="family=package",
+                la_started=False,
+                la_reason="cell_below_glance",
                 sent=1,
-                sound=True,
+                sound=False,
             )
             decision_trace.append(
                 conn,
@@ -355,23 +360,43 @@ def _build_push_decisions() -> dict[str, Any]:
                 subject="vehicle",
                 zones=["nw_49th_st"],
                 place="street",
-                level="log",
-                reasons=["outcomes[vehicle][street]=log"],
+                level="off",
+                reasons=["routing_table", "suppressed"],
                 event_id=SECOND_EVENT_ID,
+                stage="off_cell",
+                modifiers=(),
+                card_key="street:vehicle:1755550002.654321-def456",
+                mutation="suppressed",
+                zone="nw_49th_st",
+                sound=False,
+                sent=0,
+            )
+            # A Glance (`quiet`) person story: the person family's Live
+            # Activity, no card push.
+            decision_trace.append(
+                conn,
+                camera=CAMERA,
+                label="person",
+                subject="person",
+                zones=["front_door"],
+                place="doors",
+                level="quiet",
+                reasons=["routing_table"],
+                event_id=THIRD_EVENT_ID,
                 stage="table",
                 modifiers=(),
-                card_key="",
-                mutation="",
-                zone="",
+                card_key=f"{CAMERA}:person:{THIRD_EVENT_ID}",
+                mutation="create",
+                zone="front_door",
                 sound=False,
                 sent=0,
             )
             decision_trace.annotate(
                 conn,
-                SECOND_EVENT_ID,
-                family=live_activities.CATCH_ALL,
-                la_started=False,
-                la_reason="level=log",
+                THIRD_EVENT_ID,
+                family=live_activities.PERSON,
+                la_started=True,
+                la_reason="started",
             )
             # A silence on the first card's zone/subject, to exercise the
             # `silenced` field surfaced by `recent()` at read time.
@@ -386,7 +411,7 @@ def _build_push_decisions() -> dict[str, Any]:
                     "package",
                     "doors",
                     None,
-                    "quiet",
+                    "silent",
                 ),
             )
             conn.commit()
@@ -398,12 +423,12 @@ def _build_push_decisions() -> dict[str, Any]:
         body: dict[str, Any] = resp.json()
         # `append` stamps wall-clock `ts`; pin to fixed values for the golden
         # file (decisions are newest-first, so [0] is the second insert).
+        pinned_ts = {
+            SECOND_EVENT_ID: "2026-08-19T20:37:41Z",
+            THIRD_EVENT_ID: "2026-08-19T20:38:05Z",
+        }
         for entry in body["decisions"]:
-            entry["ts"] = (
-                "2026-08-19T20:37:41Z"
-                if entry["event_id"] == SECOND_EVENT_ID
-                else "2026-08-19T20:37:02Z"
-            )
+            entry["ts"] = pinned_ts.get(entry["event_id"], "2026-08-19T20:37:02Z")
         return body
 
 
@@ -423,8 +448,8 @@ def _build_push_status() -> dict[str, Any]:
                 subject="package",
                 zones=["front_door"],
                 place="doors",
-                level="notify",
-                reasons=["outcomes[package][doors]=notify"],
+                level="urgent",
+                reasons=["routing_table"],
                 event_id=EVENT_ID,
                 stage="table",
                 modifiers=(),
@@ -563,6 +588,36 @@ def _build_push_device_detail() -> dict[str, Any]:
         return resp.json()
 
 
+def _build_card_push_silent() -> dict[str, Any]:
+    """A Quiet (`silent`) card create (ladder v3 §5.1): passive, never a
+    sound, `card.silent` -- also exactly what a device that can't show a Live
+    Activity receives for a Glance story (§5.3)."""
+    card = Card(
+        card_key=CARD_KEY,
+        level="silent",
+        created_at=SENT_AT,
+        updated_at=SENT_AT,
+        state_since_at=SENT_AT,
+        peak_level="silent",
+    )
+    return build_card_payload(
+        card,
+        "create",
+        sound=False,
+        subject_kind="package",
+        place_class="doors",
+        label="package",
+        camera=CAMERA,
+        zone_name="front_door",
+        glyph="shippingbox.fill",
+        primary="Package at the front door",
+        secondary="Courier left a box on the porch",
+        event_ts=SENT_AT,
+        media=HANDLE,
+        deep_link=f"elsinore://camera/{CAMERA}",
+    )
+
+
 def _build_card_push_test() -> dict[str, Any]:
     """The round-trip test push payload (alerts-slice2 §D), `card_push.json`'s
     sibling -- `mutation: "test"` rather than a real card mutation."""
@@ -598,21 +653,24 @@ def _build_push_silence() -> dict[str, Any]:
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
+        # Start from the default ladder every build: `previous` reads the
+        # live policy, which the silence itself changes.
+        policy_settings.reset_for_tests()
         client = _make_client(tmp)
         conn = db_mod.open_sidecar(tmp / "marcellus.db")
         try:
-            # No `zone_name` -- this card routed through the outcomes table,
+            # No `zone_name` -- this card routed through the ladder table,
             # not a zone override, so the silence scope is `outcome_cell`
             # (the `zone` key absent entirely from the response).
             upsert_card(
                 conn,
                 Card(
                     card_key=CARD_KEY,
-                    level="notify",
+                    level="urgent",
                     created_at=SENT_AT - 60.0,
                     updated_at=SENT_AT,
                     state_since_at=SENT_AT - 60.0,
-                    peak_level="notify",
+                    peak_level="urgent",
                 ),
                 subject_kind="package",
                 place_class="doors",
@@ -1187,6 +1245,7 @@ FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "push_silence.json": _build_push_silence,
     "capabilities.json": _build_capabilities,
     "card_push.json": _build_card_push,
+    "card_push_silent.json": _build_card_push_silent,
     "card_push_test.json": _build_card_push_test,
     "push_receipts.json": _build_push_receipts,
     "push_device_detail.json": _build_push_device_detail,

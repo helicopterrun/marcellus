@@ -52,45 +52,99 @@ def _camera_summary(settings: Any) -> list[dict[str, Any]]:
     return rows
 
 
-#: Shared display vocabulary (mirrors zones.js / the app).
-_PLACES = ("street", "yard", "doors", "private", "off_limits")
+#: Shared display vocabulary (mirrors policy.js / the app), ladder v3.
+_PLACES = ("street", "yard", "doors", "off_limits")
 _PLACE_LABELS = {
-    "street": "Public", "yard": "Semi-private", "doors": "Entry / exit",
-    "private": "Private", "off_limits": "Restricted",
+    "street": "Public", "yard": "Grounds", "doors": "Entrances",
+    "off_limits": "Restricted",
 }
-# `ladder.SUPPRESSED` ("suppressed") is what `base_level` answers for a
-# subject x place cell the user switched off (policy.OFF_CELLS) -- it is not
-# in ladder_policy.LEVELS but the example composer hits it whenever a
-# scenario's cell is off, so it needs a label here or /settings 500s.
+# Ladder words (settings `ladder` values) and engine levels both resolve to
+# the four user-facing words. `suppressed` is what `ladder.base_level`
+# answers for an Ignore cell of a non-person subject; legacy `notify` reads
+# as Quiet (it is what an old client's Quiet cell looks like).
 _LEVEL_LABELS = {
-    "log": "Log", "quiet": "Glance", "notify": "Notify", "urgent": "Alarm",
-    "suppressed": "Off",
+    "ignore": "Ignore", "silent": "Quiet", "glance": "Glance", "urgent": "Urgent",
+    "log": "Ignore", "quiet": "Glance", "notify": "Quiet", "suppressed": "Ignore",
+    "off": "Ignore", "alarm": "Urgent",
 }
+_SUBJECTS = ("person", "vehicle", "animal", "thing", "package", "bin", "opening")
 _SUBJECT_LABELS = {
+    "person": "Person", "vehicle": "Vehicle", "animal": "Animal", "thing": "Thing",
+    "package": "Package", "bin": "Bin", "opening": "Opening",
+    # Subjects of the engine's own scenario vocabulary (notification examples).
     "stranger": "Unknown person", "known": "Known person",
-    "animal": "Animal", "thing": "Vehicle / thing",
 }
+_LEGACY_OUTCOME_TO_LADDER = {
+    "off": "ignore", "log": "ignore", "notify": "silent", "glance": "glance",
+    "alarm": "urgent",
+}
+_LADDER_ORDER = ("ignore", "silent", "glance", "urgent")
+
+
+def _level_label(value: Any) -> str:
+    """Display word for any level vocabulary; unknown values show raw."""
+    return _LEVEL_LABELS.get(value, str(value)) if isinstance(value, str) else str(value)
+
+
+def _ladder_from_outcomes(outcomes: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Rollout fallback: derive a v3 `ladder` from legacy `outcomes` (§2.3).
+    `private` merges into `yard`, louder wins."""
+    out: dict[str, dict[str, Any]] = {}
+    for subject, row in outcomes.items():
+        if not isinstance(row, dict):
+            continue
+        cells: dict[str, Any] = {}
+        for place, val in row.items():
+            mapped = _LEGACY_OUTCOME_TO_LADDER.get(val, val) if isinstance(val, str) else val
+            target = "yard" if place == "private" else place
+            prev = cells.get(target)
+            if prev in _LADDER_ORDER and mapped in _LADDER_ORDER:
+                mapped = max(prev, mapped, key=_LADDER_ORDER.index)
+            cells[target] = mapped
+        out[subject] = cells
+    return out
+
+
+def _active_ladder() -> dict[str, dict[str, Any]]:
+    active = policy_settings.get_active()
+    ladder = active.get("ladder")
+    if isinstance(ladder, dict) and ladder:
+        return {k: v for k, v in ladder.items() if isinstance(v, dict)}
+    outcomes = active.get("outcomes")
+    return _ladder_from_outcomes(outcomes) if isinstance(outcomes, dict) else {}
 
 
 def _ladder_matrix() -> dict[str, Any]:
     """The live attention-ladder table for display: subject rows x place
     columns -> level chips, plus any per-zone overrides in effect."""
-    from marcellus.push import ladder_policy as policy
-
+    ladder = _active_ladder()
+    subjects = [s for s in _SUBJECTS if s in ladder] + [
+        s for s in ladder if s not in _SUBJECTS
+    ]
     rows = []
-    for subject, cells in policy.TABLE.items():
+    for subject in subjects:
+        cells = ladder[subject]
         rows.append(
             {
                 "subject": _SUBJECT_LABELS.get(subject, subject),
                 "cells": [
-                    {"level": cells.get(p, "log"), "label": _LEVEL_LABELS[cells.get(p, "log")]}
+                    {
+                        "level": str(cells.get(p, "ignore")),
+                        "label": _level_label(cells.get(p, "ignore")),
+                    }
                     for p in _PLACES
                 ],
             }
         )
+    zone_overrides = policy_settings.get_active().get("zone_overrides") or {}
     overrides = [
-        {"zone": zone, "subject": _SUBJECT_LABELS.get(subj, subj), "label": _LEVEL_LABELS[lvl]}
-        for zone, per_subject in policy.ZONE_OVERRIDES.items()
+        {
+            "zone": zone,
+            "subject": _SUBJECT_LABELS.get(subj, subj),
+            "label": _level_label(lvl),
+        }
+        for zone, per_subject in zone_overrides.items()
+        if isinstance(per_subject, dict)
         for subj, lvl in per_subject.items()
     ]
     return {
@@ -128,8 +182,8 @@ def _notification_examples() -> list[dict[str, str]]:
                 "primary": primary,
                 "secondary": secondary,
                 "level": level,
-                "level_label": _LEVEL_LABELS[level],
-                "situation": f"{_SUBJECT_LABELS[subject]} · {_PLACE_LABELS[place]}",
+                "level_label": _level_label(level),
+                "situation": f"{_SUBJECT_LABELS[subject]} · {_PLACE_LABELS.get(place, place)}",
             }
         )
     return out

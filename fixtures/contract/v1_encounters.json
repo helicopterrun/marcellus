@@ -42,7 +42,7 @@
         "package",
         "person"
       ],
-      "outcome": "notify",
+      "outcome": "glance",
       "peak_severity": "alert",
       "place": "doors",
       "primary_event_id": "1785949022.704-r5",
@@ -101,7 +101,7 @@
         "dog",
         "person"
       ],
-      "outcome": "notify",
+      "outcome": "glance",
       "peak_severity": "alert",
       "place": "doors",
       "primary_event_id": "1785945482.704-r3",

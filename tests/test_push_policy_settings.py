@@ -12,22 +12,24 @@ from marcellus.push import ladder_policy, policy_settings
 
 
 def test_default_routing_table_matches_the_brief_exactly():
+    # Derived from the owner-approved "Balanced" preset (docs/ladder-v3.md
+    # §2.1): ignore->log, silent->notify, glance->quiet, urgent->urgent.
     assert policy_settings.default_settings()["routing_table"] == {
         "stranger": {
-            "street": "log", "yard": "quiet", "doors": "notify",
-            "private": "notify", "off_limits": "urgent",
+            "street": "log", "yard": "quiet", "doors": "quiet",
+            "private": "quiet", "off_limits": "urgent",
         },
         "known": {
             "street": "log", "yard": "log", "doors": "quiet",
             "private": "quiet", "off_limits": "quiet",
         },
         "animal": {
-            "street": "log", "yard": "quiet", "doors": "quiet",
-            "private": "quiet", "off_limits": "quiet",
+            "street": "log", "yard": "notify", "doors": "notify",
+            "private": "notify", "off_limits": "quiet",
         },
         "thing": {
-            "street": "log", "yard": "log", "doors": "log",
-            "private": "log", "off_limits": "quiet",
+            "street": "log", "yard": "log", "doors": "notify",
+            "private": "log", "off_limits": "notify",
         },
     }
 
@@ -53,26 +55,44 @@ def _valid() -> dict:
     return policy_settings.default_settings()
 
 
+def _valid_legacy() -> dict:
+    """A default doc as a pre-v3 (legacy-table) client would PUT it: no
+    `ladder`, so `routing_table`/`routing_table_v2` are validated (a body that
+    carries `ladder` has its legacy keys ignored and never validated)."""
+    data = _valid()
+    del data["ladder"]
+    return data
+
+
 def test_valid_default_settings_pass_validation():
     assert policy_settings.validate_settings(_valid()) == []
+    assert policy_settings.validate_settings(_valid_legacy()) == []
+
+
+def test_legacy_tables_are_not_validated_when_ladder_is_present():
+    data = _valid()
+    data["routing_table"]["stranger"]["doors"] = "screaming"
+    data["routing_table_v2"]["person"]["doors"] = "screaming"
+    data["outcomes"]["person"]["doors"] = "shout"
+    assert policy_settings.validate_settings(data) == []
 
 
 def test_rejects_invalid_level():
-    data = _valid()
+    data = _valid_legacy()
     data["routing_table"]["stranger"]["doors"] = "screaming"
     errors = policy_settings.validate_settings(data)
     assert any("routing_table.stranger.doors" in e for e in errors)
 
 
 def test_rejects_unknown_subject():
-    data = _valid()
+    data = _valid_legacy()
     data["routing_table"]["ghost"] = {p: "log" for p in policy_settings.PLACES}
     errors = policy_settings.validate_settings(data)
     assert any("unknown subject" in e for e in errors)
 
 
 def test_rejects_missing_place_in_routing_table():
-    data = _valid()
+    data = _valid_legacy()
     del data["routing_table"]["stranger"]["doors"]
     errors = policy_settings.validate_settings(data)
     assert any("routing_table.stranger.doors" in e for e in errors)
@@ -147,14 +167,16 @@ def test_guess_doors_patterns():
         assert policy_settings.guess_zone_class(name) == "doors"
 
 
-def test_guess_private_patterns():
+def test_guess_former_private_patterns_read_as_yard():
+    # `private` is retired (ladder v3): the former private keywords read as yard.
     for name in ("backyard", "side_yard", "rear_lot", "the_alley", "fence_line"):
-        assert policy_settings.guess_zone_class(name) == "private"
+        assert policy_settings.guess_zone_class(name) == "yard"
 
 
 def test_guess_street_pattern_wins_over_the_coincidental_private_substring():
     # "sidewalk" is a literal street pattern; it also happens to contain
-    # "side" (a private pattern) as a substring -- street must win.
+    # "side" (a former private pattern, now yard) as a substring -- street
+    # must win.
     assert policy_settings.guess_zone_class("sidewalk") == "street"
 
 
@@ -216,9 +238,27 @@ def test_load_settings_fills_in_missing_fields_from_an_older_partial_file(tmp_pa
 
 def test_normalize_settings_keeps_valid_zone_overrides():
     data = policy_settings.default_settings()
+    data["zone_overrides"] = {
+        "front_entry_person": {"thing": "silent", "person": "quiet", "animal": "urgent"},
+    }
+    normalized = policy_settings.normalize_settings(data)
+    assert normalized["zone_overrides"] == {
+        "front_entry_person": {"thing": "silent", "person": "quiet", "animal": "urgent"},
+    }
+
+
+def test_normalize_settings_translates_legacy_notify_zone_override_to_silent():
+    data = policy_settings.default_settings()
     data["zone_overrides"] = {"front_entry_person": {"thing": "notify"}}
     normalized = policy_settings.normalize_settings(data)
-    assert normalized["zone_overrides"] == {"front_entry_person": {"thing": "notify"}}
+    assert normalized["zone_overrides"] == {"front_entry_person": {"thing": "silent"}}
+
+
+def test_normalize_settings_reads_private_zone_class_as_yard():
+    data = policy_settings.default_settings()
+    data["zone_classes"] = {"garden": "private", "gate": "doors"}
+    normalized = policy_settings.normalize_settings(data)
+    assert normalized["zone_classes"] == {"garden": "yard", "gate": "doors"}
 
 
 def test_normalize_settings_drops_invalid_entries_within_a_zone_override():
@@ -251,8 +291,8 @@ def test_apply_settings_changes_what_the_ladder_evaluates_against():
     from marcellus.push.ladder import Snapshot, evaluate_ladder
 
     custom = policy_settings.default_settings()
-    table_key = "routing_table_v2" if "routing_table_v2" in custom else "routing_table"
-    custom[table_key]["thing"]["yard"] = "urgent"
+    custom["ladder"]["thing"]["yard"] = "urgent"
+    custom = policy_settings.normalize_settings(custom)
     policy_settings.apply_settings(custom)
 
     assert ladder_policy.TABLE["thing"]["yard"] == "urgent"
@@ -263,8 +303,7 @@ def test_apply_settings_changes_what_the_ladder_evaluates_against():
 def test_apply_settings_copies_the_table_so_later_mutation_does_not_leak():
     custom = policy_settings.default_settings()
     policy_settings.apply_settings(custom)
-    table_key = "routing_table_v2" if "routing_table_v2" in custom else "routing_table"
-    custom[table_key]["thing"]["yard"] = "urgent"
+    custom["ladder"]["thing"]["yard"] = "urgent"
     assert ladder_policy.TABLE["thing"]["yard"] != "urgent"
 
 
@@ -281,41 +320,40 @@ def test_zone_override_present_bypasses_the_base_table():
     from marcellus.push.ladder import Snapshot, evaluate_ladder
 
     settings = policy_settings.default_settings()
-    settings["routing_table"]["thing"]["doors"] = "log"  # base table says log
-    settings["zone_overrides"] = {"front_entry_person": {"thing": "notify"}}
+    settings["ladder"]["thing"]["doors"] = "ignore"  # base cell says Ignore (off)
+    settings["zone_overrides"] = {"front_entry_person": {"thing": "silent"}}
     policy_settings.apply_settings(settings)
 
     level = evaluate_ladder(
         Snapshot(subject="thing", place="doors", zone="front_entry_person")
     )
-    assert level == "notify"  # the override, not the base table's "log"
+    assert level == "silent"  # the override, not the base cell's suppression
 
 
 def test_zone_override_absent_falls_through_to_the_base_table():
     from marcellus.push.ladder import Snapshot, evaluate_ladder
 
     settings = policy_settings.default_settings()
-    settings["zone_overrides"] = {"front_entry_person": {"thing": "notify"}}
+    settings["ladder"]["thing"]["doors"] = "glance"
+    settings["zone_overrides"] = {"front_entry_person": {"thing": "silent"}}
     policy_settings.apply_settings(settings)
 
     # Different zone -- no override applies, ordinary table lookup runs.
     level = evaluate_ladder(Snapshot(subject="thing", place="doors", zone="side_door"))
-    rt = settings.get("routing_table_v2") or settings["routing_table"]
-    assert level == rt["thing"]["doors"]
+    assert level == "quiet"  # Glance cell
 
     # Same zone, different subject -- no override applies either.
     level = evaluate_ladder(
         Snapshot(subject="person", place="doors", zone="front_entry_person")
     )
-    table_key = "routing_table_v2" if "routing_table_v2" in settings else "routing_table"
-    subj_key = "person" if table_key == "routing_table_v2" else "stranger"
-    assert level == settings[table_key][subj_key]["doors"]
+    assert level == "quiet"  # person x doors is Glance by default
 
 
 def test_zone_override_does_not_affect_other_zones_in_the_same_place_class():
     from marcellus.push.ladder import Snapshot, evaluate_ladder
 
     settings = policy_settings.default_settings()
+    settings["ladder"]["animal"]["yard"] = "glance"  # explicit; default is Quiet
     settings["zone_overrides"] = {"driveway": {"animal": "log"}}
     policy_settings.apply_settings(settings)
 
@@ -323,7 +361,7 @@ def test_zone_override_does_not_affect_other_zones_in_the_same_place_class():
     # Another yard-classified zone, no override for it -- base table applies.
     assert evaluate_ladder(
         Snapshot(subject="animal", place="yard", zone="parking_spot")
-    ) == settings["routing_table"]["animal"]["yard"]
+    ) == "quiet"  # animal x yard is Glance (set above)
 
 
 def test_validate_rejects_bad_camera_optics():
@@ -421,8 +459,9 @@ def test_startup_never_reseeds_over_user_edits(tmp_path: Path):
 
 def _pre_v3_doc() -> dict:
     """A settings doc as an S1-era sidecar wrote it: four-subject outcomes,
-    authoritative family booleans."""
+    authoritative family booleans, no `ladder` (pre-v3)."""
     doc = policy_settings.default_settings()
+    del doc["ladder"]
     for subject in policy_settings.SUBJECTS_V3_EXTRA:
         del doc["outcomes"][subject]
         del doc["routing_table_v2"][subject]
@@ -437,17 +476,20 @@ def test_v3_seeding_family_boolean_off_becomes_off_row(tmp_path: Path):
     path.write_text(json.dumps(doc))
 
     settings = policy_settings.startup(path)
+    assert all(v == "ignore" for v in settings["ladder"]["opening"].values())
     assert all(v == "off" for v in settings["outcomes"]["opening"].values())
     assert all(v == "log" for v in settings["routing_table_v2"]["opening"].values())
-    # Untouched booleans seed the default rows.
-    assert settings["outcomes"]["package"] == policy_settings.DEFAULT_EXTRA_OUTCOMES["package"]
+    # Untouched booleans seed the (pre-v3) default rows, which the v3
+    # migration then folds into `ladder` (notify -> silent, private -> yard).
+    assert settings["ladder"]["package"]["yard"] == "silent"
+    assert settings["ladder"]["package"]["off_limits"] == "glance"
     # Derived booleans reflect the seeded rows.
     assert settings["live_activities"]["openings"] is False
     assert settings["live_activities"]["package"] is True
     policy_settings.reset_for_tests()
 
 
-def test_v3_seeding_alert_all_changes_bumps_glance_to_notify(tmp_path: Path):
+def test_v3_seeding_alert_all_changes_bumps_glance_to_silent(tmp_path: Path):
     path = tmp_path / "push_settings.json"
     doc = _pre_v3_doc()
     doc["live_activities"]["alert_all_changes"] = True
@@ -455,7 +497,10 @@ def test_v3_seeding_alert_all_changes_bumps_glance_to_notify(tmp_path: Path):
 
     settings = policy_settings.startup(path)
     for subject in policy_settings.SUBJECTS_V3_EXTRA:
+        assert "glance" not in settings["ladder"][subject].values()
         assert "glance" not in settings["outcomes"][subject].values()
+    # Seeded notify (the old alert-all pop) migrates to Quiet (`silent`).
+    assert settings["ladder"]["package"]["yard"] == "silent"
     assert settings["outcomes"]["package"]["yard"] == "notify"
     # The field itself is retired: derived False from here on.
     assert settings["live_activities"]["alert_all_changes"] is False
@@ -470,10 +515,12 @@ def test_v3_seeding_is_idempotent_and_never_reseeds_user_edits(tmp_path: Path):
     # User tunes a seeded row; a later startup must not re-seed over it.
     doc = json.loads(path.read_text())
     assert doc["v"] == policy_settings.SETTINGS_VERSION
-    doc["outcomes"]["bin"]["street"] = "off"
+    assert doc["ladder"]["bin"]["doors"] == "silent"  # seeded from the default
+    doc["ladder"]["bin"]["doors"] = "ignore"
     path.write_text(json.dumps(doc))
     settings = policy_settings.startup(path)
-    assert settings["outcomes"]["bin"]["street"] == "off"
+    assert settings["ladder"]["bin"]["doors"] == "ignore"
+    assert settings["outcomes"]["bin"]["doors"] == "off"
     policy_settings.reset_for_tests()
 
 
@@ -488,8 +535,19 @@ def test_retired_family_booleans_are_derived_not_stored():
 
 
 def test_derived_person_restricted_follows_off_limits_cell():
+    # Person Ignore is only Log (never `off`), so a person can't be fully
+    # switched off: person_restricted stays derived True.
     doc = policy_settings.default_settings()
-    doc["outcomes"]["person"]["off_limits"] = "off"
+    doc["ladder"]["person"]["off_limits"] = "ignore"
     merged = policy_settings.normalize_settings(doc)
-    assert merged["live_activities"]["person_restricted"] is False
+    assert merged["outcomes"]["person"]["off_limits"] == "log"
+    assert merged["live_activities"]["person_restricted"] is True
     assert merged["live_activities"]["person"] is True
+
+
+def test_derived_family_boolean_follows_a_fully_ignored_row():
+    doc = policy_settings.default_settings()
+    doc["ladder"]["opening"] = {p: "ignore" for p in policy_settings.PLACES}
+    merged = policy_settings.normalize_settings(doc)
+    assert merged["live_activities"]["openings"] is False
+    assert merged["live_activities"]["package"] is True

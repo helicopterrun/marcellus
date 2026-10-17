@@ -47,6 +47,7 @@
       "opening"
     ],
     "enabled": false,
+    "ladder_version": 3,
     "transport": "mock"
   },
   "scrub_cache": {

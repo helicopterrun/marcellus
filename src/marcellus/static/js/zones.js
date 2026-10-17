@@ -1,15 +1,17 @@
 // Zone handling settings: place classes, per-zone overrides, camera neighbors.
 (function () {
-  var PLACES = ["street", "yard", "doors", "private", "off_limits"];
+  var PLACES = ["street", "yard", "doors", "off_limits"];
   var PLACE_LABELS = {
     // Display names mirror the app's (AttentionSettingsModel.swift) so the
-    // two surfaces speak one vocabulary.
+    // two surfaces speak one vocabulary. Ladder v3: four places.
     street: "Public",
-    yard: "Semi-private",
-    doors: "Entry / exit",
-    private: "Private",
+    yard: "Grounds",
+    doors: "Entrances",
     off_limits: "Restricted",
   };
+  // `private` is retired and read as `yard` (ladder v3 §1).
+  function normClass(c) { return c === "private" ? "yard" : c; }
+  function placeLabel(c) { return PLACE_LABELS[normClass(c)] || String(c); }
 
   var banner = document.getElementById("zones-banner");
   var zonesList = document.getElementById("zones-list");
@@ -25,6 +27,17 @@
   var showBanner = SC.banner(banner);
   var fetchJson = SC.fetchJson;
   var el = SC.el;
+
+  // Ladder v3: `ladder` is the source of truth. The GET also serves derived
+  // legacy keys (outcomes, routing_table_v2); never send them back.
+  function putBody(d, useRev) {
+    var body = Object.assign({ rev: useRev }, d);
+    if (body.ladder) {
+      delete body.outcomes;
+      delete body.routing_table_v2;
+    }
+    return body;
+  }
 
   function markDirty() {
     dirty = true;
@@ -91,9 +104,9 @@
     var classRow = el("div", { style: "margin:0.25em 0" });
     classRow.appendChild(el("span", { text: "Place: ", class: "help" }));
     var select = el("select", {});
-    var current = (doc.zone_classes || {})[zone.zone] || "";
+    var current = normClass((doc.zone_classes || {})[zone.zone] || "");
     var guessOpt = el("option", {
-      value: "", text: "guess: " + PLACE_LABELS[zone.guessed_class],
+      value: "", text: "guess: " + placeLabel(zone.guessed_class),
     });
     select.appendChild(guessOpt);
     PLACES.forEach(function (p) {
@@ -212,7 +225,7 @@
     return fetch("/v1/push/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(Object.assign({ rev: useRev }, doc)),
+      body: JSON.stringify(putBody(doc, useRev)),
     });
   }
 

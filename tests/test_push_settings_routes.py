@@ -123,54 +123,87 @@ def test_put_persists_and_is_reflected_in_subsequent_get(client: TestClient, tmp
 
 def test_put_round_trips_all_seven_subjects(client: TestClient):
     new_settings = policy_settings.default_settings()
-    new_settings["outcomes"]["package"]["doors"] = "notify"
-    new_settings["outcomes"]["opening"]["yard"] = "off"
+    new_settings["ladder"]["package"]["doors"] = "silent"
+    new_settings["ladder"]["opening"]["yard"] = "ignore"
 
     assert client.put("/v1/push/settings", json=new_settings).status_code == 200
     stored = client.get("/v1/push/settings").json()["settings"]
+    assert set(stored["ladder"]) == set(policy_settings.SUBJECTS_V3)
+    assert stored["ladder"]["package"]["doors"] == "silent"
+    assert stored["ladder"]["opening"]["yard"] == "ignore"
+    # Legacy views are derived from the ladder: silent -> notify, ignore -> off/log.
     assert set(stored["outcomes"]) == set(policy_settings.SUBJECTS_V3)
     assert stored["outcomes"]["package"]["doors"] == "notify"
     assert stored["outcomes"]["opening"]["yard"] == "off"
-    # v2 stays in lockstep, off spelling as log.
     assert stored["routing_table_v2"]["package"]["doors"] == "notify"
     assert stored["routing_table_v2"]["opening"]["yard"] == "log"
+
+
+def test_legacy_outcomes_put_translates_into_ladder(client: TestClient):
+    """An older client (no `ladder` key) editing `outcomes` is translated:
+    notify -> silent, off -> ignore, alarm -> urgent."""
+    legacy = policy_settings.default_settings()
+    del legacy["ladder"]
+    legacy["outcomes"]["package"]["doors"] = "notify"
+    # `private` merges into yard (louder wins), so the legacy client sets both.
+    legacy["outcomes"]["opening"]["yard"] = "off"
+    legacy["outcomes"]["opening"]["private"] = "off"
+    legacy["outcomes"]["bin"]["street"] = "alarm"
+
+    assert client.put("/v1/push/settings", json=legacy).status_code == 200
+    stored = client.get("/v1/push/settings").json()["settings"]
+    assert stored["ladder"]["package"]["doors"] == "silent"
+    assert stored["ladder"]["opening"]["yard"] == "ignore"
+    assert stored["ladder"]["bin"]["street"] == "urgent"
 
 
 def test_four_subject_put_preserves_stored_v3_rows(client: TestClient):
     """An older app's PUT (its Codable only knows the classic four subjects)
     must not reset the V3 rows the user tuned from a newer build."""
     tuned = policy_settings.default_settings()
-    tuned["outcomes"]["package"]["yard"] = "alarm"
+    tuned["ladder"]["package"]["yard"] = "urgent"
     assert client.put("/v1/push/settings", json=tuned).status_code == 200
 
+    # Legacy body: no `ladder`, and no rows for the extra subjects.
     old_body = policy_settings.default_settings()
+    del old_body["ladder"]
     for subject in policy_settings.SUBJECTS_V3_EXTRA:
         del old_body["outcomes"][subject]
         del old_body["routing_table_v2"][subject]
     assert client.put("/v1/push/settings", json=old_body).status_code == 200
 
     stored = client.get("/v1/push/settings").json()["settings"]
+    assert stored["ladder"]["package"]["yard"] == "urgent"
     assert stored["outcomes"]["package"]["yard"] == "alarm"
     assert stored["routing_table_v2"]["package"]["yard"] == "urgent"
 
 
 def test_outcomes_unknown_subject_still_400s(client: TestClient):
     bad = policy_settings.default_settings()
-    bad["outcomes"]["drone"] = {"yard": "notify"}
+    bad["ladder"]["drone"] = {"yard": "silent"}
     resp = client.put("/v1/push/settings", json=bad)
+    assert resp.status_code == 400
+    assert "unknown subject" in json.dumps(resp.json())
+
+    # Legacy body (no `ladder`) with an unknown `outcomes` subject still 400s.
+    legacy = policy_settings.default_settings()
+    del legacy["ladder"]
+    legacy["outcomes"]["drone"] = {"yard": "notify"}
+    resp = client.put("/v1/push/settings", json=legacy)
     assert resp.status_code == 400
     assert "unknown subject" in json.dumps(resp.json())
 
 
 def test_put_persists_zone_overrides_and_get_returns_them(client: TestClient):
     new_settings = policy_settings.default_settings()
+    # Legacy `notify` is accepted on input and stored as `silent`.
     new_settings["zone_overrides"] = {"front_entry_person": {"thing": "notify"}}
 
     put_resp = client.put("/v1/push/settings", json=new_settings)
     assert put_resp.status_code == 200
 
     stored = client.get("/v1/push/settings").json()["settings"]
-    assert stored["zone_overrides"] == {"front_entry_person": {"thing": "notify"}}
+    assert stored["zone_overrides"] == {"front_entry_person": {"thing": "silent"}}
 
 
 def test_put_rejects_invalid_zone_override(client: TestClient):
@@ -194,16 +227,21 @@ def test_put_cleans_up_empty_zone_override_entries(client: TestClient):
 def test_put_applies_immediately_to_the_routing_engine(client: TestClient):
     from marcellus.push.ladder import Snapshot, evaluate_ladder
 
-    # The outcomes table is the authority when present (merged ladder,
-    # 2026-08-16) -- a new client edits it; the legacy levels are derived.
+    # The v3 `ladder` is the authority when present -- a new client edits
+    # it; the legacy outcomes / routing_table_v2 views are derived.
     new_settings = policy_settings.default_settings()
-    new_settings["outcomes"]["thing"]["yard"] = "alarm"
+    new_settings["ladder"]["thing"]["yard"] = "urgent"
     client.put("/v1/push/settings", json=new_settings)
 
     assert evaluate_ladder(Snapshot(subject="thing", place="yard")) == "urgent"
 
-    # An old client body (no outcomes key) still applies via derivation.
+    # An old client body (no ladder, no outcomes key) still applies via
+    # routing_table_v2 translation.
     legacy = policy_settings.default_settings()
+    legacy["ladder"]["thing"]["yard"] = "ignore"
+    client.put("/v1/push/settings", json=legacy)
+    assert evaluate_ladder(Snapshot(subject="thing", place="yard")) != "urgent"
+    del legacy["ladder"]
     del legacy["outcomes"]
     legacy["routing_table_v2"]["thing"]["yard"] = "urgent"
     client.put("/v1/push/settings", json=legacy)
@@ -212,6 +250,8 @@ def test_put_applies_immediately_to_the_routing_engine(client: TestClient):
 
 def test_put_rejects_invalid_level(client: TestClient):
     bad = policy_settings.default_settings()
+    # routing_table is not validated at all when `ladder` is in the body.
+    del bad["ladder"]
     bad["routing_table"]["stranger"]["doors"] = "screaming"
     resp = client.put("/v1/push/settings", json=bad)
     assert resp.status_code == 400
@@ -222,9 +262,15 @@ def test_put_rejects_invalid_level(client: TestClient):
 
 def test_put_rejects_unknown_subject(client: TestClient):
     bad = policy_settings.default_settings()
+    del bad["ladder"]  # routing_table is only validated for legacy bodies
     bad["routing_table"]["ghost"] = {p: "log" for p in policy_settings.PLACES}
     resp = client.put("/v1/push/settings", json=bad)
     assert resp.status_code == 400
+
+    # And an unknown ladder value is rejected for v3 bodies.
+    bad_ladder = policy_settings.default_settings()
+    bad_ladder["ladder"]["person"]["yard"] = "screaming"
+    assert client.put("/v1/push/settings", json=bad_ladder).status_code == 400
 
 
 def test_put_unknown_top_level_field_does_not_fail(client: TestClient):
@@ -269,7 +315,8 @@ def test_put_round_trips_zone_page_fields(client: TestClient):
     assert client.put("/v1/push/settings", json=doc).status_code == 200
     saved = client.get("/v1/push/settings").json()["settings"]
     assert saved["zone_classes"] == {"front_door": "doors", "garage": "off_limits"}
-    assert saved["zone_overrides"] == {"sidewalk": {"person": "notify"}}
+    # Legacy `notify` is stored and reported as `silent`.
+    assert saved["zone_overrides"] == {"sidewalk": {"person": "silent"}}
     assert saved["camera_neighbors"] == {"doorbell": ["street"]}
 
     # An app-style PUT that omits camera_neighbors must not wipe it...

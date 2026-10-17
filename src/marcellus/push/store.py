@@ -108,7 +108,7 @@ def upsert_device(
     app_version: str = "",
     cameras: list[str] | None = None,
     labels: list[str] | None = None,
-    min_severity: str = "alert",
+    min_severity: str = "detection",
     schema_version: int = 1,
     timezone_name: str = "",
     location: dict[str, float] | None = None,

@@ -39,6 +39,8 @@ from marcellus.push.cards import (
     DEESCALATE,
     ENRICH,
     ESCALATE,
+    GLANCE_FALLBACK_LEVELS,
+    PUSHABLE_LEVELS,
     RESOLVE,
     SUPPRESSED,
     Card,
@@ -47,6 +49,7 @@ from marcellus.push.cards import (
     should_sound,
     urgent_resound_due,
 )
+from marcellus.push.ladder_policy import SYSTEM_CARD_LEVEL
 from marcellus.push.models import Device
 from marcellus.push.payload import APNS_MAX_PAYLOAD_BYTES, payload_size
 from marcellus.push.transport import PushTransport
@@ -57,26 +60,77 @@ logger = logging.getLogger(__name__)
 #: breaking change to the fields below; the app pins against this.
 CONTRACT_VERSION = 1
 
-#: Level -> APNs mapping (design doc §4). `log` and `suppressed` never push;
-#: everything else does, at the given `interruption-level`, with sound
-#: decided separately by `cards.should_sound` / the urgent re-sound timer --
-#: this table only says *whether a level can ever carry sound*, matching
-#: `cards.SOUNDED_LEVELS`.
+#: Level -> APNs mapping (ladder v3 §5.1). Whether a level pushes a card at
+#: all is `cards.PUSHABLE_LEVELS` -- the one definition -- so this table only
+#: adds the `interruption-level` each level carries; sound is decided
+#: separately by `cards.should_sound` / the urgent re-sound timer.
 LEVEL_APNS: dict[str, dict[str, Any]] = {
-    "urgent": {"push": True, "interruption_level": "time-sensitive"},
-    "notify": {"push": True, "interruption_level": "active"},
-    # `quiet` ("Noted") stopped pushing entirely on user feedback 2026-08-14:
-    # a parked car re-detected every couple of minutes stacked seven passive
-    # rows in 11 minutes. Noted items live in the app's history, not in
-    # Notification Center. interruption_level stays for demotion paths.
-    "quiet": {"push": False, "interruption_level": "passive"},
-    "log": {"push": False, "interruption_level": None},
-    SUPPRESSED: {"push": False, "interruption_level": None},
+    "urgent": {"interruption_level": "time-sensitive"},
+    # Quiet: passive, never a sound, a kept Notification Center row.
+    "silent": {"interruption_level": "passive"},
+    # Glance: a Live Activity, no card push (2026-08-14: a parked car
+    # re-detected every couple of minutes stacked seven passive rows in 11
+    # minutes). Delivered as a `silent` card only to a device that can't show
+    # a Live Activity (§5.3, `send_card_mutation`).
+    "quiet": {"interruption_level": "passive"},
+    "log": {"interruption_level": None},
+    SUPPRESSED: {"interruption_level": None},
 }
+for _level, _row in LEVEL_APNS.items():
+    _row["push"] = _level in PUSHABLE_LEVELS
+del _level, _row
+
+#: System cards (test pushes, the Connection Doctor round trip) keep their own
+#: delivery outside the ladder (v3 §6): an active push with sound, as before.
+SYSTEM_CARD_APNS: dict[str, Any] = {"push": True, "interruption_level": "active"}
 
 
 def should_push(level: str) -> bool:
-    return bool(LEVEL_APNS.get(level, {}).get("push", False))
+    """Whether a card at `level` pushes to every eligible device: a pushable
+    ladder level, or a system card (its own path, v3 §6). The Glance fallback
+    (§5.3) is separate: see `needs_card_payload`."""
+    return level in PUSHABLE_LEVELS or level == SYSTEM_CARD_LEVEL
+
+
+def needs_card_payload(level: str, mutation: str) -> bool:
+    """Whether the caller must build a card payload for this mutation at all:
+    a pushable level, a RESOLVE (always gets its final silent update), or a
+    Glance level (`quiet`), whose payload goes only to devices that can't
+    show a Live Activity, as a `silent` card."""
+    return should_push(level) or mutation == RESOLVE or level in GLANCE_FALLBACK_LEVELS
+
+
+def ephemeral_exempt(card: Card, *, fallback_device: bool = False) -> bool:
+    """Whether a story's resolve keeps its Notification Center row (§5.2): the
+    owner's rule is that a Quiet or Urgent row stays until opened or cleared,
+    so `ephemeral = not kept_row and not zone_override_hit` -- `kept_row`
+    being sticky once any `silent`/`urgent` card push was delivered for the
+    story (even if it was later lifted to Glance). On a device that got the
+    Glance fallback (`fallback_device`), that silent row counts too."""
+    return (
+        card.kept_row
+        or card.zone_override_hit
+        or (fallback_device and card.fallback_row)
+    )
+
+
+def as_silent_card(payload: dict[str, Any]) -> dict[str, Any]:
+    """A Glance card payload re-shaped as the `silent` card a device without
+    Live Activity support gets instead (§5.3): passive, no sound,
+    `card.silent`, `level: "silent"`."""
+    out = dict(payload)
+    out["aps"] = dict(payload.get("aps", {}))
+    out["aps"].pop("sound", None)
+    out["aps"]["interruption-level"] = "passive"
+    out["aps"]["category"] = "card.silent"
+    out["level"] = "silent"
+    return out
+
+
+def _level_apns(level: str) -> dict[str, Any]:
+    if level == SYSTEM_CARD_LEVEL:
+        return SYSTEM_CARD_APNS
+    return LEVEL_APNS.get(level, {})
 
 
 def sound_name_for_card(
@@ -221,7 +275,7 @@ def build_card_payload(
     there is no sound. `sound` is the one field the caller (which alone
     knows the sound-accounting outcome) must supply rather than derive here.
     """
-    interruption_level = LEVEL_APNS.get(card.level, {}).get("interruption_level")
+    interruption_level = _level_apns(card.level).get("interruption_level")
     # Silent enriches: same level, new facts — no new banner/sound (§2).
     if mutation == ENRICH:
         interruption_level = "passive"
@@ -297,7 +351,14 @@ def _fit_to_budget(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-_LEVEL_TO_SEVERITY = {"urgent": "alert", "notify": "alert", "quiet": "detection", "log": "log"}
+#: Card level -> device-subscription severity (v3 §5.4). Glance and Quiet are
+#: `detection`: a device registered at the old `alert` default silently lost
+#: every Glance (the 2026-09-22 app bug), hence the registration default is
+#: now `detection` too. System cards (`notify`) stay `alert`.
+_LEVEL_TO_SEVERITY = {
+    "urgent": "alert", "silent": "detection", "quiet": "detection", "log": "log",
+    SYSTEM_CARD_LEVEL: "alert",
+}
 _SEVERITY_INDEX = {"log": 0, "detection": 1, "alert": 2}
 
 _SOUND_RATE_KEY = "_card_sound"
@@ -384,6 +445,8 @@ async def send_card_mutation(
     encounter_id: str = "",
     event_camera: str = "",
     cameras_path: list[str] | None = None,
+    fallback_out: list[str] | None = None,
+    la_available: bool = True,
 ) -> int:
     """Persist `card` and send to eligible devices, honoring per-device
     filtering, snooze, quiet resolves, and the global sounding rate cap.
@@ -401,7 +464,14 @@ async def send_card_mutation(
     so the durable history row doesn't land on top of the still-visible LA.
     Non-RESOLVE mutations for demoted devices always deliver passive --
     la_first and la_only behave identically there; the NSE must fire to
-    pre-warm snapshots for the Live Activity."""
+    pre-warm snapshots for the Live Activity.
+
+    A Glance (`quiet`) card goes only to devices that can't show a Live
+    Activity, as a `silent` card (§5.3); `fallback_out`, when given, collects
+    the device ids that got that fallback (for the decision trace).
+    `la_available` false (Live Activities switched off server-wide,
+    `push.delivery_la_enabled`) means no device can show one: every device
+    gets the Glance fallback, exactly like a device without LA support."""
     import time as _time
 
     from marcellus.push import store
@@ -416,35 +486,36 @@ async def send_card_mutation(
     if payload is None:
         return 0
 
-    # Resolve visibility (alerts-slice2 §E, sidecar policy change): every
-    # resolve gets one final silent (quiet, `.passive`, no sound) update --
-    # this used to skip peak<=quiet cards outright, which meant they never
-    # got a resolve push at all. Now they get an *ephemeral* one (removes
-    # the delivered row) instead of no push, and a story that reached
-    # `notify`/`urgent` -- or ever tripped a zone override -- keeps a
-    # non-ephemeral resolve so the banner is replaced in place, never
-    # removed.
+    # Resolve visibility (alerts-slice2 §E; ladder v3 §5.2): every resolve
+    # gets one final silent (`.passive`, no sound) update. A story that
+    # never left a kept row -- no Quiet (`silent`) or Urgent card push was
+    # ever delivered for it, and no zone override fired -- gets an
+    # *ephemeral* one (the app removes the delivered row at once); a story
+    # that did keeps a non-ephemeral resolve so its row is replaced in place,
+    # never removed (`ephemeral_exempt`).
     if mutation == RESOLVE:
-        from marcellus.push import ladder_policy
-        quiet_idx = ladder_policy.LEVELS.index("quiet")
-        peak_idx = _level_index(card.peak_level)
         payload = dict(payload)
         payload["aps"] = dict(payload["aps"])
         payload["aps"].pop("sound", None)
         payload["aps"]["interruption-level"] = "passive"
-        # Additive (deep_link precedent, ~payload builder above): a resolve
-        # push for a story that never exceeded `quiet` and never tripped a
-        # zone override is scoped to the event's lifetime -- the app removes
-        # it from Notification Center at once. Always explicit, never
-        # omitted: the app reads absent as "old sidecar" and falls back to
-        # its 24 h sweep, while an explicit false means "user-chosen
-        # critical story, keep indefinitely".
-        worth_keeping = peak_idx > quiet_idx or card.zone_override_hit
-        payload["ephemeral"] = not worth_keeping
+        # Always explicit, never omitted: the app reads absent as "old
+        # sidecar" and falls back to its 24 h sweep, while an explicit false
+        # means "kept row, keep indefinitely".
+        payload["ephemeral"] = not ephemeral_exempt(card)
+
+    # Glance (§5.3): a `quiet` card is a Live Activity and pushes no card --
+    # except to a device that can't show one (no push-to-start token, or
+    # `la_capable` false, e.g. the Mac), which gets it as a `silent` card
+    # (passive, no sound, `card.silent`, kept) instead of nothing.
+    glance_card = card.level in GLANCE_FALLBACK_LEVELS
+    glance_story = card.peak_level in GLANCE_FALLBACK_LEVELS
 
     has_sound = bool(payload.get("aps", {}).get("sound"))
 
     sent = 0
+    fallback_sent: list[str] = []
+    kept_delivered = False
+    fallback_delivered = False
     for device in devices:
         if not _device_eligible(device, camera=camera, labels=labels, card_level=card.level):
             continue
@@ -452,6 +523,25 @@ async def send_card_mutation(
             continue
 
         dev_payload = payload
+        is_fallback = False
+        device_la = device.can_live_activity and la_available
+        if mutation == RESOLVE and not device_la and card.fallback_row:
+            dev_payload = dict(payload)
+            dev_payload["ephemeral"] = not ephemeral_exempt(card, fallback_device=True)
+        if glance_card or (mutation == RESOLVE and glance_story):
+            if device_la:
+                if mutation != RESOLVE:
+                    continue  # its Live Activity is the Glance surface
+            else:
+                dev_payload = as_silent_card(dev_payload)
+                is_fallback = mutation != RESOLVE
+                logger.info(
+                    "push: glance fallback -> silent card device=%s card_key=%s "
+                    "mutation=%s la_reason=%s",
+                    device.device_id, card.card_key, mutation,
+                    "device_not_la_capable" if la_available else "la_disabled",
+                )
+                fallback_sent.append(device.device_id)
         demoted = device.apns_token in demote_tokens
         if demoted and suppress_demoted and mutation == RESOLVE:
             # The one durable history row still gets written -- just after
@@ -463,7 +553,7 @@ async def send_card_mutation(
             )
             continue
         if demoted:
-            dev_payload = dict(payload)
+            dev_payload = dict(dev_payload)
             dev_payload["aps"] = dict(dev_payload["aps"])
             dev_payload["aps"].pop("sound", None)
             dev_payload["aps"]["interruption-level"] = "passive"
@@ -522,6 +612,19 @@ async def send_card_mutation(
         )
         conn.commit()
         sent += 1
+        if result.ok and mutation != RESOLVE:
+            if is_fallback:
+                fallback_delivered = True
+            elif card.level in PUSHABLE_LEVELS:
+                kept_delivered = True
+    if (kept_delivered and not card.kept_row) or (fallback_delivered and not card.fallback_row):
+        card.kept_row = card.kept_row or kept_delivered
+        card.fallback_row = card.fallback_row or fallback_delivered
+        card_store.mark_kept_rows(
+            conn, card.card_key, kept_row=kept_delivered, fallback_row=fallback_delivered,
+        )
+    if fallback_out is not None:
+        fallback_out.extend(fallback_sent)
     logger.info(
         "push: card mutation=%s level=%s card_key=%s sound=%s devices=%d",
         mutation, card.level, card.card_key, has_sound, sent,
