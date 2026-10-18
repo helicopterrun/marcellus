@@ -654,6 +654,28 @@ class EncountersSection(BaseModel):
     # ground. Config always wins over the zone-derived graph.
     not_adjacent: list[list[str]] = Field(default_factory=list)
 
+    # Camera pairs that SHARE A VIEW (see the same place, not a hand-off),
+    # same `[camera_a, camera_b]` pair format as `adjacency`. Learned from
+    # topology samples when unset; config wins over the learned verdict. An
+    # overlapping pair's concurrent samples are excluded from walking times.
+    overlap: list[list[str]] = Field(default_factory=list)
+
+    # Pairs that never share a view, even if the learner would say so.
+    # Wins over `overlap`.
+    not_overlap: list[list[str]] = Field(default_factory=list)
+
+    # A topology sample whose gap is at most this many seconds (including any
+    # negative gap -- the two atoms overlapping in time by any amount) counts
+    # as "seen together" when judging whether a pair shares a view.
+    overlap_concurrent_max_s: float = 1.0
+
+    # A pair is learned as overlapping when at least this fraction of its
+    # eligible samples were seen together (needs `transition_min_samples`).
+    # 0.65, not 0.6: on the NVR's 14 days (2026-10-17) the same-place pairs
+    # sat at 0.69-0.98 and shed + stairway-wide (whose view only catches the
+    # stairway's edge) at 0.60.
+    overlap_min_fraction: float = 0.65
+
     # How long a sealed encounter (and its members/decisions) survives
     # before the reconciler's hourly prune drops it -- mirrors
     # `face_capture.retention_days`/`scrub`'s retention fields. Unsealed

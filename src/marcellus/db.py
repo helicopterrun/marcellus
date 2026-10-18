@@ -626,6 +626,21 @@ CREATE TABLE IF NOT EXISTS camera_transitions (
     PRIMARY KEY (cam_a, cam_b, family)
 );
 
+-- Camera overlap: per undirected camera pair (cam_a < cam_b), whether the two
+-- cameras share a view -- learned from the share of topology samples seen
+-- together (encounters/transitions.py). Read-mostly derived state like
+-- `camera_transitions`; rebuildable by re-running the learner.
+CREATE TABLE IF NOT EXISTS camera_overlap (
+    cam_a      TEXT NOT NULL,
+    cam_b      TEXT NOT NULL,
+    concurrent INTEGER NOT NULL DEFAULT 0,
+    samples    INTEGER NOT NULL DEFAULT 0,
+    overlap    INTEGER NOT NULL DEFAULT 0,
+    source     TEXT NOT NULL DEFAULT 'default',
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (cam_a, cam_b)
+);
+
 -- M-2: one row per doorbell-LCD action attempt (preset/image/custom-text),
 -- success or failure -- the audit trail for "what did we tell the console
 -- to show" independent of push delivery.

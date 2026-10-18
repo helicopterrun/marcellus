@@ -15,7 +15,12 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 
 from marcellus import db
-from marcellus.encounters.transitions import TransitionStats, load_transitions
+from marcellus.encounters.transitions import (
+    OverlapStats,
+    TransitionStats,
+    load_overlap,
+    load_transitions,
+)
 from marcellus.errors import error_detail
 from marcellus.models.wire import CameraNeighboursResponse, TopologyResponse
 from marcellus.routes._deps import settings_of as _settings
@@ -49,24 +54,53 @@ def _edge_transitions(
     return {f"{cam_a}>{cam_b}": forward, f"{cam_b}>{cam_a}": backward}
 
 
+def _pairs(raw: list[list[str]]) -> set[frozenset[str]]:
+    return {frozenset(p) for p in raw if len(p) == 2 and p[0] != p[1]}
+
+
+def _overlap_for(
+    settings: Any, stored: dict[frozenset[str], OverlapStats], cam_a: str, cam_b: str
+) -> OverlapStats:
+    """Config wins at read time (so an edit applies before the next learn):
+    `not_overlap`, then `overlap`, then the stored row, then the default."""
+    pair = frozenset((cam_a, cam_b))
+    row = stored.get(pair)
+    concurrent = row.concurrent if row else 0
+    samples = row.samples if row else 0
+    enc = settings.encounters
+    if pair in _pairs(enc.not_overlap):
+        return OverlapStats(False, "config", concurrent, samples)
+    if pair in _pairs(enc.overlap):
+        return OverlapStats(True, "config", concurrent, samples)
+    return row if row is not None else OverlapStats(False, "default", 0, 0)
+
+
+def _load_all(
+    conn: Any,
+) -> tuple[dict[tuple[str, str, str], TransitionStats], dict[frozenset[str], OverlapStats]]:
+    return load_transitions(conn), load_overlap(conn)
+
+
 @v1_router.get("/topology", response_model=TopologyResponse)
 async def topology(request: Request) -> dict[str, Any]:
     settings = _settings(request)
     adjacency = _adjacency_for(request)
     graph = adjacency.to_json()
 
-    def _load(conn: Any) -> dict[tuple[str, str, str], TransitionStats]:
-        return load_transitions(conn)
+    transitions, stored_overlap = await db.with_sidecar(settings.sidecar.db_path, _load_all)
 
-    transitions = await db.with_sidecar(settings.sidecar.db_path, _load)
-
-    edges = [
-        dict(
-            edge,
-            transitions=_edge_transitions(transitions, edge["a"], edge["b"]),
+    edges = []
+    for edge in graph["edges"]:
+        ov = _overlap_for(settings, stored_overlap, edge["a"], edge["b"])
+        edges.append(
+            dict(
+                edge,
+                transitions=_edge_transitions(transitions, edge["a"], edge["b"]),
+                overlap=ov.overlap,
+                overlap_source=ov.source,
+                overlap_stats={"concurrent": ov.concurrent, "samples": ov.samples},
+            )
         )
-        for edge in graph["edges"]
-    ]
     return {"cameras": graph["cameras"], "edges": edges}
 
 
@@ -78,14 +112,9 @@ async def camera_neighbours(camera: str, request: Request) -> dict[str, Any]:
     if camera not in graph["cameras"]:
         raise HTTPException(status_code=404, detail=error_detail("not_found", "unknown camera"))
 
-    def _load(conn: Any) -> dict[tuple[str, str, str], TransitionStats]:
-        return load_transitions(conn)
+    transitions, stored_overlap = await db.with_sidecar(settings.sidecar.db_path, _load_all)
 
-    transitions = await db.with_sidecar(settings.sidecar.db_path, _load)
-
-    zones_by_pair = {
-        frozenset((e["a"], e["b"])): e["zones"] for e in graph["edges"]
-    }
+    zones_by_pair = {frozenset((e["a"], e["b"])): e["zones"] for e in graph["edges"]}
     neighbours = []
     for other in sorted(adjacency.neighbours(camera)):
         zones = zones_by_pair.get(frozenset((camera, other)), [])
@@ -94,5 +123,14 @@ async def camera_neighbours(camera: str, request: Request) -> dict[str, Any]:
             for (a, b, family), stats in transitions.items()
             if a == camera and b == other
         }
-        neighbours.append({"camera": other, "zones": zones, "transitions": cam_transitions})
+        ov = _overlap_for(settings, stored_overlap, camera, other)
+        neighbours.append(
+            {
+                "camera": other,
+                "zones": zones,
+                "transitions": cam_transitions,
+                "overlap": ov.overlap,
+                "overlap_source": ov.source,
+            }
+        )
     return {"camera": camera, "neighbours": neighbours}
