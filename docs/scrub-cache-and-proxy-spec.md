@@ -319,6 +319,24 @@ Recommend the **ffmpeg `tile`** path for completed buckets (cheap, one process) 
 
 **Default output format: JPEG, not WebP** — reversed from the earlier draft. Measured (M4, 2026-07-30): a real 96-cell sheet built from consecutive `alley-wide` keyframes came out **604 KB as JPEG (`-q:v 8`) vs. 827 KB as WebP (`-lossless 0 -q:v 75`)** — WebP did not win on real (noisy) camera content the way the estimate assumed. Worse, omitting `-lossless 0` on the WebP encoder silently produces a **near-lossless ~1 MB file** — an easy mistake that would have shipped 70% oversized sheets. Ship JPEG as the default and only path initially; `capabilities.scrub_cache.format` still exists so WebP can be added later as an explicit opt-in (with `-lossless 0` mandatory and documented, not implied) without a contract change.
 
+**M4's conclusion holds, but how it is stated invites a wrong re-test — read this before re-opening the format question (added 2026-10-19).** M4 compares a quality *setting* on one codec against a quality *setting* on another, and those are not commensurable: `-q:v 8` and `q 75` are not "the same quality". Re-measured at **equal SSIM**, JPEG still wins, but only when the measurement is made against the input the tiler actually receives. Two traps, both of which a re-test fell into on 2026-10-19 before being caught:
+
+1. **Measure from the real cells, not from the source.** The sheet is never composed from pristine frames. `ffmpeg_io.extract_fps`/`extract_keyframes_with_pts` write each cell as **JPEG at `-q:v 8`, already scaled to `cell_w`×`cell_h`**, and `tiling._compose` pastes those files. Re-encoding JPEG-shaped data as JPEG is efficient in a way WebP is not — WebP spends bits describing the DCT artifacts it inherits. Feeding pristine LANCZOS-downscaled native frames instead *inverts the result*, making WebP look 27–36% smaller, which is an artifact of the harness and not a property of the pipeline.
+2. **Sample daytime and night separately.** Night IR content is roughly **2× the bytes** of the same camera in daylight (measured: `gate-face` cells 1.8 MB/hour-sample at 20:35 vs 884 KB at 14:00). A night-only sample overstates every absolute figure by about 2×, which is enough to wreck a disk-budget projection.
+
+Measured through `tiling.py` itself, on daytime footage, cells produced by the real ffmpeg path (96-cell sheets, `cell_w` 320):
+
+| sample | encode | KB/cell | SSIM |
+| --- | --- | --- | --- |
+| `gate-face` | **jpeg q85** | **9.92** | **0.9903** |
+| `gate-face` | webp q85 | 7.75 | 0.9847 |
+| `gate-face` | webp q75 | 5.42 | 0.9503 |
+| `street` | **jpeg q85** | **6.97** | **0.9920** |
+| `street` | webp q85 | 5.17 | 0.9627 |
+| `street` | webp q75 | 3.52 | 0.9484 |
+
+WebP is cheaper here only by being worse; matching JPEG q85's SSIM needs roughly q90+, which erases the saving, and costs 10–30× the encode time (JPEG 0.079 s/sheet vs WebP 0.9–1.3 s at Pillow's default `method=4`). AVIF is also disqualified: same bytes as WebP at ~7 s/sheet, which exceeds a whole generation cycle. **The sanity check for any future re-test: a correct harness reproduces the deployment's own observed rate** — the 1 s tier measured 11.31 KB/cell fleet-wide on 2026-10-19, which the daytime figure above (9.92) and the night one (20.36) bracket. A harness reporting 23 KB/cell for JPEG q85 is measuring something the cache never stores.
+
 Write atomically: extract to a temp file in the cache dir, then `os.replace` into place (the exact atomic-publish pattern in `wildlife.py::wildlife_poster`). A sheet is only advertised in `/v1/scrub/.../sheets` once fully written.
 
 ### 5.4 Cadence: **continuous, ~60 s timer — never hourly**
@@ -361,6 +379,23 @@ Consequences:
 - A prune pass (part of the loop, or `fsc scrub prune`) drops sheets whose bucket `end < now − retention_days`, oldest-first — the bounded-by-mtime eviction `wildlife.py::_prune_poster_cache` already demonstrates.
 
 **Disk math — measured, not estimated (M4, 2026-07-30):** a real 96-cell, 320×180 JPEG sheet (`-q:v 8`) off `alley-wide` came to 604 KB (6.3 KB/frame). At 900 sheets/day (86400 s ÷ 96 cells) that's **~544 MB/camera/day**. Across the live deployment's actual **ten** cameras (not eight — corrected count, see §5.5.1) at the corrected 4-day retention: **~21.8 GB total**, in line with the client-side review's own corrected estimate (~18 GB) once the retention correction is applied. This replaces the earlier 50–60 GB estimate (which was both over-retained at 14 days and undercounted at 8 cameras).
+
+**Observed on the reference deployment, 2026-10-19 — the figure above is a floor, not a forecast.** The 21.8 GB projection assumed one tier, 4-day retention and 320×180 cells. None of those held: the deployment runs `retention_days: 7`, `aged_after_h: 48`, six tiers (two decode + four derived), and `cell_w: 480`. Measured directly off the cache:
+
+| tier | sheets | cells | GB | KB/cell |
+| --- | --- | --- | --- | --- |
+| 1 s | 24,814 | 2,264,543 | 24.43 | 11.31 |
+| 5 s | 66,367 | 866,359 | 14.18 | 17.17 |
+| 60 s | 894 | 82,744 | 0.93 | 11.73 |
+| 300 s | 177 | 16,336 | 0.18 | 11.79 |
+| 900 s | 65 | 5,569 | 0.06 | 11.80 |
+| 3600 s | 22 | 1,790 | 0.02 | 11.76 |
+
+**~40 GB of sheets** plus ~8 GB of `.cells` working dirs. Two things to read off this. First, the derived tiers are nearly free — all four together are ~1.2 GB, because a tier's cost falls linearly with its interval while retention stays fixed; adding coarse tiers is not what makes the cache big. Second, the 1 s tier is **61% of all bytes**, so `aged_after_h` is the dominant retention knob, not `retention_days`.
+
+The 5 s tier's 17.17 KB/cell was the aged-tier bucket-sealing bug (fixed 2026-10-19, see `generate_aged_tier`), not a property of the tier: 92 black cells were being JPEG'd into every 4-cell sheet. **A tier reading materially above ~12 KB/cell at 320×180 is a fragmentation symptom, not a content one** — worth checking `AVG(count)` on its `scrub_sheets` rows against `sheet_cols * sheet_rows` before concluding anything about bytes.
+
+**Cell size is the dominant cost and it is super-linear.** Measured at equal quality setting (q85) through the real pipeline, daytime: 320→400 costs **1.65×**, 320→480 **2.25–2.41×** — both above the geometric (1.56×, 2.25×) because larger cells carry more detail past `-q:v 8`. The reference deployment moved to `cell_w: 480` on 2026-10-19 (preview renders at ~1040 CSS px in a `minmax(0,1fr) 336px` grid, so 320 was a 3.1× upscale, 6.3× at 2× DPR), taking the cache to a projected ~111 GB and requiring the host volume to grow 100 → 250 GiB first. CPU was not the constraint — JPEG encode goes 0.079 s → ~0.18 s per sheet and ffmpeg's cost is decode-dominated — but **`min_free_bytes` is**: raising `cell_w` without the space first stalls the generation loop, and the 320 and 480 sheets coexist for a full `retention_days` because `_TierWriter.resume` matches on geometry.
 
 #### 5.5.1 Camera count correction
 
@@ -475,8 +510,8 @@ class ScrubSection(BaseModel):
     cell_h: int = 180
     sheet_cols: int = 12
     sheet_rows: int = 8                                # 96 cells ≈ 2 min at 1 fps
-    format: str = "jpeg"                                # "jpeg" | "webp" (§5.3) — JPEG measured smaller on
-                                                         # real camera content (M4); WebP is opt-in only
+    format: str = "jpeg"                                # "jpeg" | "webp" (§5.3) — JPEG wins at equal SSIM
+                                                         # on the real pipeline (M4 + 2026-10-19); opt-in only
     generate_interval_s: float = 60.0                  # ceiling on the loop's tick (NOT hourly) (§5.4)
     live_edge_interval_s: float = 20.0                 # trailing-window cadence = the freshness bound (§5.4)
     sheet_version_grace_s: float = 900.0               # superseded incomplete versions swept after this (§5.4)
