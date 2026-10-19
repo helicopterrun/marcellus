@@ -418,8 +418,13 @@ def test_scrub_generate_aged_tier_decimates_from_recent_with_zero_ffmpeg(
 
     assert result["new_frames"] > 0
     assert aged_buckets, "expected an aged-tier bucket produced by decimation"
-    assert all(b["complete"] for b in aged_buckets), (
-        "a fully-decimated, already-bounded span's bucket must be sealed complete"
+    # The trailing bucket is deliberately left open (`_TierWriter.flush`, not
+    # `close`): the span looks bounded from here, but the recent tier's live
+    # bucket grows every tick, so the next tick's span sits immediately after
+    # this one and has to be able to attach -- see
+    # test_aged_tier_fills_whole_sheets for what sealing it cost.
+    assert not any(b["complete"] for b in aged_buckets), (
+        "the trailing aged bucket must stay open for the next tick's span"
     )
     assert aged_sheets, "expected an aged-tier sheet produced by decimation"
     # Every 5th recent-tier cell, aligned to the aged (5.0s) grid.
@@ -2794,3 +2799,129 @@ def test_zero_backfill_share_runs_every_camera_live_edge(
 
     cameras = sorted(set(served))
     assert len(served) == len(cameras) and len(cameras) >= 2, served
+
+
+@pytest.fixture
+def growing_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
+    """Like `aged_env`, but with six 10s segments (base..base+60) so the aged
+    tier has enough footage to fill a whole sheet -- 12 cells at 5.0s is
+    exactly 60s -- across more than one generation pass.
+    """
+    frigate_db = tmp_path / "frigate.db"
+    conn = sqlite3.connect(frigate_db)
+    conn.executescript(RECORDINGS_SCHEMA)
+    base = 1_800_000_000.0
+    recordings_root = tmp_path / "recordings"
+    recordings_root.mkdir()
+    for i in range(6):
+        conn.execute(
+            f"INSERT INTO recordings VALUES ('s{i}','doorbell','/media/frigate/{i}.mp4',?,?,"
+            "10.0,5.0)",
+            (base + i * 10, base + (i + 1) * 10),
+        )
+        (recordings_root / f"{i}.mp4").write_bytes(b"fake")
+    conn.commit()
+    conn.close()
+
+    settings = Settings(
+        frigate=FrigateSection(
+            base_url="http://frigate.test:5000",
+            config_path=tmp_path / "cfg.yml",
+            db_path=frigate_db,
+            media_path=Path("/media/frigate"),
+            recordings_path=recordings_root,
+        ),
+        sidecar=SidecarSection(db_path=tmp_path / "sidecar.db", bind_port=5001),
+        scrub=ScrubSection(
+            enabled=True, cameras=["doorbell"], cache_dir=tmp_path / "scrub",
+            recent_interval_s=1.0, aged_interval_s=5.0,
+            aged_after_h=5.0 / 3600.0,  # boundary = now - 5s
+            retention_days=4, sheet_cols=4, sheet_rows=3,  # 12 cells -> 60s at 5.0s
+            match_keyframe_cadence=False,
+            derived_intervals_s=[],  # the aged tier alone is what is under test
+        ),
+    )
+
+    async def _fake_probe_gop(seg_path: Path, **kw: object) -> float:
+        return 30.0  # >> any interval * 1.3 -> always the fps-fallback path
+
+    async def _fake_extract_fps(
+        seg_path: Path, out_dir: Path, interval_s: float, **kw: object
+    ) -> list[Path]:
+        n = int(round(10.0 / interval_s))  # 10s segment
+        paths = []
+        for i in range(n):
+            pth = out_dir / f"{i:06d}.jpg"
+            _make_jpg(pth)
+            paths.append(pth)
+        return paths
+
+    monkeypatch.setattr(ffmpeg_io, "probe_gop_seconds", _fake_probe_gop)
+    monkeypatch.setattr(ffmpeg_io, "extract_fps", _fake_extract_fps)
+
+    return settings
+
+
+def test_aged_tier_fills_whole_sheets(growing_env: Settings) -> None:
+    """Successive aged-tier passes must keep growing ONE sheet, not publish a
+    fresh one per pass.
+
+    The recent tier's live bucket extends by about `live_edge_interval_s`
+    every tick, so every tick hands `generate_aged_tier` a new span sitting
+    immediately after the one before it. A writer per span, sealed with
+    `close()`, made each of those open its own bucket -- and sheet starts
+    derive from the bucket start, so the tier published one tiny sheet per
+    tick forever. Measured on prod: 16,057 sheets on one camera's 5s tier
+    where the aligned grid needs ~1,260, 13,169 of them holding 4 cells on a
+    96-cell canvas (27.8 KB/cell against the 1s tier's 12.9) and costing a
+    drag 24x the sheet requests §4 exists to collapse.
+
+    Here the two passes together cover base..base+60, which is exactly one
+    full 12-cell sheet at 5.0s -- so "one sheet, complete" is the whole
+    assertion, and two sheets of six cells is the regression.
+    """
+    base = 1_800_000_000.0
+    # A collapsed plan (no aged tier at all) is how the recent tier gets
+    # filled without the aged pass racing it: one tier, straight to `now`.
+    collapsed = growing_env.model_copy(
+        update={"scrub": growing_env.scrub.model_copy(update={"aged_after_h": 1_000_000.0})}
+    )
+    conn = db.open_joined(growing_env.frigate.db_path, growing_env.sidecar.db_path)
+    try:
+        profile = generator.SourceProfile()
+        for recent_through in (base + 30.0, base + 60.0):
+            # Tick N: the live edge advances the recent tier...
+            asyncio.run(
+                generator.generate_camera(
+                    collapsed, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                    now=recent_through, profile=profile, sem=asyncio.Semaphore(3),
+                )
+            )
+            # ...and the aged pass decimates whatever of it is now past the
+            # boundary (now - 5s), which is a span adjacent to the last one.
+            asyncio.run(
+                generator.generate_aged_tier(
+                    growing_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                    now=recent_through + 10.0, profile=profile,
+                )
+            )
+        aged_buckets = [
+            b for b in db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
+            if b["interval_s"] == 5.0
+        ]
+        aged_sheets = db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000, interval=5.0)
+    finally:
+        conn.close()
+
+    assert len(aged_buckets) == 1, (
+        f"the second pass must extend the first bucket, not open its own: "
+        f"{[(b['start_ts'] - base, b['end_ts'] - base) for b in aged_buckets]}"
+    )
+    assert aged_buckets[0]["start_ts"] == base
+    # One sheet start, not one per pass -- the actual regression.
+    assert sorted({s["start_ts"] for s in aged_sheets}) == [base]
+    newest = max(aged_sheets, key=lambda s: s["count"])
+    assert newest["count"] == 12, (
+        f"expected the sheet grown to its full 12 cells, got {newest['count']}"
+    )
+    assert newest["complete"]
