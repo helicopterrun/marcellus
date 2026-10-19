@@ -1622,9 +1622,27 @@ async def generate_aged_tier(
 
     Registers each decimated span as an ordinary aged bucket/sheet set --
     same `scrub_buckets`/`scrub_sheets` rows a backfill pass would have
-    written, `interval_s == aged_interval_s` -- and seals the trailing
-    bucket of each span complete (`_TierWriter.close`), since the span is
-    fully bounded and nothing more will ever arrive for it from this pass.
+    written, `interval_s == aged_interval_s`.
+
+    Every span goes through **one** writer, left open at the end (`flush`,
+    never `close`) -- the shape `generate_derived_tier` already uses. A
+    writer per span, sealed with `close()`, looked safe ("the span is
+    bounded, nothing more will arrive") and was wrong at the trailing edge:
+    `_TierWriter.resume` attaches only to a bucket with `complete = 0`, and
+    the recent tier's live bucket grows by about `live_edge_interval_s`
+    every tick, so each tick opened a *new* hole immediately after the one
+    just sealed. Unable to attach, it started a fresh bucket at its own
+    span start -- and since sheet starts derive from the bucket start, the
+    tier published one sheet per tick instead of growing one sheet to
+    `sheet_cols * sheet_rows`. Measured on prod before this fix: 16,057
+    sheets on one camera's 5s tier where an aligned grid needs ~1,260,
+    13,169 of them holding 4 cells on a 96-cell canvas -- 27.8 KB/cell
+    against the 1s tier's 12.9, and 24x the sheet requests a drag costs.
+
+    Interior buckets still get sealed, by `feed`'s own gap detection when a
+    later non-contiguous span arrives (§5.2) -- which is where that decision
+    belongs, since it is the only place that knows whether two spans are
+    actually adjacent on the grid.
     """
     scrub = settings.scrub
     gop_s = profile.gop_s.get(camera)
@@ -1665,45 +1683,61 @@ async def generate_aged_tier(
     cell_w, cell_h = await camera_cell_size(
         settings, camera, frigate_conn=frigate_conn, profile=profile
     )
+
+    # A hole is matched against each recent-tier bucket row rather than
+    # requiring one row to cover it whole: the aged window
+    # (retention_cutoff .. boundary) is usually far wider than anything the
+    # recent tier has ever actually recorded, e.g. on a deployment still
+    # inside its first retention_days -- most of that width has no data at
+    # all (recent tier included) and must stay a genuine hole for backfill,
+    # but the sub-span that a recent bucket *does* cover should still be
+    # decimated instead of ffmpeg-decoded.
+    #
+    # Materialised and sorted up front rather than streamed from the nested
+    # loop, because one writer now spans them all and `feed` drops anything
+    # at or behind the newest slot it has stored: fed out of order, a span
+    # would be silently discarded instead of bucketed.
+    spans = sorted(
+        (max(h_start, r_start), min(h_end, r_end))
+        for h_start, h_end in holes
+        for r_start, r_end in recent_rows
+        if min(h_end, r_end) > max(h_start, r_start)
+    )
+    if not spans:
+        return {"camera": camera, "new_frames": 0}
+
+    # Window is the whole aged tier, not one span: this writer outlives each
+    # of them, and `feed`'s own bounds check would otherwise throw away every
+    # span but the first.
+    writer = _TierWriter(
+        settings, camera, interval_s=aged_interval_s,
+        window_start=retention_cutoff, window_end=boundary,
+        cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn,
+    )
+    # Resume at the first span's start -- that is where last cycle's open
+    # bucket ends, which is the bucket this pass has to keep growing.
+    writer.resume(spans[0][0])
+
     new_frames = 0
     with tempfile.TemporaryDirectory(prefix="age-", dir=_work_root(scrub.cache_dir)) as td:
         work_dir = Path(td)
-        for hole_start, hole_end in holes:
+        for span_start, span_end in spans:
             if deadline is not None and time.monotonic() >= deadline:
                 break
-            # A hole is matched against each recent-tier bucket row rather
-            # than requiring one row to cover it whole: the aged window
-            # (retention_cutoff .. boundary) is usually far wider than
-            # anything the recent tier has ever actually recorded, e.g. on a
-            # deployment still inside its first retention_days -- most of
-            # that width has no data at all (recent tier included) and must
-            # stay a genuine hole for backfill, but the sub-span that a
-            # recent bucket *does* cover should still be decimated instead
-            # of ffmpeg-decoded.
-            for r_start, r_end in recent_rows:
-                if deadline is not None and time.monotonic() >= deadline:
-                    break
-                span_start = max(hole_start, r_start)
-                span_end = min(hole_end, r_end)
-                if span_end <= span_start:
-                    continue
-                frames = await _decimate_source(
-                    sidecar_conn, scrub.cache_dir, camera,
-                    finer_interval_s=recent_interval_s, derived_interval_s=aged_interval_s,
-                    window_start=span_start, window_end=span_end, work_dir=work_dir,
-                    deadline=deadline,
-                )
-                if not frames:
-                    continue
-                writer = _TierWriter(
-                    settings, camera, interval_s=aged_interval_s,
-                    window_start=span_start, window_end=span_end,
-                    cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn,
-                )
-                writer.resume(span_start)
-                await writer.feed(frames)
-                await writer.close()
-                new_frames += len(frames)
+            frames = await _decimate_source(
+                sidecar_conn, scrub.cache_dir, camera,
+                finer_interval_s=recent_interval_s, derived_interval_s=aged_interval_s,
+                window_start=span_start, window_end=span_end, work_dir=work_dir,
+                deadline=deadline,
+            )
+            if not frames:
+                continue
+            await writer.feed(frames)
+            new_frames += len(frames)
+    # Publishes the still-filling sheet and leaves its bucket open, including
+    # when the loop stopped on the deadline: cells live under `cache_dir`, not
+    # `work_dir`, so this is safe outside the temp directory.
+    await writer.flush()
     return {"camera": camera, "new_frames": new_frames}
 
 
