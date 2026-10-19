@@ -49,6 +49,16 @@ _STREAM_LIMITS = httpx.Limits(
 )
 _STREAM_TIMEOUT = httpx.Timeout(30.0, read=None, pool=5.0)
 
+# Recorded playback (`/vod/*` playlists and segments) gets a pool of its own.
+# Sharing one with the app's image/JSON traffic meant a burst of thumbnails,
+# snapshots and `/api/events` -- dozens at once when the user taps through
+# events -- could take every slot and 503 the segments of a video already
+# playing (2026-10-19). A player only needs a few concurrent segment fetches,
+# so this is sized for several viewers, not for bursts.
+_VOD_STREAM_LIMITS = httpx.Limits(
+    max_connections=32, max_keepalive_connections=8, keepalive_expiry=15.0
+)
+
 
 def get_async_client(app: FastAPI) -> httpx.AsyncClient:
     """One pooled AsyncClient per app, created lazily and closed on shutdown.
@@ -67,19 +77,27 @@ def get_async_client(app: FastAPI) -> httpx.AsyncClient:
 
 
 def get_stream_client(app: FastAPI) -> httpx.AsyncClient:
-    """The separate pooled AsyncClient for the passthrough media proxy.
+    """The separate pooled AsyncClient for the passthrough proxy (everything
+    but `/vod/*`, which has `get_vod_stream_client()`).
 
     Kept apart from `get_async_client()`'s pool so long-lived VOD/live
     streams (held open for as long as a paused player keeps them, previously
     hours) can never starve the short API calls that share a client with
     login and health checks -- see the module docstring above.
     """
-    client = getattr(app.state, "stream_http_client", None)
+    return _pooled_stream_client(app, "stream_http_client", _STREAM_LIMITS)
+
+
+def get_vod_stream_client(app: FastAPI) -> httpx.AsyncClient:
+    """The passthrough proxy's pool for `/vod/*` only -- see `_VOD_STREAM_LIMITS`."""
+    return _pooled_stream_client(app, "vod_stream_http_client", _VOD_STREAM_LIMITS)
+
+
+def _pooled_stream_client(app: FastAPI, attr: str, limits: httpx.Limits) -> httpx.AsyncClient:
+    client: httpx.AsyncClient | None = getattr(app.state, attr, None)
     if client is None or getattr(client, "is_closed", False):
-        client = httpx.AsyncClient(
-            timeout=_STREAM_TIMEOUT, limits=_STREAM_LIMITS, follow_redirects=False
-        )
-        app.state.stream_http_client = client
+        client = httpx.AsyncClient(timeout=_STREAM_TIMEOUT, limits=limits, follow_redirects=False)
+        setattr(app.state, attr, client)
     return client
 
 
