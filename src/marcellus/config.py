@@ -413,8 +413,16 @@ class ScrubSection(BaseModel):
     preserve_source_aspect: bool = True
     sheet_cols: int = 12
     sheet_rows: int = 8
-    format: str = "jpeg"  # "jpeg" | "webp" -- JPEG measured smaller on real
-    # camera content (see docs spec §5.3 M4); WebP requires -lossless 0.
+    format: str = "jpeg"  # "jpeg" | "webp" -- JPEG wins at EQUAL SSIM on the
+    # real pipeline, not merely at equal quality setting (spec §5.3 M4 and its
+    # 2026-10-19 re-measurement). Measured daytime, through tiling.py, on the
+    # ffmpeg-produced cells the tiler actually composes: jpeg q85 = 9.92
+    # KB/cell at SSIM 0.9903, webp q85 = 7.75 at 0.9847 -- cheaper only by
+    # being worse, and matching q85's SSIM needs ~q90+, which erases it.
+    # Re-testing this is a trap: the cells are ALREADY JPEG at `-q:v 8`
+    # (ffmpeg_io.extract_fps), so re-encoding them as JPEG is efficient in a
+    # way WebP is not. Measure from those cell files, never from pristine
+    # frames -- doing the latter inverts the result. WebP requires -lossless 0.
     generate_interval_s: float = 60.0  # continuous edge, NOT hourly (§5.4)
     # How often the trailing-window pass runs, and therefore the generation
     # loop's tick. This is the floor on how stale the newest sprite cell can be,

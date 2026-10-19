@@ -168,10 +168,15 @@ scrub:
   preserve_source_aspect: true
   sheet_cols: 12
   sheet_rows: 8
-  # "jpeg" | "webp". JPEG measured smaller than WebP on real camera content
-  # (604 KB vs 827 KB for a 96-cell sheet, §5.3 M4) -- WebP is opt-in only,
-  # and requires -lossless 0 explicitly or ffmpeg silently ships near-lossless
-  # (~1 MB) sheets.
+  # "jpeg" | "webp". JPEG wins at EQUAL SSIM -- not just at an equal quality
+  # setting, which is what §5.3 M4's 604 KB vs 827 KB actually compared.
+  # Re-measured 2026-10-19 through tiling.py on the ffmpeg-produced cells the
+  # tiler composes: jpeg q85 = 9.92 KB/cell at SSIM 0.9903, webp q85 = 7.75 at
+  # 0.9847. WebP is cheaper only by being worse. The cells are already JPEG at
+  # `-q:v 8`, so JPEG-on-JPEG re-encoding is efficient in a way WebP is not;
+  # measuring from pristine frames instead inverts the result. WebP stays
+  # opt-in, and requires -lossless 0 explicitly or ffmpeg silently ships
+  # near-lossless (~1 MB) sheets.
   format: jpeg               # validated at load; a typo is a startup error
   generate_interval_s: 60.0  # continuous edge -- NEVER hourly (§5.4)
   # Retention sweep, run by the same in-process loop. Pruning used to be
