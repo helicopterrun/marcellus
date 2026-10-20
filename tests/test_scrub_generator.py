@@ -3081,3 +3081,59 @@ def test_derived_tier_resume_does_not_reopen_the_source_sheet(
         conn.close()
     assert sum(s["count"] for s in sheets) == 3
 
+
+def test_aged_backfill_skips_spans_the_recent_tier_already_covers(
+    aged_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Backfill runs before aged-tier decimation in a cycle, so a span that
+    had just aged out of the recent tier was ffmpeg-decoded for the aged tier
+    although its cells were already on disk. Decimation must get it instead."""
+    base = 1_800_000_000.0
+    collapsed_env = aged_env.model_copy(
+        update={"scrub": aged_env.scrub.model_copy(update={"aged_after_h": 1_000_000.0})}
+    )
+    conn = db.open_joined(aged_env.frigate.db_path, aged_env.sidecar.db_path)
+    try:
+        profile = generator.SourceProfile()
+        asyncio.run(
+            generator.generate_camera(
+                collapsed_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=base + 20.0, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        decoded: list[str] = []
+
+        async def _spy(seg_path: Path, *a: object, **k: object) -> list[tuple[float, Path]]:
+            decoded.append(seg_path.name)
+            return []
+
+        monkeypatch.setattr(ffmpeg_io, "extract_keyframes_with_pts", _spy)
+        monkeypatch.setattr(ffmpeg_io, "extract_fps", _spy)
+        now2 = base + 20.0 + 1000.0
+        asyncio.run(
+            generator.generate_backfill(
+                aged_env, "doorbell", budget=12, frigate_conn=conn, sidecar_conn=conn,
+                now=now2, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        assert decoded == []
+
+        result = asyncio.run(
+            generator.generate_aged_tier(
+                aged_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=now2, profile=profile,
+            )
+        )
+    finally:
+        conn.close()
+    assert result["new_frames"] > 0
+
+
+def test_subtract_covered_trims_and_splits_holes() -> None:
+    sub = generator._subtract_covered
+    assert sub([(0.0, 100.0)], [(20.0, 30.0), (60.0, 70.0)], 5.0) == [
+        (0.0, 20.0), (30.0, 60.0), (70.0, 100.0),
+    ]
+    assert sub([(0.0, 100.0)], [(0.0, 98.0)], 5.0) == []  # sliver too narrow
+    assert sub([(0.0, 10.0)], [(50.0, 60.0)], 5.0) == [(0.0, 10.0)]
+    assert sub([(10.0, 20.0)], [(0.0, 100.0)], 5.0) == []

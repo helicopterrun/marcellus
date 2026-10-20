@@ -1039,6 +1039,32 @@ def uncovered_spans(
     return spans
 
 
+def _subtract_covered(
+    holes: list[tuple[float, float]],
+    covered: list[tuple[float, float]],
+    min_width_s: float,
+) -> list[tuple[float, float]]:
+    """`holes` with every part inside `covered` removed.
+
+    Remainders narrower than `min_width_s` are dropped, as `uncovered_spans`
+    does: they can't hold a frame.
+    """
+    out: list[tuple[float, float]] = []
+    for h_start, h_end in holes:
+        cursor = h_start
+        for c_start, c_end in sorted(covered):
+            if c_end <= cursor or c_start >= h_end:
+                continue
+            if c_start - cursor >= min_width_s:
+                out.append((cursor, c_start))
+            cursor = max(cursor, c_end)
+            if cursor >= h_end:
+                break
+        if h_end - cursor >= min_width_s:
+            out.append((cursor, h_end))
+    return out
+
+
 async def _backfill_tier(
     settings: Settings,
     camera: str,
@@ -1052,6 +1078,7 @@ async def _backfill_tier(
     profile: SourceProfile,
     sem: asyncio.Semaphore,
     deadline: float | None = None,
+    decimated_from: float | None = None,
 ) -> dict[str, int]:
     """Fill holes in one tier, newest first, each from its newest end.
 
@@ -1069,10 +1096,28 @@ async def _backfill_tier(
     `deadline`, when given, is passed all the way down to `_generate_tiers`'
     per-segment check -- see there for why the per-camera check alone isn't
     tight enough.
+
+    `decimated_from`, when given, is the interval of a finer tier whose
+    published buckets this tier is cropped from by `generate_aged_tier`
+    (Pass 3 of every cycle). Parts of a hole that tier already covers are not
+    ffmpeg-decoded here: backfill runs *before* that pass, so a span that
+    has just aged out of the recent tier -- a segment straddling the
+    boundary included -- would otherwise be decoded for the aged tier even
+    though its cells are already on disk. Only what the finer tier doesn't
+    cover (nothing to decimate from) is left to decode.
     """
     segments = 0
     frames = 0
     spans = uncovered_spans(sidecar_conn, camera, interval_s, window_start, window_end)
+    if decimated_from is not None and spans:
+        finer = sidecar_conn.execute(
+            "SELECT start_ts, end_ts FROM scrub_buckets "
+            "WHERE camera = ? AND interval_s = ? AND end_ts > ? AND start_ts < ?",
+            (camera, decimated_from, window_start, window_end),
+        ).fetchall()
+        spans = _subtract_covered(
+            spans, [(r["start_ts"], r["end_ts"]) for r in finer], interval_s
+        )
     for hole_start, hole_end in list(reversed(spans))[:_MAX_HOLES_PER_CYCLE]:
         if budget <= 0 or (deadline is not None and time.monotonic() >= deadline):
             break
@@ -1448,6 +1493,9 @@ async def generate_backfill(
                 budget=alloc,
                 frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
                 profile=profile, sem=sem, deadline=deadline,
+                # Every tier after the first is cropped from the recent
+                # tier's sheets where those exist (`generate_aged_tier`).
+                decimated_from=plan[0][0] if (interval_s, w_start, w_end) != plan[0] else None,
             )
             segments += result["segments"]
             frames += result["new_frames"]
