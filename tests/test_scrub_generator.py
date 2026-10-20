@@ -2953,3 +2953,186 @@ def test_cycle_stats_are_populated_and_logged(
     # The next cycle starts from zero rather than accumulating.
     asyncio.run(generator.generate_cycle(env, now=1_800_000_030.0, profile=profile))
     assert profile.stats is not stats
+
+
+def test_live_edge_does_not_redecode_a_fully_consumed_segment(
+    env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The segment holding the last stored frame still matched `end_time >
+    since` on every tick, so it was ffmpeg-decoded again each time only for
+    `_TierWriter.feed` to discard every frame. A quiet tick must spawn no
+    ffmpeg, and a tick with one new segment must decode exactly that one."""
+    decoded: list[str] = []
+    inner = _fake_extract(lambda seg: [float(i) for i in range(10)])
+
+    async def _counting(seg_path: Path, out_dir: Path, **kw: object) -> list[tuple[float, Path]]:
+        decoded.append(seg_path.name)
+        return await inner(seg_path, out_dir, **kw)  # type: ignore[operator]
+
+    monkeypatch.setattr(ffmpeg_io, "extract_keyframes_with_pts", _counting)
+    base = 1_800_000_000.0
+    profile = generator.SourceProfile()
+
+    def _tick(conn: sqlite3.Connection, now: float) -> None:
+        asyncio.run(
+            generator.generate_live_edge(
+                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=now, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        _tick(conn, base + 25)
+        assert sorted(decoded) == ["1.mp4", "2.mp4"]
+
+        decoded.clear()
+        _tick(conn, base + 45)
+        assert decoded == []  # nothing new: no segment may be reopened
+
+        (env.frigate.recordings_path / "3.mp4").write_bytes(b"fake")
+        writer = sqlite3.connect(env.frigate.db_path)
+        writer.execute(
+            "INSERT INTO recordings VALUES ('s3','doorbell','/media/frigate/3.mp4',?,?,10.0,5.0)",
+            (base + 20, base + 30),
+        )
+        writer.commit()
+        writer.close()
+        _tick(conn, base + 65)
+        assert decoded == ["3.mp4"]
+
+        decoded.clear()
+        _tick(conn, base + 85)
+        assert decoded == []
+
+        # No frame lost at either boundary: one contiguous 30-cell run.
+        assert db.latest_generated_through(conn, "doorbell", 1.0) == base + 29
+        buckets = db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
+        sheets = db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000)
+    finally:
+        conn.close()
+    assert len(buckets) == 1
+    assert sum(s["count"] for s in sheets) == 30
+
+
+def test_derived_tier_resume_does_not_reopen_the_source_sheet(
+    env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A derived tier resumed *at* its last stored cell, so the source sheet
+    holding that cell was opened and cropped again every tick only for `feed`
+    to discard the result. With nothing new upstream it must open nothing, and
+    must still pick up the next cell once the source grows."""
+    denv = _derived_env(env, derived_intervals_s=[10.0])
+    base = 1_800_000_000.0
+    opened: list[object] = []
+    real_open = generator.Image.open
+
+    def _counting_open(*a: object, **k: object) -> object:
+        opened.append(a[0] if a else None)
+        return real_open(*a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(generator.Image, "open", _counting_open)
+    profile = generator.SourceProfile()
+
+    def _derive(conn: sqlite3.Connection, now: float) -> dict[str, object]:
+        return asyncio.run(
+            generator.generate_derived_tier(
+                denv, "doorbell", interval_s=10.0,
+                frigate_conn=conn, sidecar_conn=conn, now=now, profile=profile,
+            )
+        )
+
+    conn = db.open_joined(denv.frigate.db_path, denv.sidecar.db_path)
+    try:
+        asyncio.run(
+            generator.generate_camera(
+                denv, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=base + 30, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        first = _derive(conn, base + 30)
+        assert first["new_frames"] == 2  # base, base+10
+
+        opened.clear()
+        again = _derive(conn, base + 40)
+        assert again["new_frames"] == 0
+        assert opened == []  # nothing new upstream: no source sheet reopened
+
+        # A third segment lands in the recent tier; the derived tier advances.
+        (denv.frigate.recordings_path / "3.mp4").write_bytes(b"fake")
+        writer = sqlite3.connect(denv.frigate.db_path)
+        writer.execute(
+            "INSERT INTO recordings VALUES ('s3','doorbell','/media/frigate/3.mp4',?,?,10.0,5.0)",
+            (base + 20, base + 30),
+        )
+        writer.commit()
+        writer.close()
+        asyncio.run(
+            generator.generate_live_edge(
+                denv, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=base + 50, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        grown = _derive(conn, base + 50)
+        assert grown["new_frames"] == 1  # base+20
+        sheets = db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000, interval=10.0)
+    finally:
+        conn.close()
+    assert sum(s["count"] for s in sheets) == 3
+
+
+def test_aged_backfill_skips_spans_the_recent_tier_already_covers(
+    aged_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Backfill runs before aged-tier decimation in a cycle, so a span that
+    had just aged out of the recent tier was ffmpeg-decoded for the aged tier
+    although its cells were already on disk. Decimation must get it instead."""
+    base = 1_800_000_000.0
+    collapsed_env = aged_env.model_copy(
+        update={"scrub": aged_env.scrub.model_copy(update={"aged_after_h": 1_000_000.0})}
+    )
+    conn = db.open_joined(aged_env.frigate.db_path, aged_env.sidecar.db_path)
+    try:
+        profile = generator.SourceProfile()
+        asyncio.run(
+            generator.generate_camera(
+                collapsed_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=base + 20.0, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        decoded: list[str] = []
+
+        async def _spy(seg_path: Path, *a: object, **k: object) -> list[tuple[float, Path]]:
+            decoded.append(seg_path.name)
+            return []
+
+        monkeypatch.setattr(ffmpeg_io, "extract_keyframes_with_pts", _spy)
+        monkeypatch.setattr(ffmpeg_io, "extract_fps", _spy)
+        now2 = base + 20.0 + 1000.0
+        asyncio.run(
+            generator.generate_backfill(
+                aged_env, "doorbell", budget=12, frigate_conn=conn, sidecar_conn=conn,
+                now=now2, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        assert decoded == []
+
+        result = asyncio.run(
+            generator.generate_aged_tier(
+                aged_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=now2, profile=profile,
+            )
+        )
+    finally:
+        conn.close()
+    assert result["new_frames"] > 0
+
+
+def test_subtract_covered_trims_and_splits_holes() -> None:
+    sub = generator._subtract_covered
+    assert sub([(0.0, 100.0)], [(20.0, 30.0), (60.0, 70.0)], 5.0) == [
+        (0.0, 20.0), (30.0, 60.0), (70.0, 100.0),
+    ]
+    assert sub([(0.0, 100.0)], [(0.0, 98.0)], 5.0) == []  # sliver too narrow
+    assert sub([(0.0, 10.0)], [(50.0, 60.0)], 5.0) == [(0.0, 10.0)]
+    assert sub([(10.0, 20.0)], [(0.0, 100.0)], 5.0) == []

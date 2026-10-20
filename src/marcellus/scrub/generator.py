@@ -836,6 +836,7 @@ async def _generate_tier(
     sem: asyncio.Semaphore,
     deadline: float | None = None,
     newest_first: bool = False,
+    consumed_through: float | None = None,
 ) -> dict[str, Any]:
     """Sample `[since, window_end)` for one thinning tier, never emitting frames
     outside `[window_start, window_end)` (§4.2 non-overlap, §5.5 thinning tiers).
@@ -849,6 +850,8 @@ async def _generate_tier(
 
     `newest_first`, when set, picks the *newest* `budget` segments of
     `[since, window_end)` rather than the oldest -- see `_generate_tiers`.
+
+    `consumed_through` -- see `_generate_tiers`.
     """
     if window_end <= window_start or budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0}
@@ -865,6 +868,7 @@ async def _generate_tier(
         budget=budget,
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
         profile=profile, sem=sem, deadline=deadline, newest_first=newest_first,
+        consumed_through=consumed_through,
     )
 
 
@@ -883,6 +887,7 @@ async def _generate_tiers(
     sem: asyncio.Semaphore,
     deadline: float | None = None,
     newest_first: bool = False,
+    consumed_through: float | None = None,
 ) -> dict[str, Any]:
     """Open each segment in `[since, window_end)` and feed it to `writer`.
 
@@ -905,10 +910,24 @@ async def _generate_tiers(
     several cycles. Skipping straight to the newest segments leaves a hole
     behind them instead, which `_backfill_tier` already fills newest-first
     (§5.4), so nothing is left permanently uncovered.
+
+    `consumed_through`, when given, is the timestamp of the last frame the
+    tier has stored. A segment is a closed file once it has a row, so one
+    that was fed in full has no frame later than that, and the grid keeps one
+    frame per slot, so nothing further than one interval past it either.
+    Skipping `end_time <= consumed_through + drive_interval_s` stops the
+    segment holding the last stored frame being ffmpeg-decoded again every
+    tick only to have `_TierWriter.feed` discard all of it. The criterion is
+    per frame, not per segment: one that failed to decode, was cut off by the
+    deadline or budget, or has frames past the last stored one ends later
+    than that and still matches.
     """
     scrub = settings.scrub
     if budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0}
+    min_end = since
+    if consumed_through is not None:
+        min_end = max(min_end, consumed_through + drive_interval_s)
 
     # Oldest-first and budgeted: a cold start has no resume point, so `since` is
     # the far edge of the retention window and this query would otherwise return
@@ -917,7 +936,7 @@ async def _generate_tiers(
     rows_ = frigate_conn.execute(
         f"SELECT path, start_time, end_time FROM recordings "
         f"WHERE camera = ? AND end_time > ? AND start_time < ? ORDER BY {order} LIMIT ?",
-        (camera, since, window_end, max(1, budget)),
+        (camera, min_end, window_end, max(1, budget)),
     ).fetchall()
     if newest_first:
         rows_ = list(reversed(rows_))
@@ -1020,6 +1039,32 @@ def uncovered_spans(
     return spans
 
 
+def _subtract_covered(
+    holes: list[tuple[float, float]],
+    covered: list[tuple[float, float]],
+    min_width_s: float,
+) -> list[tuple[float, float]]:
+    """`holes` with every part inside `covered` removed.
+
+    Remainders narrower than `min_width_s` are dropped, as `uncovered_spans`
+    does: they can't hold a frame.
+    """
+    out: list[tuple[float, float]] = []
+    for h_start, h_end in holes:
+        cursor = h_start
+        for c_start, c_end in sorted(covered):
+            if c_end <= cursor or c_start >= h_end:
+                continue
+            if c_start - cursor >= min_width_s:
+                out.append((cursor, c_start))
+            cursor = max(cursor, c_end)
+            if cursor >= h_end:
+                break
+        if h_end - cursor >= min_width_s:
+            out.append((cursor, h_end))
+    return out
+
+
 async def _backfill_tier(
     settings: Settings,
     camera: str,
@@ -1033,6 +1078,7 @@ async def _backfill_tier(
     profile: SourceProfile,
     sem: asyncio.Semaphore,
     deadline: float | None = None,
+    decimated_from: float | None = None,
 ) -> dict[str, int]:
     """Fill holes in one tier, newest first, each from its newest end.
 
@@ -1050,10 +1096,28 @@ async def _backfill_tier(
     `deadline`, when given, is passed all the way down to `_generate_tiers`'
     per-segment check -- see there for why the per-camera check alone isn't
     tight enough.
+
+    `decimated_from`, when given, is the interval of a finer tier whose
+    published buckets this tier is cropped from by `generate_aged_tier`
+    (Pass 3 of every cycle). Parts of a hole that tier already covers are not
+    ffmpeg-decoded here: backfill runs *before* that pass, so a span that
+    has just aged out of the recent tier -- a segment straddling the
+    boundary included -- would otherwise be decoded for the aged tier even
+    though its cells are already on disk. Only what the finer tier doesn't
+    cover (nothing to decimate from) is left to decode.
     """
     segments = 0
     frames = 0
     spans = uncovered_spans(sidecar_conn, camera, interval_s, window_start, window_end)
+    if decimated_from is not None and spans:
+        finer = sidecar_conn.execute(
+            "SELECT start_ts, end_ts FROM scrub_buckets "
+            "WHERE camera = ? AND interval_s = ? AND end_ts > ? AND start_ts < ?",
+            (camera, decimated_from, window_start, window_end),
+        ).fetchall()
+        spans = _subtract_covered(
+            spans, [(r["start_ts"], r["end_ts"]) for r in finer], interval_s
+        )
     for hole_start, hole_end in list(reversed(spans))[:_MAX_HOLES_PER_CYCLE]:
         if budget <= 0 or (deadline is not None and time.monotonic() >= deadline):
             break
@@ -1366,6 +1430,7 @@ async def generate_live_edge(
         budget=max(1, scrub.live_edge_segments),
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
         profile=profile, sem=sem, newest_first=True, deadline=deadline,
+        consumed_through=recent_through,
     )
     return {"camera": camera, **result}
 
@@ -1428,6 +1493,9 @@ async def generate_backfill(
                 budget=alloc,
                 frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
                 profile=profile, sem=sem, deadline=deadline,
+                # Every tier after the first is cropped from the recent
+                # tier's sheets where those exist (`generate_aged_tier`).
+                decimated_from=plan[0][0] if (interval_s, w_start, w_end) != plan[0] else None,
             )
             segments += result["segments"]
             frames += result["new_frames"]
@@ -1590,12 +1658,20 @@ async def generate_derived_tier(
     since = db.latest_generated_through(sidecar_conn, camera, interval_s)
     resume_since = since if since is not None else retention_cutoff
     writer.resume(resume_since)
+    # Where decimation starts reading. `since` is the last derived cell
+    # already stored, so a source window opening *at* it selects that cell
+    # again -- and `_decimate_source` decodes the whole source sheet around it
+    # to do so, only for `feed` to discard the result as seen. Start half a
+    # derived interval later instead: the next wanted cell is a full interval
+    # on, and half an interval is slack against float noise in cell
+    # timestamps (`start_ts + k * finer`).
+    read_from = resume_since + interval_s / 2 if since is not None else resume_since
 
     new_frames = 0
     with tempfile.TemporaryDirectory(prefix="derive-", dir=_work_root(scrub.cache_dir)) as td:
         work_dir = Path(td)
         for finer_interval, seg_ws, seg_we in decode_plan:
-            span_start = max(seg_ws, retention_cutoff, resume_since)
+            span_start = max(seg_ws, retention_cutoff, read_from)
             span_end = min(seg_we, now)
             if span_end <= span_start:
                 continue
