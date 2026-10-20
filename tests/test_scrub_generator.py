@@ -2953,3 +2953,64 @@ def test_cycle_stats_are_populated_and_logged(
     # The next cycle starts from zero rather than accumulating.
     asyncio.run(generator.generate_cycle(env, now=1_800_000_030.0, profile=profile))
     assert profile.stats is not stats
+
+
+
+def test_live_edge_does_not_redecode_a_fully_consumed_segment(
+    env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The segment holding the last stored frame still matched `end_time >
+    since` on every tick, so it was ffmpeg-decoded again each time only for
+    `_TierWriter.feed` to discard every frame. A quiet tick must spawn no
+    ffmpeg, and a tick with one new segment must decode exactly that one."""
+    decoded: list[str] = []
+    inner = _fake_extract(lambda seg: [float(i) for i in range(10)])
+
+    async def _counting(seg_path: Path, out_dir: Path, **kw: object) -> list[tuple[float, Path]]:
+        decoded.append(seg_path.name)
+        return await inner(seg_path, out_dir, **kw)  # type: ignore[operator]
+
+    monkeypatch.setattr(ffmpeg_io, "extract_keyframes_with_pts", _counting)
+    base = 1_800_000_000.0
+    profile = generator.SourceProfile()
+
+    def _tick(conn: sqlite3.Connection, now: float) -> None:
+        asyncio.run(
+            generator.generate_live_edge(
+                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=now, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        _tick(conn, base + 25)
+        assert sorted(decoded) == ["1.mp4", "2.mp4"]
+
+        decoded.clear()
+        _tick(conn, base + 45)
+        assert decoded == []  # nothing new: no segment may be reopened
+
+        (env.frigate.recordings_path / "3.mp4").write_bytes(b"fake")
+        writer = sqlite3.connect(env.frigate.db_path)
+        writer.execute(
+            "INSERT INTO recordings VALUES ('s3','doorbell','/media/frigate/3.mp4',?,?,10.0,5.0)",
+            (base + 20, base + 30),
+        )
+        writer.commit()
+        writer.close()
+        _tick(conn, base + 65)
+        assert decoded == ["3.mp4"]
+
+        decoded.clear()
+        _tick(conn, base + 85)
+        assert decoded == []
+
+        # No frame lost at either boundary: one contiguous 30-cell run.
+        assert db.latest_generated_through(conn, "doorbell", 1.0) == base + 29
+        buckets = db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
+        sheets = db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000)
+    finally:
+        conn.close()
+    assert len(buckets) == 1
+    assert sum(s["count"] for s in sheets) == 30

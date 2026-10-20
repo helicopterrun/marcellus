@@ -836,6 +836,7 @@ async def _generate_tier(
     sem: asyncio.Semaphore,
     deadline: float | None = None,
     newest_first: bool = False,
+    consumed_through: float | None = None,
 ) -> dict[str, Any]:
     """Sample `[since, window_end)` for one thinning tier, never emitting frames
     outside `[window_start, window_end)` (§4.2 non-overlap, §5.5 thinning tiers).
@@ -849,6 +850,8 @@ async def _generate_tier(
 
     `newest_first`, when set, picks the *newest* `budget` segments of
     `[since, window_end)` rather than the oldest -- see `_generate_tiers`.
+
+    `consumed_through` -- see `_generate_tiers`.
     """
     if window_end <= window_start or budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0}
@@ -865,6 +868,7 @@ async def _generate_tier(
         budget=budget,
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
         profile=profile, sem=sem, deadline=deadline, newest_first=newest_first,
+        consumed_through=consumed_through,
     )
 
 
@@ -883,6 +887,7 @@ async def _generate_tiers(
     sem: asyncio.Semaphore,
     deadline: float | None = None,
     newest_first: bool = False,
+    consumed_through: float | None = None,
 ) -> dict[str, Any]:
     """Open each segment in `[since, window_end)` and feed it to `writer`.
 
@@ -905,10 +910,24 @@ async def _generate_tiers(
     several cycles. Skipping straight to the newest segments leaves a hole
     behind them instead, which `_backfill_tier` already fills newest-first
     (§5.4), so nothing is left permanently uncovered.
+
+    `consumed_through`, when given, is the timestamp of the last frame the
+    tier has stored. A segment is a closed file once it has a row, so one
+    that was fed in full has no frame later than that, and the grid keeps one
+    frame per slot, so nothing further than one interval past it either.
+    Skipping `end_time <= consumed_through + drive_interval_s` stops the
+    segment holding the last stored frame being ffmpeg-decoded again every
+    tick only to have `_TierWriter.feed` discard all of it. The criterion is
+    per frame, not per segment: one that failed to decode, was cut off by the
+    deadline or budget, or has frames past the last stored one ends later
+    than that and still matches.
     """
     scrub = settings.scrub
     if budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0}
+    min_end = since
+    if consumed_through is not None:
+        min_end = max(min_end, consumed_through + drive_interval_s)
 
     # Oldest-first and budgeted: a cold start has no resume point, so `since` is
     # the far edge of the retention window and this query would otherwise return
@@ -917,7 +936,7 @@ async def _generate_tiers(
     rows_ = frigate_conn.execute(
         f"SELECT path, start_time, end_time FROM recordings "
         f"WHERE camera = ? AND end_time > ? AND start_time < ? ORDER BY {order} LIMIT ?",
-        (camera, since, window_end, max(1, budget)),
+        (camera, min_end, window_end, max(1, budget)),
     ).fetchall()
     if newest_first:
         rows_ = list(reversed(rows_))
@@ -1366,6 +1385,7 @@ async def generate_live_edge(
         budget=max(1, scrub.live_edge_segments),
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
         profile=profile, sem=sem, newest_first=True, deadline=deadline,
+        consumed_through=recent_through,
     )
     return {"camera": camera, **result}
 
