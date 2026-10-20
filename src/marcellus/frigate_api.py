@@ -379,6 +379,33 @@ class FrigateClient:
             raise FrigatePlusError(f"POST {url}: {exc}", status_code=0) from exc
         return _parse_plus_response(r, "submit_plus")
 
+    def submit_plus_frame(
+        self, camera: str, frame_ts: float, *, timeout: float = 60.0
+    ) -> str:
+        """Upload one recording frame to Frigate+ (no annotation). Returns the
+        response message.
+
+        POST /api/{camera}/plus/{frame_time} is how a frame with NO event gets
+        into Frigate+: Frigate finds the recording segment covering
+        `frame_ts`, extracts that frame as PNG at full resolution and uploads
+        it, unlabeled, for annotation on plus.frigate.video. It answers 404
+        once retention has removed the recording. Unlike the event endpoints
+        it returns no plus_id.
+        """
+        url = f"{self.base_url}/api/{quote(camera, safe='')}/plus/{frame_ts:.3f}"
+        try:
+            r = self._plus_client.post(url, timeout=timeout)
+        except httpx.HTTPError as exc:
+            raise FrigatePlusError(f"POST {url}: {exc}", status_code=0) from exc
+        try:
+            payload = r.json()
+        except ValueError:
+            payload = {}
+        if r.status_code == 200 and payload.get("success"):
+            return str(payload.get("message") or "submitted")
+        msg = payload.get("message") or f"HTTP {r.status_code}"
+        raise FrigatePlusError(f"submit_plus_frame: {msg}", r.status_code)
+
     def submit_false_positive(self, event_id: str) -> str:
         """Submit an event as a false positive. Returns the plus_id.
 

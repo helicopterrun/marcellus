@@ -5,7 +5,7 @@
    `_tuning_pages` below. #}
 {% set _active = active_page|default('') %}
 {% set _people_pages = ('face_captures', 'enrich') %}
-{% set _tuning_pages = ('score_histogram', 'motion', 'fps_budget', 'placement', 'zone_hits') %}
+{% set _tuning_pages = ('score_histogram', 'motion', 'fps_budget', 'placement', 'zone_hits', 'wildlife') %}
 {# Inline icon sprite: line icons on currentColor, echoing the app's SF
    Symbols vocabulary (server.rack, film.stack, checklist, video, map). #}
 <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
@@ -41,6 +41,7 @@
         <a href="/fps-budget" class="page-link{% if _active == 'fps_budget' %} active{% endif %}"{% if _active == 'fps_budget' %} aria-current="page"{% endif %}>FPS budget</a>
         <a href="/zone-hits" class="page-link{% if _active == 'zone_hits' %} active{% endif %}"{% if _active == 'zone_hits' %} aria-current="page"{% endif %}>Zone hits</a>
         <a href="/placement" class="page-link{% if _active == 'placement' %} active{% endif %}"{% if _active == 'placement' %} aria-current="page"{% endif %}>Placement</a>
+        <a href="/wildlife" class="page-link{% if _active == 'wildlife' %} active{% endif %}"{% if _active == 'wildlife' %} aria-current="page"{% endif %}>Wildlife</a>
       </div>
     </details>
     <a href="/settings" class="page-link{% if _active == 'settings' %} active{% endif %}"{% if _active == 'settings' %} aria-current="page"{% endif %}>Settings</a>

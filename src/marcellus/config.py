@@ -322,6 +322,130 @@ class FaceEnrichSection(BaseModel):
     http_timeout_s: float = 15.0
 
 
+class WildlifeCamera(BaseModel):
+    """One camera the wildlife finder scans."""
+
+    # Local-time hours `[start, end)` to scan, e.g. `[7, 19]`; wraps across
+    # midnight when start > end. None = around the clock. Daytime-only cameras
+    # (no useful IR view) save most of their night segments this way:
+    # crows-nest produces ~180 motion-only segments a night for ~1 animal in
+    # 90 days.
+    hours: tuple[int, int] | None = None
+
+
+class WildlifeSection(BaseModel):
+    """Wildlife finder: animals Frigate's own model scored too low to track.
+
+    Scans recording segments that had motion but NO tracked object
+    (`recordings.motion > 0 AND objects = 0`) with MegaDetector v6
+    (YOLOv10-compact, ONNX), then classifies each candidate box with
+    SpeciesNet's crop classifier (ONNX). SpeciesNet's "blank" class is the
+    false-positive filter: in the 2026-10-20 benchmark it called every
+    sun-stripe and wind-blown-pine box blank at >= 0.9, while the overhead
+    squirrel Frigate missed on gate-walkway scored 0.99 squirrel. Found
+    animals are grouped into visits at /wildlife for keep/discard review, and a
+    kept frame can be sent to Frigate+ (POST /api/{camera}/plus/{frame_time}),
+    which is how the missed views get into the next model build.
+
+    Needs the `[wildlife]` extra (onnxruntime + numpy) and the two exported
+    model files -- see tools/wildlife_export_models.py. Runs as a systemd
+    oneshot (contrib/marcellus-wildlife.*), never in the web process: one run
+    can hold two cores for minutes.
+    """
+
+    enabled: bool = False
+
+    # Cameras to scan, with optional daytime-only hours. Empty = nothing is
+    # scanned even when enabled. Cost scales with each camera's motion-only
+    # segment count, which varies 80x across this fleet (shed ~40/day,
+    # gate-face ~3000/day) -- pick cameras where animals actually go.
+    cameras: dict[str, WildlifeCamera] = Field(default_factory=dict)
+
+    # IANA zone the `hours` windows are read in, e.g. "America/Los_Angeles".
+    # Empty = the host clock, which on the NVR LXC is UTC.
+    timezone: str = ""
+
+    detector_path: Path = Path("/opt/marcellus/data/models/wildlife/MDV6-yolov10-c.onnx")
+    classifier_path: Path = Path(
+        "/opt/marcellus/data/models/wildlife/speciesnet-v4.0.3a-crop.onnx"
+    )
+    classifier_labels_path: Path = Path(
+        "/opt/marcellus/data/models/wildlife/speciesnet-v4.0.3a-crop.labels.txt"
+    )
+
+    # Frames are scaled to this width before detection (and the detector input
+    # is letterboxed to it). 1280 is what MegaDetector v6 was benchmarked at
+    # here; 640 lost the small overhead squirrel.
+    frame_width: int = 1280
+
+    # Keyframes sampled per 10s segment, spread evenly across it. Every camera
+    # here has a keyframe each second except package and crows-nest (every
+    # 5s), so 3 frames come from a keyframe-only decode with no full decode.
+    # One frame per segment misses an animal that crosses in under ~10s.
+    frames_per_segment: int = 3
+
+    # MegaDetector "animal" score floor. Deliberately low: SpeciesNet does the
+    # rejecting. 0.2 kept every true positive in the benchmark.
+    min_detector_score: float = 0.2
+
+    # A box whose SpeciesNet "blank" (or human, or vehicle) probability is at or
+    # above this is not an animal. Recall-first: a box SpeciesNet is unsure
+    # about stays in the review queue.
+    reject_score: float = 0.8
+
+    # Rolled-up suggestions that are recorded (verdict "excluded") but never
+    # queued for review. Birds by default: Frigate already tracks `bird`, and
+    # the review zones here deliberately leave birds out.
+    exclude_suggestions: list[str] = Field(default_factory=lambda: ["bird"])
+
+    # Learned scenery: a box overlapping (IoU >= scenery_iou) at least
+    # `scenery_min_blanks` boxes SpeciesNet called blank on the same camera
+    # within `scenery_memory_h` is skipped without classifying. The pumpkin and
+    # the pine trunk on gate-walkway produced ~94% of all detector boxes in the
+    # benchmark day; this is what keeps classification cost bounded. Geometry
+    # alone is not enough -- a cat asleep on the same mat every night is
+    # "static" too, but SpeciesNet never calls it blank, so it is never learned.
+    scenery_iou: float = 0.6
+    scenery_min_blanks: int = 2
+    scenery_memory_h: float = 48.0
+
+    # Animal hits on one camera within this gap form one visit, capped at
+    # `max_visit_s` so a long stay is split into reviewable pieces.
+    visit_gap_s: float = 60.0
+    max_visit_s: float = 900.0
+
+    # Segments commit at their END (measured lag 5.4-9.4s); give them margin.
+    process_delay_s: float = 120.0
+
+    # How far back each run looks for unscanned segments. A long lookback
+    # lets a run that fell behind (busy host, restart) catch up; idempotency
+    # comes from the wildlife_segments table, not from this window.
+    lookback_s: float = 86400.0
+
+    # Wall-clock budget per run; the rest waits for the next timer tick. Keep it
+    # under the timer interval (10 min) so runs never queue up.
+    max_runtime_s: float = 540.0
+
+    # onnxruntime intra-op threads. The host has 4 threads shared with
+    # Frigate's ffmpeg decoders; the unit also runs at Nice=19.
+    threads: int = 2
+
+    # Crops and frame previews of animal hits only (never of rejected boxes).
+    # Must be under ReadWritePaths=/opt/marcellus (ProtectSystem=strict).
+    output_dir: Path = Path("/opt/marcellus/data/wildlife")
+
+    # Rows and images older than this are pruned. Continuous recordings are kept
+    # 7 days here, so a frame older than that can no longer be sent to
+    # Frigate+ anyway; the rest is history for the scoreboard.
+    retention_days: int = 30
+
+    # Segment failures (unreadable file, ffmpeg error) retry up to this many runs.
+    max_attempts: int = 3
+
+    # Frigate+ upload: Frigate re-extracts the frame and posts it upstream.
+    http_timeout_s: float = 60.0
+
+
 class WatchdogSection(BaseModel):
     """External health watchdog for the Frigate container.
 
@@ -1260,6 +1384,7 @@ class Settings(BaseSettings):
     sidecar: SidecarSection = Field(default_factory=SidecarSection)
     face_capture: FaceCaptureSection = Field(default_factory=FaceCaptureSection)
     face_enrich: FaceEnrichSection = Field(default_factory=FaceEnrichSection)
+    wildlife: WildlifeSection = Field(default_factory=WildlifeSection)
     watchdog: WatchdogSection = Field(default_factory=WatchdogSection)
     scrub: ScrubSection = Field(default_factory=ScrubSection)
     proxy: ProxySection = Field(default_factory=ProxySection)

@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% set active_page = 'wildlife' %}
+{% set _n = visits|length %}
+{% set summary = _n ~ ' visit' ~ ('s' if _n != 1 else '') %}
+{% block title %}Wildlife · Marcellus{% endblock %}
+
+{% block page_heading %}<h1 class="sr-only">Wildlife finder</h1>{% endblock %}
+{% block body %}
+<main id="main-content">
+  <div class="faces-bar">
+    <span class="mode">finder <b>{{ 'ON' if enabled else 'OFF' }}</b></span>
+    <span class="mode">
+      {% for r in ['pending', 'kept', 'discarded', 'all'] %}
+        <a href="?days={{ days }}&amp;review={{ r }}&amp;camera={{ camera }}"
+           class="page-link{% if review == r %} active{% endif %}">{{ r }}</a>{% if not loop.last %} · {% endif %}
+      {% endfor %}
+    </span>
+    <span class="mode">
+      <a href="?days={{ days }}&amp;review={{ review }}"
+         class="page-link{% if not camera %} active{% endif %}">all cameras</a>
+      {% for c in cameras %} · <a href="?days={{ days }}&amp;review={{ review }}&amp;camera={{ c }}"
+           class="page-link{% if camera == c %} active{% endif %}">{{ c }}</a>{% endfor %}
+    </span>
+    {% if last_run %}
+    <span class="mode" title="heartbeat from the systemd oneshot (it runs in another process)">
+      last run {{ last_run_when }}: {{ last_run.scanned }} scanned · {{ last_run.deferred }} deferred
+      · {{ last_run.classified }} classified · {{ last_run.animals }} animal hits
+      {% if last_run.error %}· <b>{{ last_run.error }} err</b>{% endif %}
+      {% if last_run.problems %}· <b>{{ last_run.problems|join('; ') }}</b>{% endif %}
+    </span>
+    {% else %}
+    <span class="mode">last run: <b>never</b></span>
+    {% endif %}
+  </div>
+
+  {% if board %}
+  <h2 class="section-h">Last {{ days|int }} days</h2>
+  <div class="table-scroll">
+  <table class="motion-table wildlife-board">
+    <thead><tr>
+      <th>camera</th><th title="wild-animal events Frigate tracked itself">Frigate caught</th>
+      <th>finder visits</th><th>kept</th><th>pending</th><th>discarded</th>
+      <th title="kept ÷ (kept + Frigate caught) — a lower bound on what Frigate misses">missed share</th>
+      <th>sent to Frigate+</th><th>segments scanned</th><th>avg ms/segment</th>
+    </tr></thead>
+    <tbody>
+    {% for r in board %}
+      <tr>
+        <td><a href="?days={{ days }}&amp;review=all&amp;camera={{ r.camera }}">{{ r.camera }}</a></td>
+        <td>{{ r.frigate_events }}</td><td>{{ r.visits }}</td><td>{{ r.kept }}</td>
+        <td>{{ r.pending }}</td><td>{{ r.discarded }}</td>
+        <td>{% if r.missed_share is not none %}{{ '%.0f'|format(r.missed_share * 100) }}%{% else %}—{% endif %}</td>
+        <td>{{ r.frames_sent }}</td><td>{{ r.segments }}</td><td>{{ r.avg_ms if r.avg_ms is not none else '—' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+
+  {% if not visits %}
+    <p class="empty">
+      No visits in the last {{ days|int }} day(s) with review = {{ review }}.
+      {% if not enabled %}<br><b>wildlife.enabled is false.</b>{% endif %}
+    </p>
+  {% endif %}
+
+  {% for v in visits %}
+  <section class="capture-visit wildlife-visit" data-visit="{{ v.id }}">
+    <header>
+      <b>{{ v.camera }}</b> · probably a <b>{{ v.suggestion }}</b>
+      · <time>{{ v.when }}</time>
+      · {{ v.n_hits }} hit{{ 's' if v.n_hits != 1 else '' }} over {{ v.duration_s }}s
+      {% if v.sent %}· {{ v.sent }} sent to Frigate+{% endif %}
+      {% if v.review != 'pending' %}· <i>{{ v.review }}</i>{% endif %}
+      <span class="visit-actions">
+        <button type="button" class="keep-visit" data-id="{{ v.id }}">keep</button>
+        <button type="button" class="discard-visit" data-id="{{ v.id }}">discard</button>
+      </span>
+    </header>
+    <div class="capture-strip">
+      {% for h in v.hits %}
+      <figure class="capture-card wildlife-hit" data-id="{{ h.id }}">
+        <a href="/wildlife/boxes/{{ h.id }}/frame.jpg" target="_blank" rel="noopener"
+           title="open the full frame with the box drawn">
+          {% if h.has_crop %}
+          <img loading="lazy" src="/wildlife/boxes/{{ h.id }}/crop.jpg" alt="{{ h.suggestion }} at {{ h.offset_s }}s">
+          {% else %}<span class="empty">no image</span>{% endif %}
+        </a>
+        <figcaption>
+          +{{ h.offset_s }}s · {{ h.suggestion }} {{ '%.2f'|format(h.suggestion_score or 0) }}
+          <br><span class="muted" title="MegaDetector score · SpeciesNet top class">det {{ '%.2f'|format(h.det_score or 0) }} · {{ h.top_class }} {{ '%.2f'|format(h.top_score or 0) }}</span>
+          <span class="actions">
+            {% if h.plus_status == 'sent' %}
+              <span class="sent">sent ✓</span>
+            {% else %}
+              <button type="button" class="send-plus" data-id="{{ h.id }}"
+                      {% if h.plus_status == 'error' %}title="last attempt: {{ h.plus_detail }}"{% endif %}>Frigate+</button>
+            {% endif %}
+          </span>
+        </figcaption>
+      </figure>
+      {% endfor %}
+    </div>
+  </section>
+  {% endfor %}
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/wildlife.js?v={{ asset_v }}" defer></script>
+{% endblock %}

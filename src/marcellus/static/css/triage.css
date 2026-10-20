@@ -1056,6 +1056,14 @@ body.map-full-open .me-toolbar {
 .capture-card .actions .keep { background: var(--ok-bg); color: var(--ok-text); }
 .capture-card .actions .discard { background: var(--danger-bg); color: var(--danger-text); }
 
+/* --- Wildlife finder (/wildlife): reuses the capture-visit layout --- */
+.wildlife-visit > header .visit-actions { margin-left: auto; display: inline-flex; gap: .5rem; }
+.wildlife-hit { max-width: 220px; }
+.wildlife-hit img { min-width: 120px; image-rendering: auto; }
+.wildlife-hit .muted { color: var(--muted); }
+.wildlife-hit .actions .send-plus { background: var(--ok-bg); color: var(--ok-text); }
+.wildlife-hit .actions .sent { color: var(--ok-text); font-family: var(--font-mono); }
+
 /* --- Identity clusters (/enrich/clusters) --- */
 .id-cluster header { flex-wrap: wrap; row-gap: 6px; }
 .id-cluster .id-title { font-size: var(--text-base); }

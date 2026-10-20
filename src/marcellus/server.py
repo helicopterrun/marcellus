@@ -66,6 +66,7 @@ from marcellus.routes import topology as topology_routes
 from marcellus.routes import toybox as toybox_routes
 from marcellus.routes import triage as triage_routes
 from marcellus.routes import tuning as tuning_routes
+from marcellus.routes import wildlife as wildlife_routes
 from marcellus.routes import zone_hits as zone_hits_routes
 from marcellus.scrub.lock import ScrubCacheLock, ScrubLockHeld
 
@@ -531,6 +532,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         _crosscam.check_inputs(settings)
 
+    if settings.wildlife.enabled:
+        # Same reasoning: the finder runs behind its own timer, and a missing
+        # model file would otherwise only show up in that unit's journal.
+        from marcellus.wildlife import finder as _wildlife
+
+        _wildlife.check_inputs(settings)
+
     task: asyncio.Task[None] | None = None
     scrub_lock: ScrubCacheLock | None = None
     app.state.scrub_locked = False
@@ -830,6 +838,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(placement_routes.router)
     app.include_router(analysis_routes.router)
     app.include_router(face_capture_routes.router)
+    app.include_router(wildlife_routes.router)
     app.include_router(enrich_routes.router)
     app.include_router(toybox_routes.router)
     app.include_router(scrub_routes.router)
