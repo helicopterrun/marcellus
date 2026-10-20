@@ -2947,7 +2947,7 @@ def test_cycle_stats_are_populated_and_logged(
     line = next(r.getMessage() for r in caplog.records if "scrub: cycle" in r.getMessage())
     assert "worst live-edge lag" in line
     for key in ("pass1=", "pass2=", "pass3=", "ffmpeg_spawns=", "ms_per_segment=",
-                "pil_decodes=", "pil_sheet_encodes="):
+                "pil_decodes=", "pil_sheet_encodes=", "child_cpu_s=", "self_cpu_s="):
         assert key in line
 
     # The next cycle starts from zero rather than accumulating.

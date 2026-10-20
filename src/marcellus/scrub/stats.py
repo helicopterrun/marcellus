@@ -10,7 +10,13 @@ occasional lost update on a diagnostic counter is not worth a lock).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import resource
+from dataclasses import dataclass, field
+
+
+def _cpu_s(who: int) -> float:
+    r = resource.getrusage(who)
+    return r.ru_utime + r.ru_stime
 
 
 @dataclass
@@ -32,6 +38,21 @@ class CycleStats:
     pil_decodes: int = 0
     pil_sheet_encodes: int = 0
     pil_cell_encodes: int = 0
+    # CPU (user+sys) baselines taken at cycle start. Wall time above is not CPU
+    # time, and CPU-hours are what the box shares with Frigate. Children are
+    # reaped subprocesses -- the generator's ffmpeg/ffprobe, plus anything else
+    # this process spawned that cycle (rare). Self is the whole process,
+    # including request serving, so treat it as an upper bound for Pillow work.
+    _children0: float = field(default_factory=lambda: _cpu_s(resource.RUSAGE_CHILDREN))
+    _self0: float = field(default_factory=lambda: _cpu_s(resource.RUSAGE_SELF))
+
+    @property
+    def child_cpu_s(self) -> float:
+        return _cpu_s(resource.RUSAGE_CHILDREN) - self._children0
+
+    @property
+    def self_cpu_s(self) -> float:
+        return _cpu_s(resource.RUSAGE_SELF) - self._self0
 
     @property
     def ms_per_segment(self) -> float:
@@ -43,5 +64,6 @@ class CycleStats:
             f"ffmpeg_spawns={self.ffmpeg_spawns} ffmpeg_s={self.ffmpeg_s:.2f} "
             f"segments_decoded={self.segments_decoded} ms_per_segment={self.ms_per_segment:.0f} "
             f"ffprobe_calls={self.ffprobe_calls} pil_decodes={self.pil_decodes} "
-            f"pil_sheet_encodes={self.pil_sheet_encodes} pil_cell_encodes={self.pil_cell_encodes}"
+            f"pil_sheet_encodes={self.pil_sheet_encodes} pil_cell_encodes={self.pil_cell_encodes} "
+            f"child_cpu_s={self.child_cpu_s:.2f} self_cpu_s={self.self_cpu_s:.2f}"
         )
