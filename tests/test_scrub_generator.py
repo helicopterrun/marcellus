@@ -1004,6 +1004,53 @@ def test_a_filling_sheet_is_published_once_per_cycle(env: Settings) -> None:
     assert len(on_disk) == 2, f"superseded sheet images left on disk: {on_disk}"
 
 
+def _run_two_flushes(env: Settings, cache_dir: Path, sheets: int) -> tuple[int, dict[str, bytes]]:
+    """Grow one sheet over two cycles; return total Pillow decodes and the pixels
+    of every sheet image left on disk."""
+    settings = env.model_copy(
+        update={
+            "scrub": env.scrub.model_copy(
+                update={"cache_dir": cache_dir, "canvas_cache_sheets": sheets}
+            )
+        }
+    )
+    profile = generator.SourceProfile()
+    db_path = cache_dir.parent / f"sidecar-{sheets}.db"
+    settings = settings.model_copy(
+        update={"sidecar": settings.sidecar.model_copy(update={"db_path": db_path})}
+    )
+    conn = db.open_joined(settings.frigate.db_path, settings.sidecar.db_path)
+    try:
+        for now in (1_800_000_005.0, 1_800_000_030.0):
+            asyncio.run(
+                generator.generate_camera(
+                    settings, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                    now=now, profile=profile, sem=asyncio.Semaphore(3),
+                )
+            )
+    finally:
+        conn.close()
+    pixels = {}
+    for f in sorted((cache_dir / "doorbell" / "1").glob("*.jpg")):
+        with Image.open(f) as im:
+            pixels[f.name] = im.convert("RGB").tobytes()
+    return profile.stats.pil_decodes, pixels
+
+
+def test_canvas_cache_cuts_decodes_without_changing_a_pixel(
+    env: Settings, tmp_path: Path
+) -> None:
+    """The cached flush pastes only new cells; the sheets it writes are identical
+    to a from-files composition, and `pil_decodes` counts only what was decoded."""
+    cached_decodes, cached = _run_two_flushes(env, tmp_path / "scrub-on", 24)
+    plain_decodes, plain = _run_two_flushes(env, tmp_path / "scrub-off", 0)
+    assert cached.keys() == plain.keys() and cached
+    assert cached == plain
+    # Second cycle republishes the still-filling sheet: from files it decodes every
+    # cell again, from the cache only the new ones.
+    assert cached_decodes < plain_decodes
+
+
 # ----- Cycle scheduling: live edge first, backfill behind it (§5.4) -----
 
 

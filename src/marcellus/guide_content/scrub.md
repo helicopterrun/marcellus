@@ -101,6 +101,7 @@ The `scrub:` config section:
   5s).
 - `backfill_min_share_s` — minimum wall-clock seconds per cycle reserved for backfill (default 6s); the live-edge pass stops early, between cameras, once the tick has less than this left, so backfill always gets a turn. Set it to 0 on a box with no decode headroom: the live edge then keeps the whole tick (less `decimation_min_share_s`) and backfill only gets what the edge leaves.
 - `decimation_min_share_s` — minimum wall-clock seconds per cycle guaranteed to the decimation pass (aged and derived tiers, default 3s), even when the live edge and backfill have already run past the tick. It uses no ffmpeg, only a little Python CPU. 0 disables the guarantee; with `backfill_min_share_s` also 0 the live edge is then unbounded.
+- `canvas_cache_sheets` — how many still-growing sheet images the generator keeps in memory so each update decodes only the new frames instead of the whole sheet (default 24, about 37 MB each at the default geometry, so roughly 0.9 GB at most). 0 turns the cache off and re-reads every frame on every update, trading CPU for memory.
 
 ## If it goes wrong
 

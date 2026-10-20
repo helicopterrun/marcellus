@@ -74,6 +74,7 @@ class SourceProfile:
     live_edge_cursor: int
     decimation_cursor: int
     stats: CycleStats
+    canvas_cache: tiling.CanvasCache
 
     def __init__(self) -> None:
         self.gop_s = {}
@@ -81,6 +82,10 @@ class SourceProfile:
         self.backfill_cursor = 0
         self.live_edge_cursor = 0
         self.decimation_cursor = 0
+        # In-progress sheet canvases (capacity set from `scrub.canvas_cache_sheets`
+        # by each writer, so the profile needn't know the settings). Lives here
+        # because it must outlive a cycle to be of any use.
+        self.canvas_cache = tiling.CanvasCache(0)
         # Reset by `generate_cycle`; lives here because every generation entry
         # point already takes the profile.
         self.stats = CycleStats()
@@ -173,6 +178,7 @@ def _publish_sheet_version(
     cell_h: int,
     fmt: str,
     stats: CycleStats | None = None,
+    canvas_cache: tiling.CanvasCache | None = None,
 ) -> tuple[str, int] | None:
     """Tile the current cell files for this sheet and atomically publish a new
     immutable version (URL includes `count`, §4.3). Returns the on-disk
@@ -200,6 +206,12 @@ def _publish_sheet_version(
     contract it inherits: cell k is `sheet_start + k * interval_s`, which is only
     true while the cells are contiguous from zero. Cells past a hole are kept on
     disk, not discarded.
+
+    With `canvas_cache`, the sheet's canvas is kept in memory between flushes and
+    only cells new or changed since the last one are decoded (`tiling.CanvasCache`).
+    The generator publishes one sheet from one place at a time, and the cache
+    serialises per sheet regardless. A sheet published full is evicted: its cell
+    store is dropped right after, so nothing will grow it again.
     """
     cells_dir = _cells_dir(cache_dir, camera, interval_s, sheet_start)
     cells: list[tiling.Cell] = []
@@ -227,9 +239,17 @@ def _publish_sheet_version(
     tmp = Path(tmp_name)
     try:
         tile = tiling.tile_sheet_webp if fmt == "webp" else tiling.tile_sheet
-        tile(cells, cols=cols, rows=rows, cell_w=cell_w, cell_h=cell_h, out_path=tmp)
+        key: tiling.CanvasKey = (
+            camera, interval_s, sheet_start, cols, rows, cell_w, cell_h, fmt
+        )
+        decoded = tile(
+            cells, cols=cols, rows=rows, cell_w=cell_w, cell_h=cell_h, out_path=tmp,
+            cache=canvas_cache, cache_key=key,
+        )
+        if canvas_cache is not None and count >= cols * rows:
+            canvas_cache.evict(key)
         if stats is not None:
-            stats.pil_decodes += len(cells)
+            stats.pil_decodes += decoded
             stats.pil_sheet_encodes += 1
         os.replace(tmp, out_path)  # atomic publish (mirrors wildlife.py)
     except BaseException:
@@ -550,9 +570,13 @@ class _TierWriter:
         cell_h: int,
         sidecar_conn: sqlite3.Connection,
         stats: CycleStats | None = None,
+        canvas_cache: tiling.CanvasCache | None = None,
     ) -> None:
         self.settings = settings
         self.stats = stats
+        self.canvas_cache = canvas_cache
+        if canvas_cache is not None:
+            canvas_cache.set_capacity(settings.scrub.canvas_cache_sheets)
         self.camera = camera
         self.interval_s = interval_s
         self.window_start = window_start
@@ -609,6 +633,14 @@ class _TierWriter:
             round(open_bucket["generated_through"] / self.interval_s) if open_bucket else None
         )
 
+    def _bucket_sealed(self) -> None:
+        """A sealed bucket takes no more cells, so its sheets' canvases are dead
+        weight (the LRU would get there eventually, at 37 MB apiece)."""
+        if self.canvas_cache is not None and self._bucket_start is not None:
+            self.canvas_cache.evict_range(
+                self.camera, self.interval_s, self._bucket_start, self._generated_through
+            )
+
     async def _flush_sheet(self, sheet_start: float, count: int) -> None:
         """Publish this sheet at whatever count its cell store can actually back.
 
@@ -623,6 +655,7 @@ class _TierWriter:
             _publish_sheet_version,
             scrub.cache_dir, self.camera, self.interval_s, sheet_start,
             count, self.cols, self.rows, self.cell_w, self.cell_h, scrub.format, self.stats,
+            self.canvas_cache,
         )
         if published is None:
             return
@@ -696,6 +729,7 @@ class _TierWriter:
                     generated_through=self._generated_through, complete=True,
                 )
                 self.conn.commit()
+                self._bucket_sealed()
                 self._bucket_start = pending[0].timestamp
             result = grid.assign_cells(pending, self._bucket_start, self.interval_s)
             self.new_frames += len(result.accepted)
@@ -768,6 +802,7 @@ class _TierWriter:
                     generated_through=self._generated_through, complete=True,
                 )
                 self.conn.commit()
+                self._bucket_sealed()
                 self._bucket_start = None
                 pending = result.remaining
             else:
@@ -799,6 +834,7 @@ class _TierWriter:
                 generated_through=self._generated_through, complete=True,
             )
             self.conn.commit()
+            self._bucket_sealed()
             self._bucket_start = None
 
 
@@ -820,7 +856,7 @@ async def _tier_writer(
         settings, camera,
         interval_s=interval_s, window_start=window_start, window_end=window_end,
         cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn,
-        stats=profile.stats,
+        stats=profile.stats, canvas_cache=profile.canvas_cache,
     )
 
 
@@ -1671,6 +1707,7 @@ async def generate_derived_tier(
         settings, camera, interval_s=interval_s,
         window_start=retention_cutoff, window_end=now,
         cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn, stats=profile.stats,
+        canvas_cache=profile.canvas_cache,
     )
     since = db.latest_generated_through(sidecar_conn, camera, interval_s)
     resume_since = since if since is not None else retention_cutoff
@@ -1834,6 +1871,7 @@ async def generate_aged_tier(
         settings, camera, interval_s=aged_interval_s,
         window_start=retention_cutoff, window_end=boundary,
         cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn, stats=profile.stats,
+        canvas_cache=profile.canvas_cache,
     )
     # Resume at the first span's start -- that is where last cycle's open
     # bucket ends, which is the bucket this pass has to keep growing.

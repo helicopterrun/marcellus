@@ -532,6 +532,18 @@ class ScrubSection(BaseModel):
     # the deadline leaves" and, with `backfill_min_share_s` also 0, an unbounded
     # live edge.
     decimation_min_share_s: float = 3.0
+    # How many in-progress sheet canvases the generator keeps in memory between
+    # flushes. Without them every flush of a growing sheet re-decoded every cell
+    # JPEG in it and re-encoded the whole canvas -- ~1100 Pillow decodes per prod
+    # cycle for ~23 sheet encodes. With them a flush pastes only the cells that
+    # are new or changed and encodes once; the output is pixel-identical. Each
+    # canvas is cols*cell_w x rows*cell_h x 3 bytes (~37 MB at 12x8 of 480x270),
+    # so the ceiling is this count times that: 24 -> ~0.9 GB. A canvas is dropped
+    # as soon as its sheet is full or its bucket seals; the rest are evicted
+    # least-recently-used. Size it to the sheets that grow at once (cameras x
+    # tiers still filling) -- below that the cycle touches them round-robin and
+    # evicts each before its next flush, saving nothing. 0 disables the cache.
+    canvas_cache_sheets: int = 24
 
     @field_validator("format")
     @classmethod
@@ -556,10 +568,10 @@ class ScrubSection(BaseModel):
             raise ValueError(f"must be > 0, got {v!r}")
         return v
 
-    @field_validator("derive_time_reserve_s", "decimation_min_share_s")
+    @field_validator("derive_time_reserve_s", "decimation_min_share_s", "canvas_cache_sheets")
     @classmethod
     def _non_negative(cls, v: float) -> float:
-        """0 is a valid, explicit "no floor" setting -- unlike the tick
+        """0 is a valid, explicit "no floor" (or "off") setting -- unlike the tick
         constants above, there's nothing broken about turning this off."""
         if v < 0:
             raise ValueError(f"must be >= 0, got {v!r}")
