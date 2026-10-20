@@ -458,6 +458,78 @@ CREATE TABLE IF NOT EXISTS face_enrichments (
 CREATE INDEX IF NOT EXISTS idx_face_enrich_cluster ON face_enrichments(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_face_enrich_age     ON face_enrichments(event_start_ts);
 
+-- Wildlife finder (config `wildlife`). One row per Frigate recording segment
+-- the finder has settled or is retrying -- this table IS the queue state, as
+-- face_enrichments is for enrichment: wildlife.find_segments LEFT JOINs it
+-- against Frigate's `recordings` over a lookback window, so an absent row means
+-- "pending", `status='error'` retries up to wildlife.max_attempts, and
+-- anything else is terminal. Statuses: scanned | no_file | error.
+CREATE TABLE IF NOT EXISTS wildlife_segments (
+    camera      TEXT NOT NULL,
+    start_ts    REAL NOT NULL,
+    status      TEXT NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    frames      INTEGER NOT NULL DEFAULT 0,
+    boxes       INTEGER NOT NULL DEFAULT 0,
+    classified  INTEGER NOT NULL DEFAULT 0,
+    animals     INTEGER NOT NULL DEFAULT 0,
+    elapsed_ms  INTEGER,
+    detail      TEXT,
+    scanned_at  TEXT NOT NULL,
+    PRIMARY KEY (camera, start_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_wildlife_seg_age ON wildlife_segments(start_ts);
+
+-- Every detector box at or above wildlife.min_detector_score, with its verdict:
+-- animal | blank | human | vehicle | scenery. Rejected boxes are kept (without
+-- images) because they ARE the learned-scenery memory: a new box overlapping
+-- enough recent `blank` boxes is skipped unclassified. Box coordinates are
+-- normalized [0,1] x1,y1,x2,y2 on the frame. `frame_ts` is wall-clock, exactly
+-- what Frigate's POST /api/{camera}/plus/{frame_time} expects.
+CREATE TABLE IF NOT EXISTS wildlife_boxes (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    camera           TEXT NOT NULL,
+    segment_ts       REAL NOT NULL,
+    frame_ts         REAL NOT NULL,
+    x1               REAL NOT NULL,
+    y1               REAL NOT NULL,
+    x2               REAL NOT NULL,
+    y2               REAL NOT NULL,
+    det_score        REAL NOT NULL,
+    verdict          TEXT NOT NULL,
+    reject_score     REAL,
+    suggestion       TEXT,
+    suggestion_score REAL,
+    top_class        TEXT,
+    top_score        REAL,
+    visit_id         INTEGER,
+    crop_path        TEXT,
+    frame_path       TEXT,
+    plus_status      TEXT,
+    plus_detail      TEXT,
+    plus_at          TEXT,
+    created_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wildlife_box_scenery
+    ON wildlife_boxes(camera, verdict, frame_ts);
+CREATE INDEX IF NOT EXISTS idx_wildlife_box_visit ON wildlife_boxes(visit_id);
+CREATE INDEX IF NOT EXISTS idx_wildlife_box_age   ON wildlife_boxes(frame_ts);
+
+-- Animal hits on one camera grouped by time gap (wildlife.visit_gap_s) --
+-- the unit of review at /wildlife. review: pending | kept | discarded.
+CREATE TABLE IF NOT EXISTS wildlife_visits (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    camera       TEXT NOT NULL,
+    start_ts     REAL NOT NULL,
+    end_ts       REAL NOT NULL,
+    hits         INTEGER NOT NULL DEFAULT 0,
+    review       TEXT NOT NULL DEFAULT 'pending',
+    reviewed_at  TEXT,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wildlife_visit_cam ON wildlife_visits(camera, end_ts);
+CREATE INDEX IF NOT EXISTS idx_wildlife_visit_review ON wildlife_visits(review, start_ts);
+
 -- Durable routing decision log (alerts-slice1 §A). Replaces the old
 -- in-memory ring buffer -- one row per event decision (pre-fanout), plus
 -- the Live Activity annotation columns patched in after the fact by

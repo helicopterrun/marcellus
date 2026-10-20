@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 from collections.abc import Iterator
-from typing import Any
+from typing import Annotated, Any
 
 import typer
 
@@ -25,11 +25,16 @@ face_capture_app = typer.Typer(
     help="High-res cross-camera face capture: grab the ID camera's full-res frame "
     "when a front camera sees a person."
 )
+wildlife_app = typer.Typer(
+    help="Wildlife finder: MegaDetector + SpeciesNet over segments where Frigate "
+    "tracked nothing."
+)
 scrub_app = typer.Typer(help="Uniform-cadence scrub-cache generation (sprite sheets).")
 encounters_app = typer.Typer(help="Encounters: linked chains of Frigate review segments.")
 app.add_typer(triage_app, name="triage")
 app.add_typer(analysis_app, name="analysis")
 app.add_typer(face_capture_app, name="face-capture")
+app.add_typer(wildlife_app, name="wildlife")
 app.add_typer(scrub_app, name="scrub")
 app.add_typer(encounters_app, name="encounters")
 
@@ -508,6 +513,83 @@ def face_capture_stats(days: int = typer.Option(7, min=1)) -> None:
                 "by_review": by_review,
                 "bytes": total_bytes,
                 "last_run": crosscam.read_last_run(s),
+            },
+            indent=2,
+        )
+    )
+
+
+# ----- Wildlife finder subcommands -----
+
+
+def _parse_when(value: str | None) -> float | None:
+    """ISO-8601 (`2026-10-17T13:00-07:00`) or a unix timestamp."""
+    if value is None:
+        return None
+    from datetime import datetime
+
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except ValueError as exc:
+        raise typer.BadParameter(f"not an ISO time or unix timestamp: {value!r}") from exc
+
+
+@wildlife_app.command("scan")
+def wildlife_scan(
+    start: str | None = typer.Option(
+        None, help="Backfill window start (ISO-8601 or unix ts); default: lookback_s ago."
+    ),
+    end: str | None = typer.Option(
+        None, help="Backfill window end; default: now - process_delay_s."
+    ),
+    camera: Annotated[
+        list[str] | None,
+        typer.Option("--camera", "-c", help="Limit to these configured cameras (repeatable)."),
+    ] = None,
+    max_runtime: float | None = typer.Option(
+        None, help="Override wildlife.max_runtime_s for this run, in seconds."
+    ),
+) -> None:
+    """Scan due motion-only segments for animals Frigate missed."""
+    from marcellus.wildlife import finder
+
+    s = load_settings()
+    summary = finder.scan(
+        s,
+        lower=_parse_when(start),
+        upper=_parse_when(end),
+        cameras=camera or None,
+        max_runtime_s=max_runtime,
+    )
+    typer.echo(json.dumps(summary))
+    if summary.get("problems"):
+        raise typer.Exit(code=2)
+
+
+@wildlife_app.command("prune")
+def wildlife_prune() -> None:
+    """Drop finder rows and images past wildlife.retention_days."""
+    from marcellus.wildlife import finder
+
+    typer.echo(json.dumps(finder.prune(load_settings())))
+
+
+@wildlife_app.command("stats")
+def wildlife_stats(days: int = typer.Option(7, min=1)) -> None:
+    """Per-camera scoreboard (Frigate caught vs finder found) plus the last run."""
+    from marcellus.wildlife import finder
+
+    s = load_settings()
+    typer.echo(
+        json.dumps(
+            {
+                "days": days,
+                "scoreboard": finder.scoreboard(s, days=days),
+                "last_run": finder.read_last_run(s),
             },
             indent=2,
         )
