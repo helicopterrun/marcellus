@@ -21,7 +21,7 @@ from PIL import Image, ImageStat
 
 from marcellus import db
 from marcellus.config import FrigateSection, ScrubSection, Settings, SidecarSection
-from marcellus.scrub import ffmpeg_io, generator, grid
+from marcellus.scrub import ffmpeg_io, generator, grid, tiling
 
 RECORDINGS_SCHEMA = """
 CREATE TABLE recordings (
@@ -3431,3 +3431,38 @@ def test_live_edge_forgets_fed_segments_when_the_tier_is_dropped(
         assert sorted(decoded) == ["1.mp4", "2.mp4"], "dropped data was not regenerated"
     finally:
         conn.close()
+
+
+def test_derived_tier_publishing_never_touches_the_canvas_cache(env: Settings) -> None:
+    """Derived tiers flush rarely; letting them into the LRU would only evict
+    the recent/aged canvases that are re-flushed every tick."""
+    denv = _derived_env(env, derived_intervals_s=[10.0])
+    conn = db.open_joined(denv.frigate.db_path, denv.sidecar.db_path)
+    try:
+        profile = generator.SourceProfile()
+        asyncio.run(
+            generator.generate_camera(
+                denv, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_030.0, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        keys_seen: list[float] = []
+        inner = profile.canvas_cache.compose_and_save
+
+        def _spy(key: tiling.CanvasKey, *a: object, **kw: object) -> int:
+            keys_seen.append(key[1])
+            return inner(key, *a, **kw)  # type: ignore[arg-type]
+
+        profile.canvas_cache.compose_and_save = _spy  # type: ignore[method-assign]
+        result = asyncio.run(
+            generator.generate_derived_tier(
+                denv, "doorbell", interval_s=10.0,
+                frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_030.0, profile=profile,
+            )
+        )
+    finally:
+        conn.close()
+    assert result["new_frames"] > 0, "the derived tier must actually have published"
+    assert keys_seen == []
+    assert all(k[1] != 10.0 for k in profile.canvas_cache._entries)

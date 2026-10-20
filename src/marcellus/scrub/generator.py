@@ -103,6 +103,7 @@ class SourceProfile:
     stats: CycleStats
     canvas_cache: tiling.CanvasCache
     fed_segments: dict[tuple[str, float], _FedSegments]
+    cache_sizing_logged: bool
 
     def __init__(self) -> None:
         self.gop_s = {}
@@ -116,6 +117,7 @@ class SourceProfile:
         self.canvas_cache = tiling.CanvasCache(0)
         # (camera, tier interval) -> segments the live edge has fed completely.
         self.fed_segments = {}
+        self.cache_sizing_logged = False
         # Reset by `generate_cycle`; lives here because every generation entry
         # point already takes the profile.
         self.stats = CycleStats()
@@ -601,9 +603,15 @@ class _TierWriter:
         sidecar_conn: sqlite3.Connection,
         stats: CycleStats | None = None,
         canvas_cache: tiling.CanvasCache | None = None,
+        use_canvas_cache: bool = False,
     ) -> None:
         self.settings = settings
         self.stats = stats
+        # Opt-in per writer: only the tiers that re-flush a growing sheet every
+        # tick (ffmpeg-decoded recent, and the aged tier) benefit. Derived tiers
+        # flush rarely and would only crowd those out of the LRU.
+        if not use_canvas_cache:
+            canvas_cache = None
         self.canvas_cache = canvas_cache
         if canvas_cache is not None:
             canvas_cache.set_capacity(settings.scrub.canvas_cache_sheets)
@@ -886,7 +894,7 @@ async def _tier_writer(
         settings, camera,
         interval_s=interval_s, window_start=window_start, window_end=window_end,
         cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn,
-        stats=profile.stats, canvas_cache=profile.canvas_cache,
+        stats=profile.stats, canvas_cache=profile.canvas_cache, use_canvas_cache=True,
     )
 
 
@@ -1766,7 +1774,6 @@ async def generate_derived_tier(
         settings, camera, interval_s=interval_s,
         window_start=retention_cutoff, window_end=now,
         cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn, stats=profile.stats,
-        canvas_cache=profile.canvas_cache,
     )
     since = db.latest_generated_through(sidecar_conn, camera, interval_s)
     resume_since = since if since is not None else retention_cutoff
@@ -1930,7 +1937,7 @@ async def generate_aged_tier(
         settings, camera, interval_s=aged_interval_s,
         window_start=retention_cutoff, window_end=boundary,
         cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn, stats=profile.stats,
-        canvas_cache=profile.canvas_cache,
+        canvas_cache=profile.canvas_cache, use_canvas_cache=True,
     )
     # Resume at the first span's start -- that is where last cycle's open
     # bucket ends, which is the bucket this pass has to keep growing.
@@ -2036,6 +2043,16 @@ async def generate_cycle(
                 cameras = [c for c in cameras if c in configured]
         if not cameras:
             return []
+
+        if not profile.cache_sizing_logged:
+            profile.cache_sizing_logged = True
+            if 0 < scrub.canvas_cache_sheets < 2 * len(cameras):
+                logger.info(
+                    "scrub: canvas_cache_sheets=%d is below 2 x %d cameras (recent + aged "
+                    "sheets grow every tick); the cache will thrash -- raise it to %d "
+                    "(about 37 MB per sheet at 480x270 cells)",
+                    scrub.canvas_cache_sheets, len(cameras), 2 * len(cameras),
+                )
 
         totals: dict[str, dict[str, Any]] = {
             c: {"camera": c, "segments": 0, "new_frames": 0, "backfilled": False}

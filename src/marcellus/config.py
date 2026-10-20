@@ -540,9 +540,12 @@ class ScrubSection(BaseModel):
     # canvas is cols*cell_w x rows*cell_h x 3 bytes (~37 MB at 12x8 of 480x270),
     # so the ceiling is this count times that: 24 -> ~0.9 GB. A canvas is dropped
     # as soon as its sheet is full or its bucket seals; the rest are evicted
-    # least-recently-used. Size it to the sheets that grow at once (cameras x
-    # tiers still filling) -- below that the cycle touches them round-robin and
-    # evicts each before its next flush, saving nothing. 0 disables the cache.
+    # least-recently-used. Only the recent and aged tiers use it (derived tiers
+    # flush rarely and compose from files). Sizing rule: at least 2 x the number
+    # of cameras (one growing recent and one growing aged sheet each) -- below
+    # that the cycle touches them round-robin and evicts each before its next
+    # flush, saving nothing, and startup logs a line saying so. ~37 MB per sheet
+    # at 480x270 cells. 0 disables the cache.
     canvas_cache_sheets: int = 24
 
     @field_validator("format")
