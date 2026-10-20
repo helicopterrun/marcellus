@@ -3290,6 +3290,9 @@ def test_live_edge_stops_at_its_deadline_between_segments(
     env = _late_cycle_env(
         long_history_env, backfill_min_share_s=0.0, decimation_min_share_s=3.0,
         live_edge_segments=6, derived_intervals_s=[],
+        # Serial: a window of concurrent decodes would all start before the
+        # deadline is looked at again, which this test is not about.
+        ffmpeg_concurrency=1,
     )
     clock = _FakeClock()
     monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
@@ -3553,3 +3556,120 @@ def test_backlogged_cameras_each_get_their_newest_segment_every_pass(
     # Everyone is at the newest segment, not crawling up from the oldest.
     assert max(lags) - min(lags) <= 10.0, lags
 
+
+# ----- parallel decode within a camera (scrub.ffmpeg_concurrency) -----
+
+
+def _parallel_harness(
+    env: Settings, monkeypatch: pytest.MonkeyPatch, concurrency: int, failing: set[str],
+) -> tuple[Settings, dict[str, list[float]], list[float], list[Path], list[bool]]:
+    """Three contiguous segments (1/2/3.mp4) behind an extractor that sleeps on
+    the event loop. Returns the settings plus what the fakes observed: per-file
+    (start, end) loop times, the first timestamp of each `feed`, the out_dirs
+    handed to the extractor, and whether every fed frame existed at feed time."""
+    base = 1_800_000_000.0
+    conn = sqlite3.connect(env.frigate.db_path)
+    conn.execute(
+        "INSERT INTO recordings VALUES ('s3','doorbell','/media/frigate/3.mp4',?,?,10.0,5.0)",
+        (base + 20, base + 30),
+    )
+    conn.commit()
+    conn.close()
+    (env.frigate.recordings_path / "3.mp4").write_bytes(b"fake")
+
+    spans: dict[str, list[float]] = {}
+    dirs: list[Path] = []
+    inner = _fake_extract(lambda seg: [float(i) for i in range(10)])
+
+    async def _sleepy(seg_path: Path, out_dir: Path, **kw: object) -> list[tuple[float, Path]]:
+        loop = asyncio.get_running_loop()
+        spans[seg_path.name] = [loop.time()]
+        dirs.append(out_dir)
+        # The first segment is the slowest, so completion order != segment order.
+        await asyncio.sleep({"1.mp4": 0.15, "2.mp4": 0.05, "3.mp4": 0.05}[seg_path.name])
+        spans[seg_path.name].append(loop.time())
+        if seg_path.name in failing:
+            raise ffmpeg_io.FfmpegError("boom")
+        return await inner(seg_path, out_dir, **kw)  # type: ignore[no-any-return,operator]
+
+    monkeypatch.setattr(ffmpeg_io, "extract_keyframes_with_pts", _sleepy)
+
+    fed_starts: list[float] = []
+    all_existed: list[bool] = []
+    real_feed = generator._TierWriter.feed
+
+    async def _spy(self: generator._TierWriter, frames: list[grid.Frame]) -> None:
+        fed_starts.append(frames[0].timestamp)
+        all_existed.append(all(Path(f.path).exists() for f in frames))
+        await real_feed(self, frames)
+
+    monkeypatch.setattr(generator._TierWriter, "feed", _spy)
+    env = env.model_copy(
+        update={"scrub": env.scrub.model_copy(update={"ffmpeg_concurrency": concurrency})}
+    )
+    return env, spans, fed_starts, dirs, all_existed
+
+
+def _run_live_edge(env: Settings) -> generator.SourceProfile:
+    profile = generator.SourceProfile()
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        asyncio.run(generator.generate_live_edge(
+            env, "doorbell", frigate_conn=conn, sidecar_conn=conn, now=1_800_000_040.0,
+            profile=profile, sem=asyncio.Semaphore(env.scrub.ffmpeg_concurrency),
+        ))
+    finally:
+        conn.close()
+    return profile
+
+
+def test_segments_of_a_window_decode_concurrently_but_feed_in_order(
+    env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env, spans, fed_starts, dirs, existed = _parallel_harness(env, monkeypatch, 3, set())
+    profile = _run_live_edge(env)
+
+    # Overlapping decodes: every segment started before the slowest one finished.
+    assert max(s[0] for s in spans.values()) < min(s[1] for s in spans.values())
+    # Fed oldest-first although segment 1 finished last.
+    base = 1_800_000_000.0
+    assert fed_starts == [base, base + 10, base + 20]
+    # Frames survived until feed consumed them; each decode had its own dir, and
+    # none is left behind.
+    assert all(existed)
+    assert len(set(dirs)) == 3
+    assert not any(d.exists() for d in dirs)
+    # Summed child wall exceeds the wall time any extraction was running.
+    st = profile.stats
+    assert st.segments_decoded == 3
+    assert st.ffmpeg_s > st.ffmpeg_wall_s * 1.5 > 0
+    assert "ffmpeg_wall_s=" in st.summary()
+
+
+def test_a_failing_middle_segment_neither_blocks_nor_reorders_its_window(
+    env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env, _spans, fed_starts, dirs, _existed = _parallel_harness(env, monkeypatch, 3, {"2.mp4"})
+    profile = _run_live_edge(env)
+    base = 1_800_000_000.0
+    assert fed_starts == [base, base + 20]
+    assert not any(d.exists() for d in dirs)
+    # Only the failed segment is not remembered as fed.
+    fed = profile.fed_segments
+    remembered = {p for f in fed.values() for p in f.ends}
+    assert remembered == {"/media/frigate/1.mp4", "/media/frigate/3.mp4"}
+
+
+def test_concurrency_one_decodes_strictly_one_at_a_time(
+    env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env, spans, fed_starts, dirs, _existed = _parallel_harness(env, monkeypatch, 1, set())
+    profile = _run_live_edge(env)
+    order = sorted(spans, key=lambda k: spans[k][0])
+    assert order == ["1.mp4", "2.mp4", "3.mp4"]
+    for a, b in zip(order, order[1:], strict=False):
+        assert spans[a][1] <= spans[b][0], "decodes overlapped at concurrency 1"
+    base = 1_800_000_000.0
+    assert fed_starts == [base, base + 10, base + 20]
+    assert not any(d.exists() for d in dirs)
+    assert profile.stats.ffmpeg_s == pytest.approx(profile.stats.ffmpeg_wall_s, rel=0.05)

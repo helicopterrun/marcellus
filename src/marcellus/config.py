@@ -460,9 +460,17 @@ class ScrubSection(BaseModel):
     # Retention sweep cadence for the in-process generator. Pruning used to be
     # CLI-only, so an unattended deployment grew past retention_days forever.
     prune_interval_s: float = 3600.0
-    # Bounds concurrent ffmpeg/ffprobe children. Segments within a camera are
-    # sampled serially (cell assignment is order-dependent), so today this only
-    # matters if a CLI backfill runs alongside the in-process generator.
+    # Bounds concurrent ffmpeg/ffprobe children, and is the size of the window of
+    # segments one camera decodes in parallel: each window's children run side by
+    # side, then their frames are fed in segment order (cell assignment is
+    # order-dependent, so only the decode overlaps). Cameras themselves are still
+    # processed one after another.
+    #
+    # On a host shared with Frigate, use 2: the box's cores are already spoken
+    # for by detection and recording, and a third concurrent decode mostly takes
+    # CPU from them rather than shortening the pass. 1 restores strictly serial
+    # decoding. Watch `ffmpeg_s / ffmpeg_wall_s` in the cycle line for the
+    # parallelism actually achieved.
     ffmpeg_concurrency: int = 3
     # Backfill allowance for a whole cycle, split across cameras. Without any
     # cap the first cycle on a cold cache tries to sample the whole retention

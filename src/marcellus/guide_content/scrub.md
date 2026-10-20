@@ -90,7 +90,10 @@ The `scrub:` config section:
 - `prune_interval_s` — retention-sweep cadence for the in-process generator
   (default 3600s).
 - `ffmpeg_concurrency` — cap on concurrent ffmpeg/ffprobe children (default
-  3).
+  3). It is also how many segments of one camera decode in parallel; their
+  frames are still fed in segment order. Use 2 on a box shared with Frigate,
+  1 for strictly serial decoding. The cycle log's `ffmpeg_s / ffmpeg_wall_s`
+  is the parallelism achieved.
 - `backfill_segments_per_cycle` / `backfill_time_budget_s` — segment and
   wall-clock caps on the backfill phase per cycle (default 120 / 22s).
 - `live_edge_segments` / `live_edge_lookback_s` — cap on the live-edge pass

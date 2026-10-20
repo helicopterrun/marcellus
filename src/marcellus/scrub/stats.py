@@ -29,6 +29,12 @@ class CycleStats:
     # wall time. Failed and timed-out spawns count: they cost CPU all the same.
     ffmpeg_spawns: int = 0
     ffmpeg_s: float = 0.0
+    # Wall time during which at least one extraction was running. `ffmpeg_s` is
+    # the *sum* of per-child wall, so ffmpeg_s / ffmpeg_wall_s is the parallelism
+    # actually achieved (1.0 = fully serial).
+    ffmpeg_wall_s: float = 0.0
+    _active: int = 0
+    _active_since: float = 0.0
     segments_decoded: int = 0
     # ffprobe helper calls (GOP / aspect probes); each may spawn more than one
     # process, so this counts calls, not processes.
@@ -46,6 +52,16 @@ class CycleStats:
     _children0: float = field(default_factory=lambda: _cpu_s(resource.RUSAGE_CHILDREN))
     _self0: float = field(default_factory=lambda: _cpu_s(resource.RUSAGE_SELF))
 
+    def extraction_started(self, now: float) -> None:
+        if self._active == 0:
+            self._active_since = now
+        self._active += 1
+
+    def extraction_finished(self, now: float) -> None:
+        self._active -= 1
+        if self._active == 0:
+            self.ffmpeg_wall_s += now - self._active_since
+
     @property
     def child_cpu_s(self) -> float:
         return _cpu_s(resource.RUSAGE_CHILDREN) - self._children0
@@ -62,6 +78,7 @@ class CycleStats:
         return (
             f"pass1={self.pass1_s:.2f}s pass2={self.pass2_s:.2f}s pass3={self.pass3_s:.2f}s "
             f"ffmpeg_spawns={self.ffmpeg_spawns} ffmpeg_s={self.ffmpeg_s:.2f} "
+            f"ffmpeg_wall_s={self.ffmpeg_wall_s:.2f} "
             f"segments_decoded={self.segments_decoded} ms_per_segment={self.ms_per_segment:.0f} "
             f"ffprobe_calls={self.ffprobe_calls} pil_decodes={self.pil_decodes} "
             f"pil_sheet_encodes={self.pil_sheet_encodes} pil_cell_encodes={self.pil_cell_encodes} "
