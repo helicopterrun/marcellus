@@ -80,6 +80,14 @@ The `scrub:` config section:
 - `cell_w` — sprite-sheet cell width in pixels (default 320); `cell_h` is
   the fallback height used only when the source aspect can't be measured or
   `preserve_source_aspect` is off (default 180).
+- `hwaccel` / `hwaccel_device` — hardware decode of recorded segments for
+  scrub sheets: `none` (default) or `vaapi`, with the render node in
+  `hwaccel_device` (default `/dev/dri/renderD128`). Only decoding moves to
+  the GPU; scaling stays in software. A segment whose hardware decode fails
+  is retried once in software, and after 3 consecutive such failures
+  hardware decode is turned off until the service restarts (one ERROR line
+  in the log; `ffmpeg_hw_fallbacks` in the cycle summary counts the
+  retries).
 - `sheet_cols` / `sheet_rows` — sprite-sheet grid size (default 12 × 8).
 - `generate_interval_s` — ceiling on the generation loop's tick length
   (default 60s).
