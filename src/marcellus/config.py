@@ -685,6 +685,15 @@ class ScrubSection(BaseModel):
     # flush, saving nothing, and startup logs a line saying so. ~37 MB per sheet
     # at 480x270 cells. 0 disables the cache.
     canvas_cache_sheets: int = 24
+    # Feed the derived tiers (`derived_intervals_s`) from the live edge: the
+    # frames Pass 1 has just decoded for the recent tier are also handed to a
+    # derived writer for every interval that is a whole multiple of the recent
+    # interval, instead of Pass 3 decoding a full recent-tier sheet for every
+    # new derived cell just to crop that one cell back out. Only a derived tier that is
+    # already caught up to the live edge is fed; Pass 3 still builds everything
+    # else (cold start, catch-up, the aged window). False is the kill switch:
+    # derived tiers are then built only by Pass 3 decimation.
+    derived_from_live_edge: bool = True
 
     @field_validator("format")
     @classmethod
