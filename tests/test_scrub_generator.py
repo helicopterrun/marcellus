@@ -3014,3 +3014,70 @@ def test_live_edge_does_not_redecode_a_fully_consumed_segment(
         conn.close()
     assert len(buckets) == 1
     assert sum(s["count"] for s in sheets) == 30
+
+
+def test_derived_tier_resume_does_not_reopen_the_source_sheet(
+    env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A derived tier resumed *at* its last stored cell, so the source sheet
+    holding that cell was opened and cropped again every tick only for `feed`
+    to discard the result. With nothing new upstream it must open nothing, and
+    must still pick up the next cell once the source grows."""
+    denv = _derived_env(env, derived_intervals_s=[10.0])
+    base = 1_800_000_000.0
+    opened: list[object] = []
+    real_open = generator.Image.open
+
+    def _counting_open(*a: object, **k: object) -> object:
+        opened.append(a[0] if a else None)
+        return real_open(*a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(generator.Image, "open", _counting_open)
+    profile = generator.SourceProfile()
+
+    def _derive(conn: sqlite3.Connection, now: float) -> dict[str, object]:
+        return asyncio.run(
+            generator.generate_derived_tier(
+                denv, "doorbell", interval_s=10.0,
+                frigate_conn=conn, sidecar_conn=conn, now=now, profile=profile,
+            )
+        )
+
+    conn = db.open_joined(denv.frigate.db_path, denv.sidecar.db_path)
+    try:
+        asyncio.run(
+            generator.generate_camera(
+                denv, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=base + 30, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        first = _derive(conn, base + 30)
+        assert first["new_frames"] == 2  # base, base+10
+
+        opened.clear()
+        again = _derive(conn, base + 40)
+        assert again["new_frames"] == 0
+        assert opened == []  # nothing new upstream: no source sheet reopened
+
+        # A third segment lands in the recent tier; the derived tier advances.
+        (denv.frigate.recordings_path / "3.mp4").write_bytes(b"fake")
+        writer = sqlite3.connect(denv.frigate.db_path)
+        writer.execute(
+            "INSERT INTO recordings VALUES ('s3','doorbell','/media/frigate/3.mp4',?,?,10.0,5.0)",
+            (base + 20, base + 30),
+        )
+        writer.commit()
+        writer.close()
+        asyncio.run(
+            generator.generate_live_edge(
+                denv, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=base + 50, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        grown = _derive(conn, base + 50)
+        assert grown["new_frames"] == 1  # base+20
+        sheets = db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000, interval=10.0)
+    finally:
+        conn.close()
+    assert sum(s["count"] for s in sheets) == 3
+

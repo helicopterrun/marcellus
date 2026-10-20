@@ -1610,12 +1610,20 @@ async def generate_derived_tier(
     since = db.latest_generated_through(sidecar_conn, camera, interval_s)
     resume_since = since if since is not None else retention_cutoff
     writer.resume(resume_since)
+    # Where decimation starts reading. `since` is the last derived cell
+    # already stored, so a source window opening *at* it selects that cell
+    # again -- and `_decimate_source` decodes the whole source sheet around it
+    # to do so, only for `feed` to discard the result as seen. Start half a
+    # derived interval later instead: the next wanted cell is a full interval
+    # on, and half an interval is slack against float noise in cell
+    # timestamps (`start_ts + k * finer`).
+    read_from = resume_since + interval_s / 2 if since is not None else resume_since
 
     new_frames = 0
     with tempfile.TemporaryDirectory(prefix="derive-", dir=_work_root(scrub.cache_dir)) as td:
         work_dir = Path(td)
         for finer_interval, seg_ws, seg_we in decode_plan:
-            span_start = max(seg_ws, retention_cutoff, resume_since)
+            span_start = max(seg_ws, retention_cutoff, read_from)
             span_end = min(seg_we, now)
             if span_end <= span_start:
                 continue
