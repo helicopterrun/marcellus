@@ -34,7 +34,7 @@ from typing import Any
 from PIL import Image
 
 from marcellus import db
-from marcellus.config import Settings
+from marcellus.config import ScrubSection, Settings
 from marcellus.scrub import ffmpeg_io, grid, tiling
 from marcellus.scrub.mapping import map_recording_path
 from marcellus.scrub.stats import CycleStats
@@ -49,6 +49,10 @@ _GOP_TOLERANCE = 1.3
 
 #: How far behind the live edge's resume point remembered segments are kept.
 _FED_RETAIN_S = 300.0
+
+#: Consecutive hardware-decode failures (each recovered by a software retry)
+#: after which hwaccel is disabled for the rest of the process.
+_HW_DISABLE_AFTER = 3
 
 _WORK_DIRNAME = ".work"
 _CELLS_DIRNAME = ".cells"
@@ -104,6 +108,8 @@ class SourceProfile:
     canvas_cache: tiling.CanvasCache
     fed_segments: dict[tuple[str, float], _FedSegments]
     cache_sizing_logged: bool
+    hw_failures: int
+    hwaccel_disabled: bool
 
     def __init__(self) -> None:
         self.gop_s = {}
@@ -118,6 +124,10 @@ class SourceProfile:
         # (camera, tier interval) -> segments the live edge has fed completely.
         self.fed_segments = {}
         self.cache_sizing_logged = False
+        # Consecutive hardware-decode failures that a software retry then
+        # recovered; at `_HW_DISABLE_AFTER` hwaccel is off for the process.
+        self.hw_failures = 0
+        self.hwaccel_disabled = False
         # Reset by `generate_cycle`; lives here because every generation entry
         # point already takes the profile.
         self.stats = CycleStats()
@@ -148,6 +158,22 @@ def _work_root(cache_dir: Path) -> Path:
     return work
 
 
+def hwaccel_input_args(scrub: ScrubSection, profile: SourceProfile) -> list[str]:
+    """ffmpeg input options for hardware decode, or [] when it is off (not
+    configured, or disabled for this process after repeated failures)."""
+    if scrub.hwaccel == "none" or profile.hwaccel_disabled:
+        return []
+    return ["-hwaccel", scrub.hwaccel, "-hwaccel_device", scrub.hwaccel_device]
+
+
+def _clear_dir(work_dir: Path) -> None:
+    for child in work_dir.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+
+
 async def _sample_segment(
     seg_path: Path,
     seg_start: float,
@@ -159,40 +185,83 @@ async def _sample_segment(
     cell_w: int,
     cell_h: int,
     stats: CycleStats | None = None,
+    scrub: ScrubSection | None = None,
+    profile: SourceProfile | None = None,
 ) -> list[grid.Frame]:
     """Extract frames from one segment into `work_dir`, returning achieved
     (timestamp, path) pairs. Chooses keyframe-only decode when GOP ~= interval,
     else the full-decode fps fallback (§5.2).
 
+    With hwaccel configured (`scrub` and `profile` given), a hardware decode that
+    fails with `FfmpegError` is retried once in software; see `hwaccel_input_args`
+    and `_HW_DISABLE_AFTER`.
+
     The caller owns `work_dir` and deletes it once the frames have been either
     accepted into the cell store or discarded, so nothing survives the cycle.
     """
+
+    async def _extract(hw_args: list[str]) -> list[grid.Frame]:
+        # Only passed when set, so extractors without the parameter still work.
+        extra: dict[str, Any] = {"hwaccel_args": hw_args} if hw_args else {}
+        if gop_s <= interval_s * _GOP_TOLERANCE:
+            extracted = await ffmpeg_io.extract_keyframes_with_pts(
+                seg_path, work_dir, cell_w=cell_w, cell_h=cell_h, **extra
+            )
+            frames = [
+                grid.Frame(timestamp=seg_start + pts, path=str(path))
+                for pts, path in extracted
+            ]
+            # Keyframes are only guaranteed to be no *sparser* than the GOP, so
+            # a tier whose interval is several GOPs wide gets several frames per
+            # cell. Thin them to the target cadence here rather than handing
+            # colliding frames to cell assignment, which can only respond by
+            # splitting the bucket.
+            return grid.decimate_to_grid(frames, interval_s)
+        jpgs = await ffmpeg_io.extract_fps(
+            seg_path, work_dir, interval_s, cell_w=cell_w, cell_h=cell_h, **extra
+        )
+        return [
+            grid.Frame(timestamp=seg_start + i * interval_s, path=str(jpgs[i]))
+            for i in range(len(jpgs))
+        ]
+
     async with sem:
         spawned = time.monotonic()
         if stats is not None:
             stats.extraction_started(spawned)
         try:
-            if gop_s <= interval_s * _GOP_TOLERANCE:
-                extracted = await ffmpeg_io.extract_keyframes_with_pts(
-                    seg_path, work_dir, cell_w=cell_w, cell_h=cell_h
-                )
-                frames = [
-                    grid.Frame(timestamp=seg_start + pts, path=str(path))
-                    for pts, path in extracted
-                ]
-                # Keyframes are only guaranteed to be no *sparser* than the GOP, so
-                # a tier whose interval is several GOPs wide gets several frames per
-                # cell. Thin them to the target cadence here rather than handing
-                # colliding frames to cell assignment, which can only respond by
-                # splitting the bucket.
-                return grid.decimate_to_grid(frames, interval_s)
-            jpgs = await ffmpeg_io.extract_fps(
-                seg_path, work_dir, interval_s, cell_w=cell_w, cell_h=cell_h
+            hw_args = (
+                hwaccel_input_args(scrub, profile)
+                if scrub is not None and profile is not None else []
             )
-            return [
-                grid.Frame(timestamp=seg_start + i * interval_s, path=str(jpgs[i]))
-                for i in range(len(jpgs))
-            ]
+            if not hw_args:
+                return await _extract([])
+            assert profile is not None
+            try:
+                frames = await _extract(hw_args)
+            except ffmpeg_io.FfmpegInterrupted:
+                raise
+            except ffmpeg_io.FfmpegError as hw_exc:
+                logger.warning(
+                    "scrub: hardware decode failed for %s, retrying in software: %s",
+                    seg_path, hw_exc,
+                )
+                # Partial JPEGs from the failed run must not reach the retry.
+                await asyncio.to_thread(_clear_dir, work_dir)
+                frames = await _extract([])  # failure here: genuine, propagates
+                if stats is not None:
+                    stats.ffmpeg_hw_fallbacks += 1
+                profile.hw_failures += 1
+                if profile.hw_failures >= _HW_DISABLE_AFTER and not profile.hwaccel_disabled:
+                    profile.hwaccel_disabled = True
+                    logger.error(
+                        "scrub: hardware decode failed %d times in a row; disabling "
+                        "hwaccel until the process restarts",
+                        profile.hw_failures,
+                    )
+                return frames
+            profile.hw_failures = 0
+            return frames
         finally:
             if stats is not None:
                 stats.ffmpeg_spawns += 1
@@ -1135,6 +1204,7 @@ async def _generate_tiers(
                     _sample_segment(
                         seg_path, row["start_time"], drive_interval_s, gop_s, sem, work_dir,
                         cell_w=cell_w, cell_h=cell_h, stats=profile.stats,
+                        scrub=scrub, profile=profile,
                     )
                     for (row, seg_path), work_dir in zip(runnable, work_dirs, strict=True)
                 ),

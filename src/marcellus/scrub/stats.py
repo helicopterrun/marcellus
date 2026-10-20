@@ -36,6 +36,8 @@ class CycleStats:
     # the *sum* of per-child wall, so ffmpeg_s / ffmpeg_wall_s is the parallelism
     # actually achieved (1.0 = fully serial).
     ffmpeg_wall_s: float = 0.0
+    # Segments retried in software after a hardware-accelerated decode failed.
+    ffmpeg_hw_fallbacks: int = 0
     _active: int = 0
     _active_since: float = 0.0
     segments_decoded: int = 0
@@ -90,6 +92,7 @@ class CycleStats:
             f"pass3_aged={self.pass3_aged_s:.2f}s pass3_derived={self.pass3_derived_s:.2f}s "
             f"ffmpeg_spawns={self.ffmpeg_spawns} ffmpeg_s={self.ffmpeg_s:.2f} "
             f"ffmpeg_wall_s={self.ffmpeg_wall_s:.2f} "
+            f"ffmpeg_hw_fallbacks={self.ffmpeg_hw_fallbacks} "
             f"segments_decoded={self.segments_decoded} ms_per_segment={self.ms_per_segment:.0f} "
             f"ffprobe_calls={self.ffprobe_calls} pil_decodes={self.pil_decodes} "
             f"pil_sheet_encodes={self.pil_sheet_encodes} pil_cell_encodes={self.pil_cell_encodes} "

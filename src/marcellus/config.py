@@ -524,6 +524,13 @@ class ScrubSection(BaseModel):
     aged_after_h: float = 24.0
     retention_days: int = 4
     cell_w: int = 320
+    # Hardware decode of recorded segments for scrub sheets (VAAPI on an Intel
+    # iGPU; scaling stays in software -- scale_vaapi is not usable on the iHD
+    # driver). Default "none" so boxes without a GPU are unaffected. If a
+    # hardware-decoded segment fails, it is retried once in software; after 3
+    # consecutive such failures hwaccel is disabled until the process restarts.
+    hwaccel: Literal["none", "vaapi"] = "none"
+    hwaccel_device: str = "/dev/dri/renderD128"
     # Fallback height, used only when the source's shape can't be measured or
     # `preserve_source_aspect` is off. Otherwise the height is derived per
     # camera from the source's display aspect ratio.
