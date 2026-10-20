@@ -169,6 +169,8 @@ async def _sample_segment(
     """
     async with sem:
         spawned = time.monotonic()
+        if stats is not None:
+            stats.extraction_started(spawned)
         try:
             if gop_s <= interval_s * _GOP_TOLERANCE:
                 extracted = await ffmpeg_io.extract_keyframes_with_pts(
@@ -196,6 +198,7 @@ async def _sample_segment(
                 stats.ffmpeg_spawns += 1
                 stats.segments_decoded += 1
                 stats.ffmpeg_s += time.monotonic() - spawned
+                stats.extraction_finished(time.monotonic())
 
 
 def _publish_sheet_version(
@@ -1061,44 +1064,75 @@ async def _generate_tiers(
     cell_w, cell_h = writer.cell_w, writer.cell_h
     missing_segments = 0
     processed = 0
-    for row in rows_:
-        if (
-            deadline is not None
-            and processed >= min_segments
-            and time.monotonic() >= deadline
-        ):
-            break
-        processed += 1
-        seg_path = map_recording_path(
-            row["path"], settings.frigate.media_path, settings.frigate.recordings_path
-        )
-        if not seg_path.exists():
-            missing_segments += 1
-            continue
-        # One scratch dir per segment, inside cache_dir: the extractor writes
-        # straight into it and it is removed whether or not the frames were
-        # used, so nothing accumulates.
-        with tempfile.TemporaryDirectory(
-            prefix="extract-", dir=_work_root(scrub.cache_dir)
-        ) as td:
-            work_dir = Path(td)
-            try:
-                frames = await _sample_segment(
-                    seg_path, row["start_time"], drive_interval_s, gop_s, sem, work_dir,
-                    cell_w=cell_w, cell_h=cell_h, stats=profile.stats,
-                )
-            except ffmpeg_io.FfmpegInterrupted as exc:
-                # Shutdown took the child with it; not a fault of the segment,
-                # and the hole-finder picks it up next cycle.
-                logger.debug("scrub: sampling interrupted for %s: %s", seg_path, exc)
+    # Decode in windows of `ffmpeg_concurrency` segments: the ffmpeg children of
+    # one window run side by side (`sem` is what actually bounds them), then the
+    # frames are fed in segment order. Only the *decode* is concurrent -- cell
+    # assignment is order-dependent, and the writer, the DB, `fed` and the stats
+    # all stay on one task in row order, exactly as when this was serial.
+    window_size = max(1, scrub.ffmpeg_concurrency)
+    idx = 0
+    while idx < len(rows_):
+        size = window_size
+        if deadline is not None and time.monotonic() >= deadline:
+            if processed >= min_segments:
+                break
+            # Past the deadline, run only what `min_segments` still owes rather
+            # than a whole window: a late pass should do the minimum, not the
+            # maximum parallelism.
+            size = min(size, min_segments - processed)
+        window = rows_[idx:idx + size]
+        idx += len(window)
+        processed += len(window)
+
+        runnable: list[tuple[sqlite3.Row, Path]] = []
+        for row in window:
+            seg_path = map_recording_path(
+                row["path"], settings.frigate.media_path, settings.frigate.recordings_path
+            )
+            if not seg_path.exists():
+                missing_segments += 1
                 continue
-            except ffmpeg_io.FfmpegError as exc:
-                logger.warning("scrub: sampling failed for %s: %s", seg_path, exc)
-                continue
-            if frames:
-                await writer.feed(frames)
-            if fed is not None and row["end_time"] <= window_end:
-                fed.ends[row["path"]] = row["end_time"]
+            runnable.append((row, seg_path))
+
+        # One scratch dir per in-flight segment, inside cache_dir: concurrent
+        # extractions would otherwise collide on `%06d.jpg`. The frames must
+        # outlive their decode (the writer reads them in `feed`), so the dirs
+        # are only removed when the whole window has been fed -- or discarded,
+        # on any exit path -- so nothing accumulates.
+        with contextlib.ExitStack() as stack:
+            work_dirs = [
+                Path(stack.enter_context(
+                    tempfile.TemporaryDirectory(
+                        prefix="extract-", dir=_work_root(scrub.cache_dir)
+                    )
+                ))
+                for _ in runnable
+            ]
+            results = await asyncio.gather(
+                *(
+                    _sample_segment(
+                        seg_path, row["start_time"], drive_interval_s, gop_s, sem, work_dir,
+                        cell_w=cell_w, cell_h=cell_h, stats=profile.stats,
+                    )
+                    for (row, seg_path), work_dir in zip(runnable, work_dirs, strict=True)
+                ),
+                return_exceptions=True,
+            )
+            for (row, seg_path), result in zip(runnable, results, strict=True):
+                if isinstance(result, ffmpeg_io.FfmpegInterrupted):
+                    # Shutdown took the child with it; not a fault of the segment,
+                    # and the hole-finder picks it up next cycle.
+                    logger.debug("scrub: sampling interrupted for %s: %s", seg_path, result)
+                    continue
+                if isinstance(result, ffmpeg_io.FfmpegError):
+                    logger.warning("scrub: sampling failed for %s: %s", seg_path, result)
+                    continue
+                if isinstance(result, BaseException):
+                    raise result
+                if result:
+                    await writer.feed(result)
+                if fed is not None and row["end_time"] <= window_end:
+                    fed.ends[row["path"]] = row["end_time"]
 
     await writer.flush()
     if fed is not None:

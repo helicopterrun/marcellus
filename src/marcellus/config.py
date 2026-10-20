@@ -460,9 +460,17 @@ class ScrubSection(BaseModel):
     # Retention sweep cadence for the in-process generator. Pruning used to be
     # CLI-only, so an unattended deployment grew past retention_days forever.
     prune_interval_s: float = 3600.0
-    # Bounds concurrent ffmpeg/ffprobe children. Segments within a camera are
-    # sampled serially (cell assignment is order-dependent), so today this only
-    # matters if a CLI backfill runs alongside the in-process generator.
+    # Bounds concurrent ffmpeg/ffprobe children, and is the size of the window of
+    # segments one camera decodes in parallel: each window's children run side by
+    # side, then their frames are fed in segment order (cell assignment is
+    # order-dependent, so only the decode overlaps). Cameras themselves are still
+    # processed one after another.
+    #
+    # On a host shared with Frigate, use 2: the box's cores are already spoken
+    # for by detection and recording, and a third concurrent decode mostly takes
+    # CPU from them rather than shortening the pass. 1 restores strictly serial
+    # decoding. Watch `ffmpeg_s / ffmpeg_wall_s` in the cycle line for the
+    # parallelism actually achieved.
     ffmpeg_concurrency: int = 3
     # Backfill allowance for a whole cycle, split across cameras. Without any
     # cap the first cycle on a cold cache tries to sample the whole retention
@@ -482,12 +490,18 @@ class ScrubSection(BaseModel):
     # 20s in disguise: one decode now feeds every tier, so the same wall clock
     # buys several times the coverage it used to.
     backfill_time_budget_s: float = 22.0
-    # Cap on the live-edge pass, per camera per cycle. Sized to cover the whole
-    # lookback in one pass (900s / 10s segments), so a camera reaches `now` in a
-    # single cycle rather than converging over several: a fixed small cap loses
-    # ground whenever the cycle takes longer than the footage it generated, which
-    # is exactly what happens once backfill shares the cycle.
-    live_edge_segments: int = 90
+    # Cap on the live-edge pass, per camera per cycle. The edge takes a camera's
+    # *newest* N segments (`newest_first`) and leaves any older gap to
+    # `_backfill_tier`, which fills newest-first, so a small cap keeps every
+    # camera fresh instead of "losing ground": whatever it skips is not lost.
+    #
+    # The old default of 90 (the whole 900 s lookback in one pass) dates from the
+    # oldest-first design, where a camera had to crawl up to `now` and a small cap
+    # never got there. Combined with the per-segment deadline, it lets one
+    # backlogged camera spend the entire pass on its 90 segments while the rest
+    # of the rotation waits: measured on a loaded host, per-camera lag ranged from
+    # 39 s to 822 s. 3 is two 10 s segments per 20 s tick, plus one of slack.
+    live_edge_segments: int = 3
     # How far back the live-edge pass will resume from. A cache that is further
     # behind than this jumps forward to the edge and leaves the gap for
     # backfill: crawling up from a day ago meant nothing recent was ever
