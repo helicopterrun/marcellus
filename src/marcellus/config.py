@@ -482,12 +482,18 @@ class ScrubSection(BaseModel):
     # 20s in disguise: one decode now feeds every tier, so the same wall clock
     # buys several times the coverage it used to.
     backfill_time_budget_s: float = 22.0
-    # Cap on the live-edge pass, per camera per cycle. Sized to cover the whole
-    # lookback in one pass (900s / 10s segments), so a camera reaches `now` in a
-    # single cycle rather than converging over several: a fixed small cap loses
-    # ground whenever the cycle takes longer than the footage it generated, which
-    # is exactly what happens once backfill shares the cycle.
-    live_edge_segments: int = 90
+    # Cap on the live-edge pass, per camera per cycle. The edge takes a camera's
+    # *newest* N segments (`newest_first`) and leaves any older gap to
+    # `_backfill_tier`, which fills newest-first, so a small cap keeps every
+    # camera fresh instead of "losing ground": whatever it skips is not lost.
+    #
+    # The old default of 90 (the whole 900 s lookback in one pass) dates from the
+    # oldest-first design, where a camera had to crawl up to `now` and a small cap
+    # never got there. Combined with the per-segment deadline, it lets one
+    # backlogged camera spend the entire pass on its 90 segments while the rest
+    # of the rotation waits: measured on a loaded host, per-camera lag ranged from
+    # 39 s to 822 s. 3 is two 10 s segments per 20 s tick, plus one of slack.
+    live_edge_segments: int = 3
     # How far back the live-edge pass will resume from. A cache that is further
     # behind than this jumps forward to the edge and leaves the gap for
     # backfill: crawling up from a day ago meant nothing recent was ever

@@ -95,7 +95,11 @@ The `scrub:` config section:
   wall-clock caps on the backfill phase per cycle (default 120 / 22s).
 - `live_edge_segments` / `live_edge_lookback_s` — cap on the live-edge pass
   per camera per cycle, and how far back it resumes from before jumping
-  forward to the edge (default 90 / 900s).
+  forward to the edge (default 3 / 900s). The edge takes a camera's
+  *newest* segments and leaves any older gap to backfill (newest-first), so
+  a small cap keeps every camera fresh: a large one lets a single backlogged
+  camera use the whole pass while the others fall behind. 3 is two 10s
+  segments per 20s tick plus one of slack.
 - `derive_time_reserve_s` — wall-clock carved out of
   `backfill_time_budget_s` for the derived-tier decimation pass (default
   5s).

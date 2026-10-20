@@ -943,6 +943,11 @@ def test_dense_keyframes_fill_whole_sheets(
             enabled=True, cameras=["doorbell"], cache_dir=tmp_path / "scrub",
             recent_interval_s=5.0, aged_after_h=9999.0,  # one tier, 5s cadence
             sheet_cols=4, sheet_rows=3,  # 12-cell sheets = 60s of footage each
+            # This is about cadence, not live-edge scheduling: let the edge take
+            # all 12 segments in one pass. At the default cap (3) it takes only
+            # the newest and backfill fills behind it, which is a deliberately
+            # separate bucket.
+            live_edge_segments=12,
         ),
     )
 
@@ -3466,3 +3471,85 @@ def test_derived_tier_publishing_never_touches_the_canvas_cache(env: Settings) -
     assert result["new_frames"] > 0, "the derived tier must actually have published"
     assert keys_seen == []
     assert all(k[1] != 10.0 for k in profile.canvas_cache._entries)
+
+
+# ----- live-edge fairness across backlogged cameras -----
+
+
+def test_live_edge_segments_defaults_to_a_small_cap() -> None:
+    assert ScrubSection().live_edge_segments == 3
+
+
+def test_backlogged_cameras_each_get_their_newest_segment_every_pass(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the per-segment live-edge deadline, a large per-camera cap let the
+    first backlogged camera spend the whole pass on its oldest-first-fed
+    segments while the others waited (prod: lag 39 s .. 822 s). At the default
+    cap every camera gets its *newest* segments in the one pass, so the lag
+    spread across cameras is one cap's worth of footage, not a cycle's."""
+    base = 1_800_000_000.0
+    cams = ["cam_a", "cam_b", "cam_c", "cam_d"]
+    root = long_history_env.frigate.recordings_path
+    conn = sqlite3.connect(long_history_env.frigate.db_path)
+    conn.execute("DELETE FROM recordings")
+    for cam in cams:
+        (root / f"{cam}.mp4").write_bytes(b"fake")
+        conn.executemany(
+            "INSERT INTO recordings VALUES (?, ?, ?, ?, ?, 10.0, 5.0)",
+            [
+                (f"{cam}{i}", cam, f"/media/frigate/{cam}.mp4",
+                 base + i * 10, base + (i + 1) * 10)
+                for i in range(100)  # ~17 min of backlog each
+            ],
+        )
+    conn.commit()
+    conn.close()
+    # The default cap, serial decode: this is about fairness, not parallelism.
+    env = _late_cycle_env(
+        long_history_env,
+        live_edge_segments=ScrubSection().live_edge_segments,
+        ffmpeg_concurrency=1, backfill_min_share_s=0.0, decimation_min_share_s=3.0,
+        derived_intervals_s=[], live_edge_lookback_s=3600.0,
+    )
+    clock = _FakeClock()
+    monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
+    decoded: list[str] = []
+
+    async def _slow_extract(
+        seg_path: Path, out_dir: Path, **kw: object
+    ) -> list[tuple[float, Path]]:
+        clock.t += 1.0  # 4 cameras x 3 segments fit the 17 s edge deadline
+        decoded.append(seg_path.name)
+        return await _fake_extract(lambda seg: [float(i) for i in range(10)])(  # type: ignore[operator,no-any-return]
+            seg_path, out_dir, **kw
+        )
+
+    monkeypatch.setattr(ffmpeg_io, "extract_keyframes_with_pts", _slow_extract)
+
+    async def _noop_backfill(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "segments": 0, "new_frames": 0, "backfilled": False}
+
+    monkeypatch.setattr(generator, "generate_backfill", _noop_backfill)
+    now = base + 1000.0
+    asyncio.run(generator.generate_cycle(
+        env, now=now, profile=generator.SourceProfile(), backfill_deadline=clock.t + 20.0,
+    ))
+
+    per_cam = {c: decoded.count(f"{c}.mp4") for c in cams}
+    assert all(1 <= n <= 3 for n in per_cam.values()), per_cam
+
+    check = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        lags = []
+        for cam in cams:
+            through = check.execute(
+                "SELECT MAX(end_ts) FROM scrub_buckets WHERE camera = ?", (cam,)
+            ).fetchone()[0]
+            assert through is not None, f"{cam} was skipped for the whole cycle"
+            lags.append(now - through)
+    finally:
+        check.close()
+    # Everyone is at the newest segment, not crawling up from the oldest.
+    assert max(lags) - min(lags) <= 10.0, lags
+
