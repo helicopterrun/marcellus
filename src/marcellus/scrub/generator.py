@@ -37,6 +37,7 @@ from marcellus import db
 from marcellus.config import Settings
 from marcellus.scrub import ffmpeg_io, grid, tiling
 from marcellus.scrub.mapping import map_recording_path
+from marcellus.scrub.stats import CycleStats
 
 logger = logging.getLogger(__name__)
 
@@ -70,12 +71,16 @@ class SourceProfile:
     aspect: dict[str, float]
     backfill_cursor: int
     live_edge_cursor: int
+    stats: CycleStats
 
     def __init__(self) -> None:
         self.gop_s = {}
         self.aspect = {}
         self.backfill_cursor = 0
         self.live_edge_cursor = 0
+        # Reset by `generate_cycle`; lives here because every generation entry
+        # point already takes the profile.
+        self.stats = CycleStats()
 
 
 def _cells_dir(cache_dir: Path, camera: str, interval_s: float, sheet_start: float) -> Path:
@@ -113,6 +118,7 @@ async def _sample_segment(
     *,
     cell_w: int,
     cell_h: int,
+    stats: CycleStats | None = None,
 ) -> list[grid.Frame]:
     """Extract frames from one segment into `work_dir`, returning achieved
     (timestamp, path) pairs. Chooses keyframe-only decode when GOP ~= interval,
@@ -122,27 +128,34 @@ async def _sample_segment(
     accepted into the cell store or discarded, so nothing survives the cycle.
     """
     async with sem:
-        if gop_s <= interval_s * _GOP_TOLERANCE:
-            extracted = await ffmpeg_io.extract_keyframes_with_pts(
-                seg_path, work_dir, cell_w=cell_w, cell_h=cell_h
+        spawned = time.monotonic()
+        try:
+            if gop_s <= interval_s * _GOP_TOLERANCE:
+                extracted = await ffmpeg_io.extract_keyframes_with_pts(
+                    seg_path, work_dir, cell_w=cell_w, cell_h=cell_h
+                )
+                frames = [
+                    grid.Frame(timestamp=seg_start + pts, path=str(path))
+                    for pts, path in extracted
+                ]
+                # Keyframes are only guaranteed to be no *sparser* than the GOP, so
+                # a tier whose interval is several GOPs wide gets several frames per
+                # cell. Thin them to the target cadence here rather than handing
+                # colliding frames to cell assignment, which can only respond by
+                # splitting the bucket.
+                return grid.decimate_to_grid(frames, interval_s)
+            jpgs = await ffmpeg_io.extract_fps(
+                seg_path, work_dir, interval_s, cell_w=cell_w, cell_h=cell_h
             )
-            frames = [
-                grid.Frame(timestamp=seg_start + pts, path=str(path))
-                for pts, path in extracted
+            return [
+                grid.Frame(timestamp=seg_start + i * interval_s, path=str(jpgs[i]))
+                for i in range(len(jpgs))
             ]
-            # Keyframes are only guaranteed to be no *sparser* than the GOP, so
-            # a tier whose interval is several GOPs wide gets several frames per
-            # cell. Thin them to the target cadence here rather than handing
-            # colliding frames to cell assignment, which can only respond by
-            # splitting the bucket.
-            return grid.decimate_to_grid(frames, interval_s)
-        jpgs = await ffmpeg_io.extract_fps(
-            seg_path, work_dir, interval_s, cell_w=cell_w, cell_h=cell_h
-        )
-        return [
-            grid.Frame(timestamp=seg_start + i * interval_s, path=str(jpgs[i]))
-            for i in range(len(jpgs))
-        ]
+        finally:
+            if stats is not None:
+                stats.ffmpeg_spawns += 1
+                stats.segments_decoded += 1
+                stats.ffmpeg_s += time.monotonic() - spawned
 
 
 def _publish_sheet_version(
@@ -156,6 +169,7 @@ def _publish_sheet_version(
     cell_w: int,
     cell_h: int,
     fmt: str,
+    stats: CycleStats | None = None,
 ) -> tuple[str, int] | None:
     """Tile the current cell files for this sheet and atomically publish a new
     immutable version (URL includes `count`, §4.3). Returns the on-disk
@@ -211,6 +225,9 @@ def _publish_sheet_version(
     try:
         tile = tiling.tile_sheet_webp if fmt == "webp" else tiling.tile_sheet
         tile(cells, cols=cols, rows=rows, cell_w=cell_w, cell_h=cell_h, out_path=tmp)
+        if stats is not None:
+            stats.pil_decodes += len(cells)
+            stats.pil_sheet_encodes += 1
         os.replace(tmp, out_path)  # atomic publish (mirrors wildlife.py)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -529,8 +546,10 @@ class _TierWriter:
         cell_w: int,
         cell_h: int,
         sidecar_conn: sqlite3.Connection,
+        stats: CycleStats | None = None,
     ) -> None:
         self.settings = settings
+        self.stats = stats
         self.camera = camera
         self.interval_s = interval_s
         self.window_start = window_start
@@ -600,7 +619,7 @@ class _TierWriter:
         published = await asyncio.to_thread(
             _publish_sheet_version,
             scrub.cache_dir, self.camera, self.interval_s, sheet_start,
-            count, self.cols, self.rows, self.cell_w, self.cell_h, scrub.format,
+            count, self.cols, self.rows, self.cell_w, self.cell_h, scrub.format, self.stats,
         )
         if published is None:
             return
@@ -798,6 +817,7 @@ async def _tier_writer(
         settings, camera,
         interval_s=interval_s, window_start=window_start, window_end=window_end,
         cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn,
+        stats=profile.stats,
     )
 
 
@@ -936,7 +956,7 @@ async def _generate_tiers(
             try:
                 frames = await _sample_segment(
                     seg_path, row["start_time"], drive_interval_s, gop_s, sem, work_dir,
-                    cell_w=cell_w, cell_h=cell_h,
+                    cell_w=cell_w, cell_h=cell_h, stats=profile.stats,
                 )
             except ffmpeg_io.FfmpegInterrupted as exc:
                 # Shutdown took the child with it; not a fault of the segment,
@@ -1107,6 +1127,7 @@ async def camera_gop_seconds(
         )
         if not seg.exists():
             continue
+        profile.stats.ffprobe_calls += 1
         try:
             found = await ffmpeg_io.probe_keyframe_deltas(seg)
         except ffmpeg_io.FfmpegError:
@@ -1115,6 +1136,7 @@ async def camera_gop_seconds(
             deltas.extend(found)
         elif fallback is None:
             # No keyframe pair anywhere in the segment: one per segment at most.
+            profile.stats.ffprobe_calls += 1
             with contextlib.suppress(ffmpeg_io.FfmpegError):
                 fallback = await ffmpeg_io.probe_gop_seconds(seg)
 
@@ -1156,6 +1178,7 @@ async def camera_cell_size(
     if aspect is None:
         seg = _newest_segment(settings, camera, frigate_conn)
         if seg is not None:
+            profile.stats.ffprobe_calls += 1
             try:
                 measured = await ffmpeg_io.probe_display_aspect(seg)
             except ffmpeg_io.FfmpegError:
@@ -1438,6 +1461,7 @@ async def _decimate_source(
     window_end: float,
     work_dir: Path,
     deadline: float | None = None,
+    stats: CycleStats | None = None,
 ) -> list[grid.Frame]:
     """Select every Nth already-published cell of `finer_interval_s`'s sheets
     landing on `derived_interval_s`'s epoch grid, cropped to its own temp file.
@@ -1493,6 +1517,8 @@ async def _decimate_source(
             # range requests included) keeps serving while a derived tier
             # catches up.
             out_frames: list[grid.Frame] = []
+            if stats is not None:
+                stats.pil_decodes += 1
             with Image.open(img_path) as im:
                 rgb = im.convert("RGB")
                 for k, cell_t in wanted:
@@ -1502,6 +1528,8 @@ async def _decimate_source(
                     )
                     out = work_dir / f"{k:06d}-{base + len(out_frames):06d}.jpg"
                     crop.save(out, format="JPEG", quality=90)
+                    if stats is not None:
+                        stats.pil_cell_encodes += 1
                     out_frames.append(grid.Frame(timestamp=cell_t, path=str(out)))
             return out_frames
 
@@ -1557,7 +1585,7 @@ async def generate_derived_tier(
     writer = _TierWriter(
         settings, camera, interval_s=interval_s,
         window_start=retention_cutoff, window_end=now,
-        cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn,
+        cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn, stats=profile.stats,
     )
     since = db.latest_generated_through(sidecar_conn, camera, interval_s)
     resume_since = since if since is not None else retention_cutoff
@@ -1575,7 +1603,7 @@ async def generate_derived_tier(
                 sidecar_conn, scrub.cache_dir, camera,
                 finer_interval_s=finer_interval, derived_interval_s=interval_s,
                 window_start=span_start, window_end=span_end, work_dir=work_dir,
-                deadline=deadline,
+                deadline=deadline, stats=profile.stats,
             )
             if frames:
                 await writer.feed(frames)
@@ -1712,7 +1740,7 @@ async def generate_aged_tier(
     writer = _TierWriter(
         settings, camera, interval_s=aged_interval_s,
         window_start=retention_cutoff, window_end=boundary,
-        cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn,
+        cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn, stats=profile.stats,
     )
     # Resume at the first span's start -- that is where last cycle's open
     # bucket ends, which is the bucket this pass has to keep growing.
@@ -1728,7 +1756,7 @@ async def generate_aged_tier(
                 sidecar_conn, scrub.cache_dir, camera,
                 finer_interval_s=recent_interval_s, derived_interval_s=aged_interval_s,
                 window_start=span_start, window_end=span_end, work_dir=work_dir,
-                deadline=deadline,
+                deadline=deadline, stats=profile.stats,
             )
             if not frames:
                 continue
@@ -1801,6 +1829,7 @@ async def generate_cycle(
     scrub = settings.scrub
     sem = asyncio.Semaphore(scrub.ffmpeg_concurrency)
     profile = profile if profile is not None else SourceProfile()
+    profile.stats = stats = CycleStats()
 
     conn = db.open_joined(settings.frigate.db_path, settings.sidecar.db_path)
     try:
@@ -1865,6 +1894,7 @@ async def generate_cycle(
             tick_end - pass3_reserve - scrub.backfill_min_share_s
             if scrub.backfill_min_share_s > 0 else None
         )
+        pass1_started = _time.monotonic()
         start_le = profile.live_edge_cursor % len(cameras)
         order_le = cameras[start_le:] + cameras[:start_le]
         served_le = 0
@@ -1887,6 +1917,7 @@ async def generate_cycle(
                 logger.exception("scrub: live edge failed for camera %s", camera)
                 totals[camera]["error"] = True
         profile.live_edge_cursor = start_le + served_le
+        stats.pass1_s = _time.monotonic() - pass1_started
         if served_le < len(cameras):
             logger.info(
                 "scrub: live-edge cut short (%d/%d cameras done)", served_le, len(cameras)
@@ -1896,6 +1927,7 @@ async def generate_cycle(
         # as segment count -- how long a segment takes depends on the box, and
         # an over-long cycle delays the next live-edge pass, which is what let
         # the edge slip behind in the first place.
+        pass2_started = _time.monotonic()
         share = max(1, scrub.backfill_segments_per_cycle // len(cameras))
         deadline = _time.monotonic() + scrub.backfill_time_budget_s
         if backfill_deadline is not None:
@@ -1937,6 +1969,7 @@ async def generate_cycle(
                 logger.exception("scrub: backfill failed for camera %s", camera)
                 totals[camera]["error"] = True
         profile.backfill_cursor = start + served
+        stats.pass2_s = _time.monotonic() - pass2_started
 
         # Pass 3: aged-tier decimation, then derived tiers, both decimated
         # from already-published decode-tier sheets -- no ffmpeg, so this
@@ -1954,6 +1987,7 @@ async def generate_cycle(
         # the one that actually earned it, and with `retention_days` at 7 and
         # the recent tier at ~8 GB/day, an un-retired recent tier piles up
         # forever.
+        pass3_started = _time.monotonic()
         retention_cutoff = now - scrub.retention_days * 86400
         effective_boundary = max(now - scrub.aged_after_h * 3600, retention_cutoff)
         for camera in cameras:
@@ -1979,6 +2013,7 @@ async def generate_cycle(
                     "scrub: aged/derived-tier generation failed for camera %s", camera
                 )
                 totals[camera]["error"] = True
+        stats.pass3_s = _time.monotonic() - pass3_started
 
         # One line per cycle. Whether the edge is being held is otherwise only
         # visible by querying the DB and inferring it from timestamps, and the
@@ -2025,9 +2060,10 @@ async def generate_cycle(
         )
         logger.info(
             "scrub: cycle %.0fs, %d cameras (%d backfilled), %d segments, %d frames; "
-            "coverage %s; worst live-edge lag %.0fs",
+            "coverage %s; worst live-edge lag %.0fs; %s",
             elapsed, len(cameras), served, live_total,
             sum(r["new_frames"] for r in totals.values()), tiers or "none", worst_lag,
+            stats.summary(),
         )
         if worst_lag > elapsed * 3 and elapsed > 0:
             logger.warning(

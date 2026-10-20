@@ -2925,3 +2925,31 @@ def test_aged_tier_fills_whole_sheets(growing_env: Settings) -> None:
         f"expected the sheet grown to its full 12 cells, got {newest['count']}"
     )
     assert newest["complete"]
+
+
+def test_cycle_stats_are_populated_and_logged(
+    env: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The cycle summary line carries per-pass wall time and ffmpeg/Pillow cost
+    counters, the baseline the efficiency work is measured against."""
+    profile = generator.SourceProfile()
+    with caplog.at_level("INFO", logger=generator.logger.name):
+        asyncio.run(generator.generate_cycle(env, now=1_800_000_030.0, profile=profile))
+
+    stats = profile.stats
+    assert stats.pass1_s >= 0 and stats.pass2_s >= 0 and stats.pass3_s >= 0
+    assert stats.ffmpeg_spawns > 0
+    assert stats.segments_decoded == stats.ffmpeg_spawns
+    assert stats.ffmpeg_s >= 0
+    assert stats.pil_decodes > 0, "publishing a sheet decodes its cells"
+    assert stats.pil_sheet_encodes > 0
+
+    line = next(r.getMessage() for r in caplog.records if "scrub: cycle" in r.getMessage())
+    assert "worst live-edge lag" in line
+    for key in ("pass1=", "pass2=", "pass3=", "ffmpeg_spawns=", "ms_per_segment=",
+                "pil_decodes=", "pil_sheet_encodes=", "child_cpu_s=", "self_cpu_s="):
+        assert key in line
+
+    # The next cycle starts from zero rather than accumulating.
+    asyncio.run(generator.generate_cycle(env, now=1_800_000_030.0, profile=profile))
+    assert profile.stats is not stats
