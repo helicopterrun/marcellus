@@ -12,6 +12,8 @@ import asyncio
 import os
 import sqlite3
 import tempfile
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -19,7 +21,7 @@ from PIL import Image, ImageStat
 
 from marcellus import db
 from marcellus.config import FrigateSection, ScrubSection, Settings, SidecarSection
-from marcellus.scrub import ffmpeg_io, generator, grid
+from marcellus.scrub import ffmpeg_io, generator, grid, tiling
 
 RECORDINGS_SCHEMA = """
 CREATE TABLE recordings (
@@ -1002,6 +1004,53 @@ def test_a_filling_sheet_is_published_once_per_cycle(env: Settings) -> None:
     assert [r["versions"] for r in rows] == [1, 1], "a sheet was republished mid-cycle"
     on_disk = sorted(p.name for p in (env.scrub.cache_dir / "doorbell" / "1").glob("*.jpg"))
     assert len(on_disk) == 2, f"superseded sheet images left on disk: {on_disk}"
+
+
+def _run_two_flushes(env: Settings, cache_dir: Path, sheets: int) -> tuple[int, dict[str, bytes]]:
+    """Grow one sheet over two cycles; return total Pillow decodes and the pixels
+    of every sheet image left on disk."""
+    settings = env.model_copy(
+        update={
+            "scrub": env.scrub.model_copy(
+                update={"cache_dir": cache_dir, "canvas_cache_sheets": sheets}
+            )
+        }
+    )
+    profile = generator.SourceProfile()
+    db_path = cache_dir.parent / f"sidecar-{sheets}.db"
+    settings = settings.model_copy(
+        update={"sidecar": settings.sidecar.model_copy(update={"db_path": db_path})}
+    )
+    conn = db.open_joined(settings.frigate.db_path, settings.sidecar.db_path)
+    try:
+        for now in (1_800_000_005.0, 1_800_000_030.0):
+            asyncio.run(
+                generator.generate_camera(
+                    settings, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                    now=now, profile=profile, sem=asyncio.Semaphore(3),
+                )
+            )
+    finally:
+        conn.close()
+    pixels = {}
+    for f in sorted((cache_dir / "doorbell" / "1").glob("*.jpg")):
+        with Image.open(f) as im:
+            pixels[f.name] = im.convert("RGB").tobytes()
+    return profile.stats.pil_decodes, pixels
+
+
+def test_canvas_cache_cuts_decodes_without_changing_a_pixel(
+    env: Settings, tmp_path: Path
+) -> None:
+    """The cached flush pastes only new cells; the sheets it writes are identical
+    to a from-files composition, and `pil_decodes` counts only what was decoded."""
+    cached_decodes, cached = _run_two_flushes(env, tmp_path / "scrub-on", 24)
+    plain_decodes, plain = _run_two_flushes(env, tmp_path / "scrub-off", 0)
+    assert cached.keys() == plain.keys() and cached
+    assert cached == plain
+    # Second cycle republishes the still-filling sheet: from files it decodes every
+    # cell again, from the cache only the new ones.
+    assert cached_decodes < plain_decodes
 
 
 # ----- Cycle scheduling: live edge first, backfill behind it (§5.4) -----
@@ -2762,7 +2811,11 @@ def test_zero_backfill_share_runs_every_camera_live_edge(
     env = env.model_copy(
         update={
             "scrub": env.scrub.model_copy(
-                update={"cameras": [], "backfill_min_share_s": 0.0, "live_edge_interval_s": 20.0}
+                update={
+                    "cameras": [], "backfill_min_share_s": 0.0, "live_edge_interval_s": 20.0,
+                    # Both shares off is the only way to get an unbounded edge.
+                    "decimation_min_share_s": 0.0,
+                }
             )
         }
     )
@@ -3136,3 +3189,280 @@ def test_subtract_covered_trims_and_splits_holes() -> None:
     assert sub([(0.0, 100.0)], [(0.0, 98.0)], 5.0) == []  # sliver too narrow
     assert sub([(0.0, 10.0)], [(50.0, 60.0)], 5.0) == [(0.0, 10.0)]
     assert sub([(10.0, 20.0)], [(0.0, 100.0)], 5.0) == []
+
+
+# ----- decimation_min_share_s: Pass 3 must run even when the cycle is late -----
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.t = 1_000.0
+
+    def monotonic(self) -> float:
+        return self.t
+
+
+def _late_cycle_env(env: Settings, **scrub_kw: object) -> Settings:
+    return env.model_copy(
+        update={
+            "scrub": env.scrub.model_copy(
+                update={"cameras": [], "live_edge_interval_s": 20.0, **scrub_kw}
+            )
+        }
+    )
+
+
+def _add_garden_segments(env: Settings) -> None:
+    conn = sqlite3.connect(env.frigate.db_path)
+    conn.executemany(
+        "INSERT INTO recordings VALUES (?, 'garden', ?, ?, ?, 10.0, 5.0)",
+        [
+            (f"g{i}", "/media/frigate/x.mp4", 1_800_000_000.0 + i * 10,
+             1_800_000_000.0 + (i + 1) * 10)
+            for i in range(100)
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.parametrize("share, expect_pass3", [(3.0, True), (0.0, False)])
+def test_late_cycle_still_gives_decimation_its_minimum_share(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch, share: float, expect_pass3: bool
+) -> None:
+    """A live edge that overruns the tick used to leave Pass 3 with a deadline
+    already in the past: every camera was skipped, pass3=0.00s, every cycle."""
+    env = _late_cycle_env(long_history_env, decimation_min_share_s=share)
+    _add_garden_segments(env)
+    clock = _FakeClock()
+    monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
+
+    async def _slow_live(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        clock.t += 100.0  # way past the 20 s tick
+        return {"camera": camera, "segments": 1, "new_frames": 1}
+
+    async def _noop_backfill(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "segments": 0, "new_frames": 0, "backfilled": False}
+
+    aged_deadlines: list[float] = []
+
+    async def _aged(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        aged_deadlines.append(float(kw["deadline"]))  # type: ignore[arg-type]
+        clock.t += 1.0
+        return {"camera": camera, "new_frames": 7}
+
+    async def _noop_derived(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "new_frames": 0, "tiers_touched": 0}
+
+    monkeypatch.setattr(generator, "generate_live_edge", _slow_live)
+    monkeypatch.setattr(generator, "generate_backfill", _noop_backfill)
+    monkeypatch.setattr(generator, "generate_aged_tier", _aged)
+    monkeypatch.setattr(generator, "generate_derived", _noop_derived)
+
+    profile = generator.SourceProfile()
+    asyncio.run(generator.generate_cycle(
+        env, now=1_800_000_000.0 + 86400.0, profile=profile, backfill_deadline=clock.t + 20.0,
+    ))
+
+    if expect_pass3:
+        assert aged_deadlines, "Pass 3 was skipped although the cycle was merely late"
+        assert profile.stats.pass3_s >= 0.0
+        # The floor is measured from when Pass 3 begins, not from the tick.
+        assert aged_deadlines[0] == pytest.approx(1_100.0 + 3.0)
+        # Only ~3 s of floor: not every camera fits, and the cursor advanced so
+        # the next cycle starts with whoever was cut off.
+        assert 0 < profile.decimation_cursor < 6
+    else:
+        assert not aged_deadlines
+
+
+def test_live_edge_stops_at_its_deadline_between_segments(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `backfill_min_share_s` at 0 the edge used to have no deadline at all
+    (90-170 s Pass 1 on prod); now it stops per segment, `decimation_min_share_s`
+    before the tick end."""
+    env = _late_cycle_env(
+        long_history_env, backfill_min_share_s=0.0, decimation_min_share_s=3.0,
+        live_edge_segments=6, derived_intervals_s=[],
+    )
+    clock = _FakeClock()
+    monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
+    inner = ffmpeg_io.extract_keyframes_with_pts
+
+    async def _slow_extract(*a: object, **kw: object) -> list[tuple[float, Path]]:
+        clock.t += 5.0
+        return await inner(*a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ffmpeg_io, "extract_keyframes_with_pts", _slow_extract)
+
+    async def _noop_backfill(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "segments": 0, "new_frames": 0, "backfilled": False}
+
+    monkeypatch.setattr(generator, "generate_backfill", _noop_backfill)
+    profile = generator.SourceProfile()
+    asyncio.run(generator.generate_cycle(
+        env, now=1_800_000_000.0 + 86400.0, profile=profile,
+        backfill_deadline=clock.t + 20.0,
+    ))
+    # Deadline is tick_end - 3 s = +17 s; segments start at +0, +5, +10, +15.
+    assert profile.stats.segments_decoded == 4
+
+
+def test_live_edge_decodes_one_segment_even_when_the_deadline_has_passed(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = _late_cycle_env(long_history_env, live_edge_segments=6, derived_intervals_s=[])
+    clock = _FakeClock()
+    monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
+
+    async def _noop_backfill(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "segments": 0, "new_frames": 0, "backfilled": False}
+
+    monkeypatch.setattr(generator, "generate_backfill", _noop_backfill)
+    profile = generator.SourceProfile()
+    asyncio.run(generator.generate_cycle(
+        env, now=1_800_000_000.0 + 86400.0, profile=profile,
+        backfill_deadline=clock.t - 50.0,  # tick already over
+    ))
+    assert profile.stats.segments_decoded == 1
+
+
+# ----- exact memory of fed live-edge segments (SourceProfile.fed_segments) -----
+
+
+def _live_edge_harness(
+    env: Settings, monkeypatch: pytest.MonkeyPatch, last_pts: int, seg2_end: float,
+) -> tuple[list[str], generator.SourceProfile, Callable[..., None]]:
+    base = 1_800_000_000.0
+    writer = sqlite3.connect(env.frigate.db_path)
+    writer.execute("UPDATE recordings SET end_time = ? WHERE id = 's2'", (seg2_end,))
+    writer.commit()
+    writer.close()
+    decoded: list[str] = []
+    failing: set[str] = set()
+    inner = _fake_extract(
+        lambda seg: [float(i) for i in range(last_pts + 1 if seg.name == "2.mp4" else 10)]
+    )
+
+    async def _counting(seg_path: Path, out_dir: Path, **kw: object) -> list[tuple[float, Path]]:
+        decoded.append(seg_path.name)
+        if seg_path.name in failing:
+            failing.discard(seg_path.name)
+            raise ffmpeg_io.FfmpegError("boom")
+        return await inner(seg_path, out_dir, **kw)  # type: ignore[no-any-return,operator]
+
+    monkeypatch.setattr(ffmpeg_io, "extract_keyframes_with_pts", _counting)
+    profile = generator.SourceProfile()
+    profile.failing = failing  # type: ignore[attr-defined]
+
+    def _tick(conn: sqlite3.Connection, now: float = base + 40, **kw: object) -> None:
+        asyncio.run(
+            generator.generate_live_edge(
+                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=now, profile=profile, sem=asyncio.Semaphore(3), **kw,  # type: ignore[arg-type]
+            )
+        )
+
+    return decoded, profile, _tick
+
+
+@pytest.mark.parametrize(
+    "last_pts, seg2_end",
+    [
+        (9, 1_800_000_020.001),  # float-noise margin: end == through + interval + 0.001
+        (8, 1_800_000_010.0 + 10.001),  # uneven keyframes: last stored one at seg + 8.0
+    ],
+)
+def test_live_edge_remembers_segments_the_arithmetic_cannot_skip(
+    env: Settings, monkeypatch: pytest.MonkeyPatch, last_pts: int, seg2_end: float
+) -> None:
+    decoded, _profile, tick = _live_edge_harness(env, monkeypatch, last_pts, seg2_end)
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        tick(conn)
+        assert sorted(decoded) == ["1.mp4", "2.mp4"]
+        for _ in range(3):  # quiet ticks
+            decoded.clear()
+            tick(conn)
+            assert decoded == [], "an already-fed segment was decoded again"
+    finally:
+        conn.close()
+
+
+def test_live_edge_retries_a_failed_or_cut_short_segment(
+    env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    decoded, profile, tick = _live_edge_harness(env, monkeypatch, 9, 1_800_000_020.001)
+    failing: set[str] = profile.failing  # type: ignore[attr-defined]
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        # Cut short: the deadline has passed, so only the first segment is fed.
+        tick(conn, deadline=time.monotonic() - 1.0, min_segments=1)
+        assert decoded == ["1.mp4"]
+        # Failed: 2.mp4 raises on this attempt, so it must not be remembered.
+        decoded.clear()
+        failing.add("2.mp4")
+        tick(conn)
+        assert decoded == ["2.mp4"]
+        # Now it succeeds -- and only now is it remembered.
+        decoded.clear()
+        tick(conn)
+        assert decoded == ["2.mp4"]
+        decoded.clear()
+        tick(conn)
+        assert decoded == []
+    finally:
+        conn.close()
+
+
+def test_live_edge_forgets_fed_segments_when_the_tier_is_dropped(
+    env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    decoded, profile, tick = _live_edge_harness(env, monkeypatch, 9, 1_800_000_020.001)
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        tick(conn)
+        assert profile.fed_segments[("doorbell", 1.0)].ends
+        conn.execute("DELETE FROM scrub_buckets")
+        conn.commit()
+        decoded.clear()
+        tick(conn)
+        assert sorted(decoded) == ["1.mp4", "2.mp4"], "dropped data was not regenerated"
+    finally:
+        conn.close()
+
+
+def test_derived_tier_publishing_never_touches_the_canvas_cache(env: Settings) -> None:
+    """Derived tiers flush rarely; letting them into the LRU would only evict
+    the recent/aged canvases that are re-flushed every tick."""
+    denv = _derived_env(env, derived_intervals_s=[10.0])
+    conn = db.open_joined(denv.frigate.db_path, denv.sidecar.db_path)
+    try:
+        profile = generator.SourceProfile()
+        asyncio.run(
+            generator.generate_camera(
+                denv, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_030.0, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        keys_seen: list[float] = []
+        inner = profile.canvas_cache.compose_and_save
+
+        def _spy(key: tiling.CanvasKey, *a: object, **kw: object) -> int:
+            keys_seen.append(key[1])
+            return inner(key, *a, **kw)  # type: ignore[arg-type]
+
+        profile.canvas_cache.compose_and_save = _spy  # type: ignore[method-assign]
+        result = asyncio.run(
+            generator.generate_derived_tier(
+                denv, "doorbell", interval_s=10.0,
+                frigate_conn=conn, sidecar_conn=conn,
+                now=1_800_000_030.0, profile=profile,
+            )
+        )
+    finally:
+        conn.close()
+    assert result["new_frames"] > 0, "the derived tier must actually have published"
+    assert keys_seen == []
+    assert all(k[1] != 10.0 for k in profile.canvas_cache._entries)

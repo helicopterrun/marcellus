@@ -518,6 +518,35 @@ class ScrubSection(BaseModel):
     # every camera each tick as before #85. Use it on a box with no decode
     # headroom, where any backfill slice only starves the edge.
     backfill_min_share_s: float = 6.0
+    # Minimum wall-clock seconds per cycle that Pass 3 (aged-tier and derived-tier
+    # decimation, stale-bucket retirement) is guaranteed, even when the live edge
+    # and backfill have already run past the tick. Pass 3 normally shares
+    # backfill's deadline, so a cycle that was already late -- the box contended
+    # with Frigate, one slow decode -- found that deadline passed before Pass 3
+    # began and skipped it entirely, every cycle: measured on prod, pass3=0.00s for
+    # as long as the box stayed contended, the aged and derived tiers stalled
+    # completely. Pass 3 has no ffmpeg (Pillow crops of sheets already on disk), so
+    # the floor costs a little Python CPU and no decode slot. It also bounds the
+    # live-edge pass when `backfill_min_share_s` is 0, so the edge can no longer
+    # run unboundedly past the tick. 0 (or less) restores "Pass 3 gets only what
+    # the deadline leaves" and, with `backfill_min_share_s` also 0, an unbounded
+    # live edge.
+    decimation_min_share_s: float = 3.0
+    # How many in-progress sheet canvases the generator keeps in memory between
+    # flushes. Without them every flush of a growing sheet re-decoded every cell
+    # JPEG in it and re-encoded the whole canvas -- ~1100 Pillow decodes per prod
+    # cycle for ~23 sheet encodes. With them a flush pastes only the cells that
+    # are new or changed and encodes once; the output is pixel-identical. Each
+    # canvas is cols*cell_w x rows*cell_h x 3 bytes (~37 MB at 12x8 of 480x270),
+    # so the ceiling is this count times that: 24 -> ~0.9 GB. A canvas is dropped
+    # as soon as its sheet is full or its bucket seals; the rest are evicted
+    # least-recently-used. Only the recent and aged tiers use it (derived tiers
+    # flush rarely and compose from files). Sizing rule: at least 2 x the number
+    # of cameras (one growing recent and one growing aged sheet each) -- below
+    # that the cycle touches them round-robin and evicts each before its next
+    # flush, saving nothing, and startup logs a line saying so. ~37 MB per sheet
+    # at 480x270 cells. 0 disables the cache.
+    canvas_cache_sheets: int = 24
 
     @field_validator("format")
     @classmethod
@@ -542,10 +571,10 @@ class ScrubSection(BaseModel):
             raise ValueError(f"must be > 0, got {v!r}")
         return v
 
-    @field_validator("derive_time_reserve_s")
+    @field_validator("derive_time_reserve_s", "decimation_min_share_s", "canvas_cache_sheets")
     @classmethod
     def _non_negative(cls, v: float) -> float:
-        """0 is a valid, explicit "no floor" setting -- unlike the tick
+        """0 is a valid, explicit "no floor" (or "off") setting -- unlike the tick
         constants above, there's nothing broken about turning this off."""
         if v < 0:
             raise ValueError(f"must be >= 0, got {v!r}")

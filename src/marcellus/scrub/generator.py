@@ -27,7 +27,7 @@ import sqlite3
 import tempfile
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -47,8 +47,35 @@ logger = logging.getLogger(__name__)
 # rely on cell-assignment's own drift check to catch anything that slips.
 _GOP_TOLERANCE = 1.3
 
+#: How far behind the live edge's resume point remembered segments are kept.
+_FED_RETAIN_S = 300.0
+
 _WORK_DIRNAME = ".work"
 _CELLS_DIRNAME = ".cells"
+
+
+@dataclass
+class _FedSegments:
+    """Recordings a live-edge decode has already fed to the tier in full, with
+    their `end_time` (path -> end_time).
+
+    `consumed_through` (#112) skips a segment once its end is within one interval
+    of the last stored frame, but that is an inequality on a float: prod showed
+    margins of +0.000/+0.001 s that landed on the wrong side every tick, and
+    cameras whose keyframes are unevenly spaced (last stored keyframe 8.0 s into a
+    10.001 s segment) whose newest segment always ends past the criterion. Both
+    re-decoded the same segment every tick for nothing. Remembering the exact
+    segments that were fed completely settles it without any arithmetic.
+
+    In memory only: a restart empties it, costing at most one extra decode per
+    camera.
+    """
+
+    ends: dict[str, float] = field(default_factory=dict)
+    #: The tier's `generated_through` when `ends` was last used. If it goes
+    #: backwards or vanishes, the tier's data was dropped (retention, a manual
+    #: `drop_intervals`) and what we remember having fed no longer exists.
+    seen_through: float | None = None
 
 
 @dataclass
@@ -65,19 +92,32 @@ class SourceProfile:
     state rather than a stream property: each is the camera the next cycle's
     backfill (resp. live-edge) pass starts from, and they live here because
     this is already the object the generation loop keeps between cycles.
+    `decimation_cursor` is the same thing for Pass 3.
     """
 
     gop_s: dict[str, float]
     aspect: dict[str, float]
     backfill_cursor: int
     live_edge_cursor: int
+    decimation_cursor: int
     stats: CycleStats
+    canvas_cache: tiling.CanvasCache
+    fed_segments: dict[tuple[str, float], _FedSegments]
+    cache_sizing_logged: bool
 
     def __init__(self) -> None:
         self.gop_s = {}
         self.aspect = {}
         self.backfill_cursor = 0
         self.live_edge_cursor = 0
+        self.decimation_cursor = 0
+        # In-progress sheet canvases (capacity set from `scrub.canvas_cache_sheets`
+        # by each writer, so the profile needn't know the settings). Lives here
+        # because it must outlive a cycle to be of any use.
+        self.canvas_cache = tiling.CanvasCache(0)
+        # (camera, tier interval) -> segments the live edge has fed completely.
+        self.fed_segments = {}
+        self.cache_sizing_logged = False
         # Reset by `generate_cycle`; lives here because every generation entry
         # point already takes the profile.
         self.stats = CycleStats()
@@ -170,6 +210,7 @@ def _publish_sheet_version(
     cell_h: int,
     fmt: str,
     stats: CycleStats | None = None,
+    canvas_cache: tiling.CanvasCache | None = None,
 ) -> tuple[str, int] | None:
     """Tile the current cell files for this sheet and atomically publish a new
     immutable version (URL includes `count`, §4.3). Returns the on-disk
@@ -197,6 +238,12 @@ def _publish_sheet_version(
     contract it inherits: cell k is `sheet_start + k * interval_s`, which is only
     true while the cells are contiguous from zero. Cells past a hole are kept on
     disk, not discarded.
+
+    With `canvas_cache`, the sheet's canvas is kept in memory between flushes and
+    only cells new or changed since the last one are decoded (`tiling.CanvasCache`).
+    The generator publishes one sheet from one place at a time, and the cache
+    serialises per sheet regardless. A sheet published full is evicted: its cell
+    store is dropped right after, so nothing will grow it again.
     """
     cells_dir = _cells_dir(cache_dir, camera, interval_s, sheet_start)
     cells: list[tiling.Cell] = []
@@ -224,9 +271,17 @@ def _publish_sheet_version(
     tmp = Path(tmp_name)
     try:
         tile = tiling.tile_sheet_webp if fmt == "webp" else tiling.tile_sheet
-        tile(cells, cols=cols, rows=rows, cell_w=cell_w, cell_h=cell_h, out_path=tmp)
+        key: tiling.CanvasKey = (
+            camera, interval_s, sheet_start, cols, rows, cell_w, cell_h, fmt
+        )
+        decoded = tile(
+            cells, cols=cols, rows=rows, cell_w=cell_w, cell_h=cell_h, out_path=tmp,
+            cache=canvas_cache, cache_key=key,
+        )
+        if canvas_cache is not None and count >= cols * rows:
+            canvas_cache.evict(key)
         if stats is not None:
-            stats.pil_decodes += len(cells)
+            stats.pil_decodes += decoded
             stats.pil_sheet_encodes += 1
         os.replace(tmp, out_path)  # atomic publish (mirrors wildlife.py)
     except BaseException:
@@ -547,9 +602,19 @@ class _TierWriter:
         cell_h: int,
         sidecar_conn: sqlite3.Connection,
         stats: CycleStats | None = None,
+        canvas_cache: tiling.CanvasCache | None = None,
+        use_canvas_cache: bool = False,
     ) -> None:
         self.settings = settings
         self.stats = stats
+        # Opt-in per writer: only the tiers that re-flush a growing sheet every
+        # tick (ffmpeg-decoded recent, and the aged tier) benefit. Derived tiers
+        # flush rarely and would only crowd those out of the LRU.
+        if not use_canvas_cache:
+            canvas_cache = None
+        self.canvas_cache = canvas_cache
+        if canvas_cache is not None:
+            canvas_cache.set_capacity(settings.scrub.canvas_cache_sheets)
         self.camera = camera
         self.interval_s = interval_s
         self.window_start = window_start
@@ -606,6 +671,14 @@ class _TierWriter:
             round(open_bucket["generated_through"] / self.interval_s) if open_bucket else None
         )
 
+    def _bucket_sealed(self) -> None:
+        """A sealed bucket takes no more cells, so its sheets' canvases are dead
+        weight (the LRU would get there eventually, at 37 MB apiece)."""
+        if self.canvas_cache is not None and self._bucket_start is not None:
+            self.canvas_cache.evict_range(
+                self.camera, self.interval_s, self._bucket_start, self._generated_through
+            )
+
     async def _flush_sheet(self, sheet_start: float, count: int) -> None:
         """Publish this sheet at whatever count its cell store can actually back.
 
@@ -620,6 +693,7 @@ class _TierWriter:
             _publish_sheet_version,
             scrub.cache_dir, self.camera, self.interval_s, sheet_start,
             count, self.cols, self.rows, self.cell_w, self.cell_h, scrub.format, self.stats,
+            self.canvas_cache,
         )
         if published is None:
             return
@@ -693,6 +767,7 @@ class _TierWriter:
                     generated_through=self._generated_through, complete=True,
                 )
                 self.conn.commit()
+                self._bucket_sealed()
                 self._bucket_start = pending[0].timestamp
             result = grid.assign_cells(pending, self._bucket_start, self.interval_s)
             self.new_frames += len(result.accepted)
@@ -765,6 +840,7 @@ class _TierWriter:
                     generated_through=self._generated_through, complete=True,
                 )
                 self.conn.commit()
+                self._bucket_sealed()
                 self._bucket_start = None
                 pending = result.remaining
             else:
@@ -796,6 +872,7 @@ class _TierWriter:
                 generated_through=self._generated_through, complete=True,
             )
             self.conn.commit()
+            self._bucket_sealed()
             self._bucket_start = None
 
 
@@ -817,7 +894,7 @@ async def _tier_writer(
         settings, camera,
         interval_s=interval_s, window_start=window_start, window_end=window_end,
         cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn,
-        stats=profile.stats,
+        stats=profile.stats, canvas_cache=profile.canvas_cache, use_canvas_cache=True,
     )
 
 
@@ -837,6 +914,8 @@ async def _generate_tier(
     deadline: float | None = None,
     newest_first: bool = False,
     consumed_through: float | None = None,
+    min_segments: int = 0,
+    fed: _FedSegments | None = None,
 ) -> dict[str, Any]:
     """Sample `[since, window_end)` for one thinning tier, never emitting frames
     outside `[window_start, window_end)` (§4.2 non-overlap, §5.5 thinning tiers).
@@ -851,7 +930,7 @@ async def _generate_tier(
     `newest_first`, when set, picks the *newest* `budget` segments of
     `[since, window_end)` rather than the oldest -- see `_generate_tiers`.
 
-    `consumed_through` -- see `_generate_tiers`.
+    `consumed_through`, `min_segments`, `fed` -- see `_generate_tiers`.
     """
     if window_end <= window_start or budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0}
@@ -868,7 +947,7 @@ async def _generate_tier(
         budget=budget,
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
         profile=profile, sem=sem, deadline=deadline, newest_first=newest_first,
-        consumed_through=consumed_through,
+        consumed_through=consumed_through, min_segments=min_segments, fed=fed,
     )
 
 
@@ -888,6 +967,8 @@ async def _generate_tiers(
     deadline: float | None = None,
     newest_first: bool = False,
     consumed_through: float | None = None,
+    min_segments: int = 0,
+    fed: _FedSegments | None = None,
 ) -> dict[str, Any]:
     """Open each segment in `[since, window_end)` and feed it to `writer`.
 
@@ -921,6 +1002,19 @@ async def _generate_tiers(
     per frame, not per segment: one that failed to decode, was cut off by the
     deadline or budget, or has frames past the last stored one ends later
     than that and still matches.
+
+    `min_segments` segments are processed even when `deadline` has already
+    passed. The deadline is otherwise checked before the *first* segment too, so
+    a pass that starts late does nothing at all -- the live edge uses this to
+    guarantee that the first camera of a cycle advances by at least its newest
+    segment however far behind the cycle is.
+
+    `fed`, when given, is exact memory of segments this tier has already
+    consumed in full, and rows in it are skipped regardless of the arithmetic in
+    `consumed_through`. A segment goes in only once its frames were all handed to
+    the writer: a failed or missing file, a decode cut off by the deadline or
+    budget, or one extending past `window_end` (frames beyond it were dropped,
+    and a later tick has a wider window) is not remembered and is retried.
     """
     scrub = settings.scrub
     if budget <= 0:
@@ -933,11 +1027,23 @@ async def _generate_tiers(
     # the far edge of the retention window and this query would otherwise return
     # days of segments to chew through before the loop yields.
     order = "start_time DESC" if newest_first else "start_time"
+    if fed is not None:
+        if consumed_through is None or (
+            fed.seen_through is not None and consumed_through < fed.seen_through
+        ):
+            fed.ends.clear()
+        fed.seen_through = consumed_through
+    # Remembered rows still occupy LIMIT slots, so over-fetch by their number and
+    # trim after filtering; otherwise `budget` rows that are all skippable would
+    # hide the one new segment behind them.
+    limit = max(1, budget) + (len(fed.ends) if fed is not None else 0)
     rows_ = frigate_conn.execute(
         f"SELECT path, start_time, end_time FROM recordings "
         f"WHERE camera = ? AND end_time > ? AND start_time < ? ORDER BY {order} LIMIT ?",
-        (camera, min_end, window_end, max(1, budget)),
+        (camera, min_end, window_end, limit),
     ).fetchall()
+    if fed is not None:
+        rows_ = [r for r in rows_ if fed.ends.get(r["path"]) != r["end_time"]][: max(1, budget)]
     if newest_first:
         rows_ = list(reversed(rows_))
     if not rows_:
@@ -956,7 +1062,11 @@ async def _generate_tiers(
     missing_segments = 0
     processed = 0
     for row in rows_:
-        if deadline is not None and time.monotonic() >= deadline:
+        if (
+            deadline is not None
+            and processed >= min_segments
+            and time.monotonic() >= deadline
+        ):
             break
         processed += 1
         seg_path = map_recording_path(
@@ -985,11 +1095,18 @@ async def _generate_tiers(
             except ffmpeg_io.FfmpegError as exc:
                 logger.warning("scrub: sampling failed for %s: %s", seg_path, exc)
                 continue
-            if not frames:
-                continue
-            await writer.feed(frames)
+            if frames:
+                await writer.feed(frames)
+            if fed is not None and row["end_time"] <= window_end:
+                fed.ends[row["path"]] = row["end_time"]
 
     await writer.flush()
+    if fed is not None:
+        # Anything this far behind the tier's frontier can never match the query
+        # again (`min_end` only moves forward), so don't let the memory grow.
+        horizon = min_end - _FED_RETAIN_S
+        for path in [p for p, end in fed.ends.items() if end < horizon]:
+            del fed.ends[path]
 
     if missing_segments:
         logger.warning(
@@ -1386,6 +1503,7 @@ async def generate_live_edge(
     profile: SourceProfile,
     sem: asyncio.Semaphore,
     deadline: float | None = None,
+    min_segments: int = 0,
 ) -> dict[str, Any]:
     """Hold `camera`'s recent tier against wall clock. Cheap and always first.
 
@@ -1398,7 +1516,8 @@ async def generate_live_edge(
     segments -- never mid-segment. `generate_cycle` sets this so a slow live
     edge stops with time left for backfill's own guaranteed share, rather
     than consuming the whole tick and leaving backfill nothing (see
-    `scrub.backfill_min_share_s`).
+    `scrub.backfill_min_share_s`). `min_segments` is how many segments are
+    decoded regardless of the deadline (see `_generate_tiers`).
     """
     scrub = settings.scrub
     gop_s = await camera_gop_seconds(
@@ -1430,7 +1549,8 @@ async def generate_live_edge(
         budget=max(1, scrub.live_edge_segments),
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
         profile=profile, sem=sem, newest_first=True, deadline=deadline,
-        consumed_through=recent_through,
+        consumed_through=recent_through, min_segments=min_segments,
+        fed=profile.fed_segments.setdefault((camera, interval_s), _FedSegments()),
     )
     return {"camera": camera, **result}
 
@@ -1817,6 +1937,7 @@ async def generate_aged_tier(
         settings, camera, interval_s=aged_interval_s,
         window_start=retention_cutoff, window_end=boundary,
         cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn, stats=profile.stats,
+        canvas_cache=profile.canvas_cache, use_canvas_cache=True,
     )
     # Resume at the first span's start -- that is where last cycle's open
     # bucket ends, which is the bucket this pass has to keep growing.
@@ -1923,6 +2044,16 @@ async def generate_cycle(
         if not cameras:
             return []
 
+        if not profile.cache_sizing_logged:
+            profile.cache_sizing_logged = True
+            if 0 < scrub.canvas_cache_sheets < 2 * len(cameras):
+                logger.info(
+                    "scrub: canvas_cache_sheets=%d is below 2 x %d cameras (recent + aged "
+                    "sheets grow every tick); the cache will thrash -- raise it to %d "
+                    "(about 37 MB per sheet at 480x270 cells)",
+                    scrub.canvas_cache_sheets, len(cameras), 2 * len(cameras),
+                )
+
         totals: dict[str, dict[str, Any]] = {
             c: {"camera": c, "segments": 0, "new_frames": 0, "backfilled": False}
             for c in cameras
@@ -1937,8 +2068,8 @@ async def generate_cycle(
         # both per camera meant the last camera in the list waited out every
         # earlier camera's backfill before its edge was touched at all.
         #
-        # Bounded by `live_edge_deadline`, checked between cameras (never
-        # mid-segment -- `_generate_tiers` only checks between segments) so
+        # Bounded by `live_edge_deadline`, checked between cameras and between
+        # segments (never mid-segment -- an ffmpeg child is not interrupted) so
         # that even a live edge slow enough to eat the whole tick (measured
         # live: 16-20s cycles against a 20s tick, decoding every frame for
         # cameras whose GOP is coarser than `recent_interval_s`) still leaves
@@ -1966,17 +2097,30 @@ async def generate_cycle(
         # climbing ~20 s per cycle -- so the operator must be able to hand the
         # whole tick back to the edge while the aged tier is produced another
         # way (decimation of the recent tier, see `generate_derived_tier`).
-        live_edge_deadline: float | None = (
-            tick_end - pass3_reserve - scrub.backfill_min_share_s
-            if scrub.backfill_min_share_s > 0 else None
-        )
+        #
+        # With the share at 0 the edge is still bounded by the tick, less
+        # `decimation_min_share_s`: no deadline at all let a contended box run
+        # Pass 1 for 90-170 s against a 20 s tick (every segment of every camera
+        # decoded at the pace the box allowed), and Pass 2/3 started long past
+        # their own deadlines. Cut-off cameras rotate to the front via
+        # `live_edge_cursor`, so none starves; throughput per wall second is
+        # unchanged, the work just arrives in tick-sized instalments.
+        live_edge_deadline: float | None
+        if scrub.backfill_min_share_s > 0:
+            live_edge_deadline = tick_end - pass3_reserve - scrub.backfill_min_share_s
+        elif scrub.decimation_min_share_s > 0:
+            live_edge_deadline = tick_end - scrub.decimation_min_share_s
+        else:
+            live_edge_deadline = None
         pass1_started = _time.monotonic()
         start_le = profile.live_edge_cursor % len(cameras)
         order_le = cameras[start_le:] + cameras[:start_le]
         served_le = 0
         for camera in order_le:
             # Always run at least one camera per cycle, even past the
-            # deadline, so the live edge itself can never be starved.
+            # deadline, so the live edge itself can never be starved -- and give
+            # that camera at least its newest segment below, since the segment
+            # loop checks the deadline before its first segment too.
             if (
                 live_edge_deadline is not None
                 and served_le > 0
@@ -1988,6 +2132,7 @@ async def generate_cycle(
                 _merge(camera, await generate_live_edge(
                     settings, camera, frigate_conn=conn, sidecar_conn=conn,
                     now=now, profile=profile, sem=sem, deadline=live_edge_deadline,
+                    min_segments=1 if served_le == 1 else 0,
                 ))
             except Exception:
                 logger.exception("scrub: live edge failed for camera %s", camera)
@@ -2064,20 +2209,35 @@ async def generate_cycle(
         # the recent tier at ~8 GB/day, an un-retired recent tier piles up
         # forever.
         pass3_started = _time.monotonic()
+        # Pass 3 shares backfill's `deadline`, which a late cycle has already
+        # passed by the time it gets here: the check below then skipped every
+        # camera, every cycle (measured on prod: pass3=0.00s for as long as the
+        # box was contended, aged and derived tiers stalled outright). Floor it
+        # at `decimation_min_share_s` from now; when the cycle is on time the
+        # normal deadline is later than that and nothing changes.
+        pass3_deadline = deadline
+        if scrub.decimation_min_share_s > 0:
+            pass3_deadline = max(deadline, pass3_started + scrub.decimation_min_share_s)
         retention_cutoff = now - scrub.retention_days * 86400
         effective_boundary = max(now - scrub.aged_after_h * 3600, retention_cutoff)
-        for camera in cameras:
-            if _time.monotonic() >= deadline:
+        # Start where the last cycle stopped, like the other two passes: a floor
+        # of a few seconds covers only a camera or two, and restarting at
+        # cameras[0] every cycle would let the tail starve.
+        start_d = profile.decimation_cursor % len(cameras)
+        served_d = 0
+        for camera in cameras[start_d:] + cameras[:start_d]:
+            if _time.monotonic() >= pass3_deadline:
                 break
+            served_d += 1
             try:
                 aged_result = await generate_aged_tier(
                     settings, camera, frigate_conn=conn, sidecar_conn=conn,
-                    now=now, profile=profile, deadline=deadline,
+                    now=now, profile=profile, deadline=pass3_deadline,
                 )
                 totals[camera]["new_frames"] += aged_result["new_frames"]
                 derived_result = await generate_derived(
                     settings, camera, frigate_conn=conn, sidecar_conn=conn,
-                    now=now, profile=profile, deadline=deadline,
+                    now=now, profile=profile, deadline=pass3_deadline,
                 )
                 totals[camera]["new_frames"] += derived_result["new_frames"]
                 _retire_stale_recent_buckets(
@@ -2089,6 +2249,7 @@ async def generate_cycle(
                     "scrub: aged/derived-tier generation failed for camera %s", camera
                 )
                 totals[camera]["error"] = True
+        profile.decimation_cursor = start_d + served_d
         stats.pass3_s = _time.monotonic() - pass3_started
 
         # One line per cycle. Whether the edge is being held is otherwise only
