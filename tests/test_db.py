@@ -334,7 +334,13 @@ def test_open_sidecar_concurrent_first_open_never_locks(tmp_path: Path) -> None:
             errors.append(exc)
 
     for _ in range(20):
-        path.unlink(missing_ok=True)
+        # The -wal/-shm files go too. The last connection to close removes
+        # them only if it can take an exclusive lock, which eight closing at
+        # once may all miss; a stale WAL left next to the next iteration's
+        # brand-new file is then replayed against it, failing that round
+        # with "disk I/O error" or "database schema has changed".
+        for suffix in ("", "-wal", "-shm"):
+            Path(f"{path}{suffix}").unlink(missing_ok=True)
         db._SCHEMA_APPLIED.discard(str(path.resolve()))
         threads = [threading.Thread(target=opener) for _ in range(n)]
         for t in threads:
