@@ -65,12 +65,14 @@ class SourceProfile:
     state rather than a stream property: each is the camera the next cycle's
     backfill (resp. live-edge) pass starts from, and they live here because
     this is already the object the generation loop keeps between cycles.
+    `decimation_cursor` is the same thing for Pass 3.
     """
 
     gop_s: dict[str, float]
     aspect: dict[str, float]
     backfill_cursor: int
     live_edge_cursor: int
+    decimation_cursor: int
     stats: CycleStats
 
     def __init__(self) -> None:
@@ -78,6 +80,7 @@ class SourceProfile:
         self.aspect = {}
         self.backfill_cursor = 0
         self.live_edge_cursor = 0
+        self.decimation_cursor = 0
         # Reset by `generate_cycle`; lives here because every generation entry
         # point already takes the profile.
         self.stats = CycleStats()
@@ -837,6 +840,7 @@ async def _generate_tier(
     deadline: float | None = None,
     newest_first: bool = False,
     consumed_through: float | None = None,
+    min_segments: int = 0,
 ) -> dict[str, Any]:
     """Sample `[since, window_end)` for one thinning tier, never emitting frames
     outside `[window_start, window_end)` (§4.2 non-overlap, §5.5 thinning tiers).
@@ -851,7 +855,7 @@ async def _generate_tier(
     `newest_first`, when set, picks the *newest* `budget` segments of
     `[since, window_end)` rather than the oldest -- see `_generate_tiers`.
 
-    `consumed_through` -- see `_generate_tiers`.
+    `consumed_through`, `min_segments` -- see `_generate_tiers`.
     """
     if window_end <= window_start or budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0}
@@ -868,7 +872,7 @@ async def _generate_tier(
         budget=budget,
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
         profile=profile, sem=sem, deadline=deadline, newest_first=newest_first,
-        consumed_through=consumed_through,
+        consumed_through=consumed_through, min_segments=min_segments,
     )
 
 
@@ -888,6 +892,7 @@ async def _generate_tiers(
     deadline: float | None = None,
     newest_first: bool = False,
     consumed_through: float | None = None,
+    min_segments: int = 0,
 ) -> dict[str, Any]:
     """Open each segment in `[since, window_end)` and feed it to `writer`.
 
@@ -921,6 +926,12 @@ async def _generate_tiers(
     per frame, not per segment: one that failed to decode, was cut off by the
     deadline or budget, or has frames past the last stored one ends later
     than that and still matches.
+
+    `min_segments` segments are processed even when `deadline` has already
+    passed. The deadline is otherwise checked before the *first* segment too, so
+    a pass that starts late does nothing at all -- the live edge uses this to
+    guarantee that the first camera of a cycle advances by at least its newest
+    segment however far behind the cycle is.
     """
     scrub = settings.scrub
     if budget <= 0:
@@ -956,7 +967,11 @@ async def _generate_tiers(
     missing_segments = 0
     processed = 0
     for row in rows_:
-        if deadline is not None and time.monotonic() >= deadline:
+        if (
+            deadline is not None
+            and processed >= min_segments
+            and time.monotonic() >= deadline
+        ):
             break
         processed += 1
         seg_path = map_recording_path(
@@ -1386,6 +1401,7 @@ async def generate_live_edge(
     profile: SourceProfile,
     sem: asyncio.Semaphore,
     deadline: float | None = None,
+    min_segments: int = 0,
 ) -> dict[str, Any]:
     """Hold `camera`'s recent tier against wall clock. Cheap and always first.
 
@@ -1398,7 +1414,8 @@ async def generate_live_edge(
     segments -- never mid-segment. `generate_cycle` sets this so a slow live
     edge stops with time left for backfill's own guaranteed share, rather
     than consuming the whole tick and leaving backfill nothing (see
-    `scrub.backfill_min_share_s`).
+    `scrub.backfill_min_share_s`). `min_segments` is how many segments are
+    decoded regardless of the deadline (see `_generate_tiers`).
     """
     scrub = settings.scrub
     gop_s = await camera_gop_seconds(
@@ -1430,7 +1447,7 @@ async def generate_live_edge(
         budget=max(1, scrub.live_edge_segments),
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
         profile=profile, sem=sem, newest_first=True, deadline=deadline,
-        consumed_through=recent_through,
+        consumed_through=recent_through, min_segments=min_segments,
     )
     return {"camera": camera, **result}
 
@@ -1937,8 +1954,8 @@ async def generate_cycle(
         # both per camera meant the last camera in the list waited out every
         # earlier camera's backfill before its edge was touched at all.
         #
-        # Bounded by `live_edge_deadline`, checked between cameras (never
-        # mid-segment -- `_generate_tiers` only checks between segments) so
+        # Bounded by `live_edge_deadline`, checked between cameras and between
+        # segments (never mid-segment -- an ffmpeg child is not interrupted) so
         # that even a live edge slow enough to eat the whole tick (measured
         # live: 16-20s cycles against a 20s tick, decoding every frame for
         # cameras whose GOP is coarser than `recent_interval_s`) still leaves
@@ -1966,17 +1983,30 @@ async def generate_cycle(
         # climbing ~20 s per cycle -- so the operator must be able to hand the
         # whole tick back to the edge while the aged tier is produced another
         # way (decimation of the recent tier, see `generate_derived_tier`).
-        live_edge_deadline: float | None = (
-            tick_end - pass3_reserve - scrub.backfill_min_share_s
-            if scrub.backfill_min_share_s > 0 else None
-        )
+        #
+        # With the share at 0 the edge is still bounded by the tick, less
+        # `decimation_min_share_s`: no deadline at all let a contended box run
+        # Pass 1 for 90-170 s against a 20 s tick (every segment of every camera
+        # decoded at the pace the box allowed), and Pass 2/3 started long past
+        # their own deadlines. Cut-off cameras rotate to the front via
+        # `live_edge_cursor`, so none starves; throughput per wall second is
+        # unchanged, the work just arrives in tick-sized instalments.
+        live_edge_deadline: float | None
+        if scrub.backfill_min_share_s > 0:
+            live_edge_deadline = tick_end - pass3_reserve - scrub.backfill_min_share_s
+        elif scrub.decimation_min_share_s > 0:
+            live_edge_deadline = tick_end - scrub.decimation_min_share_s
+        else:
+            live_edge_deadline = None
         pass1_started = _time.monotonic()
         start_le = profile.live_edge_cursor % len(cameras)
         order_le = cameras[start_le:] + cameras[:start_le]
         served_le = 0
         for camera in order_le:
             # Always run at least one camera per cycle, even past the
-            # deadline, so the live edge itself can never be starved.
+            # deadline, so the live edge itself can never be starved -- and give
+            # that camera at least its newest segment below, since the segment
+            # loop checks the deadline before its first segment too.
             if (
                 live_edge_deadline is not None
                 and served_le > 0
@@ -1988,6 +2018,7 @@ async def generate_cycle(
                 _merge(camera, await generate_live_edge(
                     settings, camera, frigate_conn=conn, sidecar_conn=conn,
                     now=now, profile=profile, sem=sem, deadline=live_edge_deadline,
+                    min_segments=1 if served_le == 1 else 0,
                 ))
             except Exception:
                 logger.exception("scrub: live edge failed for camera %s", camera)
@@ -2064,20 +2095,35 @@ async def generate_cycle(
         # the recent tier at ~8 GB/day, an un-retired recent tier piles up
         # forever.
         pass3_started = _time.monotonic()
+        # Pass 3 shares backfill's `deadline`, which a late cycle has already
+        # passed by the time it gets here: the check below then skipped every
+        # camera, every cycle (measured on prod: pass3=0.00s for as long as the
+        # box was contended, aged and derived tiers stalled outright). Floor it
+        # at `decimation_min_share_s` from now; when the cycle is on time the
+        # normal deadline is later than that and nothing changes.
+        pass3_deadline = deadline
+        if scrub.decimation_min_share_s > 0:
+            pass3_deadline = max(deadline, pass3_started + scrub.decimation_min_share_s)
         retention_cutoff = now - scrub.retention_days * 86400
         effective_boundary = max(now - scrub.aged_after_h * 3600, retention_cutoff)
-        for camera in cameras:
-            if _time.monotonic() >= deadline:
+        # Start where the last cycle stopped, like the other two passes: a floor
+        # of a few seconds covers only a camera or two, and restarting at
+        # cameras[0] every cycle would let the tail starve.
+        start_d = profile.decimation_cursor % len(cameras)
+        served_d = 0
+        for camera in cameras[start_d:] + cameras[:start_d]:
+            if _time.monotonic() >= pass3_deadline:
                 break
+            served_d += 1
             try:
                 aged_result = await generate_aged_tier(
                     settings, camera, frigate_conn=conn, sidecar_conn=conn,
-                    now=now, profile=profile, deadline=deadline,
+                    now=now, profile=profile, deadline=pass3_deadline,
                 )
                 totals[camera]["new_frames"] += aged_result["new_frames"]
                 derived_result = await generate_derived(
                     settings, camera, frigate_conn=conn, sidecar_conn=conn,
-                    now=now, profile=profile, deadline=deadline,
+                    now=now, profile=profile, deadline=pass3_deadline,
                 )
                 totals[camera]["new_frames"] += derived_result["new_frames"]
                 _retire_stale_recent_buckets(
@@ -2089,6 +2135,7 @@ async def generate_cycle(
                     "scrub: aged/derived-tier generation failed for camera %s", camera
                 )
                 totals[camera]["error"] = True
+        profile.decimation_cursor = start_d + served_d
         stats.pass3_s = _time.monotonic() - pass3_started
 
         # One line per cycle. Whether the edge is being held is otherwise only

@@ -2762,7 +2762,11 @@ def test_zero_backfill_share_runs_every_camera_live_edge(
     env = env.model_copy(
         update={
             "scrub": env.scrub.model_copy(
-                update={"cameras": [], "backfill_min_share_s": 0.0, "live_edge_interval_s": 20.0}
+                update={
+                    "cameras": [], "backfill_min_share_s": 0.0, "live_edge_interval_s": 20.0,
+                    # Both shares off is the only way to get an unbounded edge.
+                    "decimation_min_share_s": 0.0,
+                }
             )
         }
     )
@@ -3136,3 +3140,140 @@ def test_subtract_covered_trims_and_splits_holes() -> None:
     assert sub([(0.0, 100.0)], [(0.0, 98.0)], 5.0) == []  # sliver too narrow
     assert sub([(0.0, 10.0)], [(50.0, 60.0)], 5.0) == [(0.0, 10.0)]
     assert sub([(10.0, 20.0)], [(0.0, 100.0)], 5.0) == []
+
+
+# ----- decimation_min_share_s: Pass 3 must run even when the cycle is late -----
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.t = 1_000.0
+
+    def monotonic(self) -> float:
+        return self.t
+
+
+def _late_cycle_env(env: Settings, **scrub_kw: object) -> Settings:
+    return env.model_copy(
+        update={
+            "scrub": env.scrub.model_copy(
+                update={"cameras": [], "live_edge_interval_s": 20.0, **scrub_kw}
+            )
+        }
+    )
+
+
+def _add_garden_segments(env: Settings) -> None:
+    conn = sqlite3.connect(env.frigate.db_path)
+    conn.executemany(
+        "INSERT INTO recordings VALUES (?, 'garden', ?, ?, ?, 10.0, 5.0)",
+        [
+            (f"g{i}", "/media/frigate/x.mp4", 1_800_000_000.0 + i * 10,
+             1_800_000_000.0 + (i + 1) * 10)
+            for i in range(100)
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.parametrize("share, expect_pass3", [(3.0, True), (0.0, False)])
+def test_late_cycle_still_gives_decimation_its_minimum_share(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch, share: float, expect_pass3: bool
+) -> None:
+    """A live edge that overruns the tick used to leave Pass 3 with a deadline
+    already in the past: every camera was skipped, pass3=0.00s, every cycle."""
+    env = _late_cycle_env(long_history_env, decimation_min_share_s=share)
+    _add_garden_segments(env)
+    clock = _FakeClock()
+    monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
+
+    async def _slow_live(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        clock.t += 100.0  # way past the 20 s tick
+        return {"camera": camera, "segments": 1, "new_frames": 1}
+
+    async def _noop_backfill(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "segments": 0, "new_frames": 0, "backfilled": False}
+
+    aged_deadlines: list[float] = []
+
+    async def _aged(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        aged_deadlines.append(float(kw["deadline"]))  # type: ignore[arg-type]
+        clock.t += 1.0
+        return {"camera": camera, "new_frames": 7}
+
+    async def _noop_derived(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "new_frames": 0, "tiers_touched": 0}
+
+    monkeypatch.setattr(generator, "generate_live_edge", _slow_live)
+    monkeypatch.setattr(generator, "generate_backfill", _noop_backfill)
+    monkeypatch.setattr(generator, "generate_aged_tier", _aged)
+    monkeypatch.setattr(generator, "generate_derived", _noop_derived)
+
+    profile = generator.SourceProfile()
+    asyncio.run(generator.generate_cycle(
+        env, now=1_800_000_000.0 + 86400.0, profile=profile, backfill_deadline=clock.t + 20.0,
+    ))
+
+    if expect_pass3:
+        assert aged_deadlines, "Pass 3 was skipped although the cycle was merely late"
+        assert profile.stats.pass3_s >= 0.0
+        # The floor is measured from when Pass 3 begins, not from the tick.
+        assert aged_deadlines[0] == pytest.approx(1_100.0 + 3.0)
+        # Only ~3 s of floor: not every camera fits, and the cursor advanced so
+        # the next cycle starts with whoever was cut off.
+        assert 0 < profile.decimation_cursor < 6
+    else:
+        assert not aged_deadlines
+
+
+def test_live_edge_stops_at_its_deadline_between_segments(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `backfill_min_share_s` at 0 the edge used to have no deadline at all
+    (90-170 s Pass 1 on prod); now it stops per segment, `decimation_min_share_s`
+    before the tick end."""
+    env = _late_cycle_env(
+        long_history_env, backfill_min_share_s=0.0, decimation_min_share_s=3.0,
+        live_edge_segments=6, derived_intervals_s=[],
+    )
+    clock = _FakeClock()
+    monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
+    inner = ffmpeg_io.extract_keyframes_with_pts
+
+    async def _slow_extract(*a: object, **kw: object) -> list[tuple[float, Path]]:
+        clock.t += 5.0
+        return await inner(*a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ffmpeg_io, "extract_keyframes_with_pts", _slow_extract)
+
+    async def _noop_backfill(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "segments": 0, "new_frames": 0, "backfilled": False}
+
+    monkeypatch.setattr(generator, "generate_backfill", _noop_backfill)
+    profile = generator.SourceProfile()
+    asyncio.run(generator.generate_cycle(
+        env, now=1_800_000_000.0 + 86400.0, profile=profile,
+        backfill_deadline=clock.t + 20.0,
+    ))
+    # Deadline is tick_end - 3 s = +17 s; segments start at +0, +5, +10, +15.
+    assert profile.stats.segments_decoded == 4
+
+
+def test_live_edge_decodes_one_segment_even_when_the_deadline_has_passed(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = _late_cycle_env(long_history_env, live_edge_segments=6, derived_intervals_s=[])
+    clock = _FakeClock()
+    monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
+
+    async def _noop_backfill(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "segments": 0, "new_frames": 0, "backfilled": False}
+
+    monkeypatch.setattr(generator, "generate_backfill", _noop_backfill)
+    profile = generator.SourceProfile()
+    asyncio.run(generator.generate_cycle(
+        env, now=1_800_000_000.0 + 86400.0, profile=profile,
+        backfill_deadline=clock.t - 50.0,  # tick already over
+    ))
+    assert profile.stats.segments_decoded == 1

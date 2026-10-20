@@ -518,6 +518,20 @@ class ScrubSection(BaseModel):
     # every camera each tick as before #85. Use it on a box with no decode
     # headroom, where any backfill slice only starves the edge.
     backfill_min_share_s: float = 6.0
+    # Minimum wall-clock seconds per cycle that Pass 3 (aged-tier and derived-tier
+    # decimation, stale-bucket retirement) is guaranteed, even when the live edge
+    # and backfill have already run past the tick. Pass 3 normally shares
+    # backfill's deadline, so a cycle that was already late -- the box contended
+    # with Frigate, one slow decode -- found that deadline passed before Pass 3
+    # began and skipped it entirely, every cycle: measured on prod, pass3=0.00s for
+    # as long as the box stayed contended, the aged and derived tiers stalled
+    # completely. Pass 3 has no ffmpeg (Pillow crops of sheets already on disk), so
+    # the floor costs a little Python CPU and no decode slot. It also bounds the
+    # live-edge pass when `backfill_min_share_s` is 0, so the edge can no longer
+    # run unboundedly past the tick. 0 (or less) restores "Pass 3 gets only what
+    # the deadline leaves" and, with `backfill_min_share_s` also 0, an unbounded
+    # live edge.
+    decimation_min_share_s: float = 3.0
 
     @field_validator("format")
     @classmethod
@@ -542,7 +556,7 @@ class ScrubSection(BaseModel):
             raise ValueError(f"must be > 0, got {v!r}")
         return v
 
-    @field_validator("derive_time_reserve_s")
+    @field_validator("derive_time_reserve_s", "decimation_min_share_s")
     @classmethod
     def _non_negative(cls, v: float) -> float:
         """0 is a valid, explicit "no floor" setting -- unlike the tick
