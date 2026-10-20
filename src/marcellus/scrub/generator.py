@@ -27,7 +27,7 @@ import sqlite3
 import tempfile
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -47,8 +47,35 @@ logger = logging.getLogger(__name__)
 # rely on cell-assignment's own drift check to catch anything that slips.
 _GOP_TOLERANCE = 1.3
 
+#: How far behind the live edge's resume point remembered segments are kept.
+_FED_RETAIN_S = 300.0
+
 _WORK_DIRNAME = ".work"
 _CELLS_DIRNAME = ".cells"
+
+
+@dataclass
+class _FedSegments:
+    """Recordings a live-edge decode has already fed to the tier in full, with
+    their `end_time` (path -> end_time).
+
+    `consumed_through` (#112) skips a segment once its end is within one interval
+    of the last stored frame, but that is an inequality on a float: prod showed
+    margins of +0.000/+0.001 s that landed on the wrong side every tick, and
+    cameras whose keyframes are unevenly spaced (last stored keyframe 8.0 s into a
+    10.001 s segment) whose newest segment always ends past the criterion. Both
+    re-decoded the same segment every tick for nothing. Remembering the exact
+    segments that were fed completely settles it without any arithmetic.
+
+    In memory only: a restart empties it, costing at most one extra decode per
+    camera.
+    """
+
+    ends: dict[str, float] = field(default_factory=dict)
+    #: The tier's `generated_through` when `ends` was last used. If it goes
+    #: backwards or vanishes, the tier's data was dropped (retention, a manual
+    #: `drop_intervals`) and what we remember having fed no longer exists.
+    seen_through: float | None = None
 
 
 @dataclass
@@ -75,6 +102,7 @@ class SourceProfile:
     decimation_cursor: int
     stats: CycleStats
     canvas_cache: tiling.CanvasCache
+    fed_segments: dict[tuple[str, float], _FedSegments]
 
     def __init__(self) -> None:
         self.gop_s = {}
@@ -86,6 +114,8 @@ class SourceProfile:
         # by each writer, so the profile needn't know the settings). Lives here
         # because it must outlive a cycle to be of any use.
         self.canvas_cache = tiling.CanvasCache(0)
+        # (camera, tier interval) -> segments the live edge has fed completely.
+        self.fed_segments = {}
         # Reset by `generate_cycle`; lives here because every generation entry
         # point already takes the profile.
         self.stats = CycleStats()
@@ -877,6 +907,7 @@ async def _generate_tier(
     newest_first: bool = False,
     consumed_through: float | None = None,
     min_segments: int = 0,
+    fed: _FedSegments | None = None,
 ) -> dict[str, Any]:
     """Sample `[since, window_end)` for one thinning tier, never emitting frames
     outside `[window_start, window_end)` (§4.2 non-overlap, §5.5 thinning tiers).
@@ -891,7 +922,7 @@ async def _generate_tier(
     `newest_first`, when set, picks the *newest* `budget` segments of
     `[since, window_end)` rather than the oldest -- see `_generate_tiers`.
 
-    `consumed_through`, `min_segments` -- see `_generate_tiers`.
+    `consumed_through`, `min_segments`, `fed` -- see `_generate_tiers`.
     """
     if window_end <= window_start or budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0}
@@ -908,7 +939,7 @@ async def _generate_tier(
         budget=budget,
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
         profile=profile, sem=sem, deadline=deadline, newest_first=newest_first,
-        consumed_through=consumed_through, min_segments=min_segments,
+        consumed_through=consumed_through, min_segments=min_segments, fed=fed,
     )
 
 
@@ -929,6 +960,7 @@ async def _generate_tiers(
     newest_first: bool = False,
     consumed_through: float | None = None,
     min_segments: int = 0,
+    fed: _FedSegments | None = None,
 ) -> dict[str, Any]:
     """Open each segment in `[since, window_end)` and feed it to `writer`.
 
@@ -968,6 +1000,13 @@ async def _generate_tiers(
     a pass that starts late does nothing at all -- the live edge uses this to
     guarantee that the first camera of a cycle advances by at least its newest
     segment however far behind the cycle is.
+
+    `fed`, when given, is exact memory of segments this tier has already
+    consumed in full, and rows in it are skipped regardless of the arithmetic in
+    `consumed_through`. A segment goes in only once its frames were all handed to
+    the writer: a failed or missing file, a decode cut off by the deadline or
+    budget, or one extending past `window_end` (frames beyond it were dropped,
+    and a later tick has a wider window) is not remembered and is retried.
     """
     scrub = settings.scrub
     if budget <= 0:
@@ -980,11 +1019,23 @@ async def _generate_tiers(
     # the far edge of the retention window and this query would otherwise return
     # days of segments to chew through before the loop yields.
     order = "start_time DESC" if newest_first else "start_time"
+    if fed is not None:
+        if consumed_through is None or (
+            fed.seen_through is not None and consumed_through < fed.seen_through
+        ):
+            fed.ends.clear()
+        fed.seen_through = consumed_through
+    # Remembered rows still occupy LIMIT slots, so over-fetch by their number and
+    # trim after filtering; otherwise `budget` rows that are all skippable would
+    # hide the one new segment behind them.
+    limit = max(1, budget) + (len(fed.ends) if fed is not None else 0)
     rows_ = frigate_conn.execute(
         f"SELECT path, start_time, end_time FROM recordings "
         f"WHERE camera = ? AND end_time > ? AND start_time < ? ORDER BY {order} LIMIT ?",
-        (camera, min_end, window_end, max(1, budget)),
+        (camera, min_end, window_end, limit),
     ).fetchall()
+    if fed is not None:
+        rows_ = [r for r in rows_ if fed.ends.get(r["path"]) != r["end_time"]][: max(1, budget)]
     if newest_first:
         rows_ = list(reversed(rows_))
     if not rows_:
@@ -1036,11 +1087,18 @@ async def _generate_tiers(
             except ffmpeg_io.FfmpegError as exc:
                 logger.warning("scrub: sampling failed for %s: %s", seg_path, exc)
                 continue
-            if not frames:
-                continue
-            await writer.feed(frames)
+            if frames:
+                await writer.feed(frames)
+            if fed is not None and row["end_time"] <= window_end:
+                fed.ends[row["path"]] = row["end_time"]
 
     await writer.flush()
+    if fed is not None:
+        # Anything this far behind the tier's frontier can never match the query
+        # again (`min_end` only moves forward), so don't let the memory grow.
+        horizon = min_end - _FED_RETAIN_S
+        for path in [p for p, end in fed.ends.items() if end < horizon]:
+            del fed.ends[path]
 
     if missing_segments:
         logger.warning(
@@ -1484,6 +1542,7 @@ async def generate_live_edge(
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
         profile=profile, sem=sem, newest_first=True, deadline=deadline,
         consumed_through=recent_through, min_segments=min_segments,
+        fed=profile.fed_segments.setdefault((camera, interval_s), _FedSegments()),
     )
     return {"camera": camera, **result}
 

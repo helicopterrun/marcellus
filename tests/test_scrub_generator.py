@@ -12,6 +12,8 @@ import asyncio
 import os
 import sqlite3
 import tempfile
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -3324,3 +3326,108 @@ def test_live_edge_decodes_one_segment_even_when_the_deadline_has_passed(
         backfill_deadline=clock.t - 50.0,  # tick already over
     ))
     assert profile.stats.segments_decoded == 1
+
+
+# ----- exact memory of fed live-edge segments (SourceProfile.fed_segments) -----
+
+
+def _live_edge_harness(
+    env: Settings, monkeypatch: pytest.MonkeyPatch, last_pts: int, seg2_end: float,
+) -> tuple[list[str], generator.SourceProfile, Callable[..., None]]:
+    base = 1_800_000_000.0
+    writer = sqlite3.connect(env.frigate.db_path)
+    writer.execute("UPDATE recordings SET end_time = ? WHERE id = 's2'", (seg2_end,))
+    writer.commit()
+    writer.close()
+    decoded: list[str] = []
+    failing: set[str] = set()
+    inner = _fake_extract(
+        lambda seg: [float(i) for i in range(last_pts + 1 if seg.name == "2.mp4" else 10)]
+    )
+
+    async def _counting(seg_path: Path, out_dir: Path, **kw: object) -> list[tuple[float, Path]]:
+        decoded.append(seg_path.name)
+        if seg_path.name in failing:
+            failing.discard(seg_path.name)
+            raise ffmpeg_io.FfmpegError("boom")
+        return await inner(seg_path, out_dir, **kw)  # type: ignore[no-any-return,operator]
+
+    monkeypatch.setattr(ffmpeg_io, "extract_keyframes_with_pts", _counting)
+    profile = generator.SourceProfile()
+    profile.failing = failing  # type: ignore[attr-defined]
+
+    def _tick(conn: sqlite3.Connection, now: float = base + 40, **kw: object) -> None:
+        asyncio.run(
+            generator.generate_live_edge(
+                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=now, profile=profile, sem=asyncio.Semaphore(3), **kw,  # type: ignore[arg-type]
+            )
+        )
+
+    return decoded, profile, _tick
+
+
+@pytest.mark.parametrize(
+    "last_pts, seg2_end",
+    [
+        (9, 1_800_000_020.001),  # float-noise margin: end == through + interval + 0.001
+        (8, 1_800_000_010.0 + 10.001),  # uneven keyframes: last stored one at seg + 8.0
+    ],
+)
+def test_live_edge_remembers_segments_the_arithmetic_cannot_skip(
+    env: Settings, monkeypatch: pytest.MonkeyPatch, last_pts: int, seg2_end: float
+) -> None:
+    decoded, _profile, tick = _live_edge_harness(env, monkeypatch, last_pts, seg2_end)
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        tick(conn)
+        assert sorted(decoded) == ["1.mp4", "2.mp4"]
+        for _ in range(3):  # quiet ticks
+            decoded.clear()
+            tick(conn)
+            assert decoded == [], "an already-fed segment was decoded again"
+    finally:
+        conn.close()
+
+
+def test_live_edge_retries_a_failed_or_cut_short_segment(
+    env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    decoded, profile, tick = _live_edge_harness(env, monkeypatch, 9, 1_800_000_020.001)
+    failing: set[str] = profile.failing  # type: ignore[attr-defined]
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        # Cut short: the deadline has passed, so only the first segment is fed.
+        tick(conn, deadline=time.monotonic() - 1.0, min_segments=1)
+        assert decoded == ["1.mp4"]
+        # Failed: 2.mp4 raises on this attempt, so it must not be remembered.
+        decoded.clear()
+        failing.add("2.mp4")
+        tick(conn)
+        assert decoded == ["2.mp4"]
+        # Now it succeeds -- and only now is it remembered.
+        decoded.clear()
+        tick(conn)
+        assert decoded == ["2.mp4"]
+        decoded.clear()
+        tick(conn)
+        assert decoded == []
+    finally:
+        conn.close()
+
+
+def test_live_edge_forgets_fed_segments_when_the_tier_is_dropped(
+    env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    decoded, profile, tick = _live_edge_harness(env, monkeypatch, 9, 1_800_000_020.001)
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        tick(conn)
+        assert profile.fed_segments[("doorbell", 1.0)].ends
+        conn.execute("DELETE FROM scrub_buckets")
+        conn.commit()
+        decoded.clear()
+        tick(conn)
+        assert sorted(decoded) == ["1.mp4", "2.mp4"], "dropped data was not regenerated"
+    finally:
+        conn.close()
