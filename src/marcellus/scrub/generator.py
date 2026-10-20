@@ -320,6 +320,15 @@ def _persist_cells(
                 logger.warning("scrub: could not store cell %s -> %s: %s", a.path, dst, exc)
 
 
+def _commit(conn: sqlite3.Connection, stats: CycleStats | None) -> None:
+    """`conn.commit()`, counted in the cycle's stats (count and wall time)."""
+    started = time.monotonic()
+    conn.commit()
+    if stats is not None:
+        stats.db_commits += 1
+        stats.db_commit_s += time.monotonic() - started
+
+
 def _retire_overclaiming_sheets(
     conn: sqlite3.Connection,
     cache_dir: Path,
@@ -327,6 +336,7 @@ def _retire_overclaiming_sheets(
     interval_s: float,
     sheet_start: float,
     kept_count: int,
+    stats: CycleStats | None = None,
 ) -> None:
     """Delete already-published versions of this sheet that claim more cells
     than the cell store can back.
@@ -351,7 +361,7 @@ def _retire_overclaiming_sheets(
         "WHERE camera = ? AND interval_s = ? AND start_ts = ? AND count > ?",
         (camera, interval_s, sheet_start, kept_count),
     )
-    conn.commit()
+    _commit(conn, stats)
     for row in rows:
         with contextlib.suppress(OSError):
             (cache_dir / row["path"]).unlink()
@@ -492,6 +502,7 @@ def _retire_stale_recent_buckets(
     recent_interval_s: float,
     boundary: float,
     aged_interval_s: float | None = None,
+    stats: CycleStats | None = None,
 ) -> None:
     """Drop any recent-tier bucket/sheet that now falls (even partially)
     before `boundary` (§4.2 non-overlap, §5.5 thinning) -- but only once the
@@ -575,7 +586,7 @@ def _retire_stale_recent_buckets(
             f"WHERE camera = ? AND interval_s = ? AND start_ts IN ({sheet_placeholders})",
             (camera, recent_interval_s, *sheet_starts),
         )
-    sidecar_conn.commit()
+    _commit(sidecar_conn, stats)
     for r in sheet_rows:
         p = cache_dir / r["path"]
         with contextlib.suppress(OSError):
@@ -707,9 +718,10 @@ class _TierWriter:
             cols=self.cols, rows=self.rows, cell_w=self.cell_w, cell_h=self.cell_h,
             count=real_count, path=rel, complete=complete,
         )
-        self.conn.commit()
+        _commit(self.conn, self.stats)
         _retire_overclaiming_sheets(
-            self.conn, scrub.cache_dir, self.camera, self.interval_s, sheet_start, real_count
+            self.conn, scrub.cache_dir, self.camera, self.interval_s, sheet_start, real_count,
+            self.stats,
         )
         if complete:
             # Only a sheet published full can lose its cells: a sheet held short
@@ -718,14 +730,17 @@ class _TierWriter:
             self._sealed.add(sheet_start)
             _drop_cells_dir(scrub.cache_dir, self.camera, self.interval_s, sheet_start)
 
-    async def feed(self, frames: list[grid.Frame]) -> None:
+    async def feed(self, frames: list[grid.Frame]) -> int:
         """Take whatever of `frames` belongs to this tier and store it.
 
         The caller decodes at the finest interval in play, so a coarser tier
         gets several candidates per slot and has to thin them here -- handing
         colliding frames to `assign_cells` makes it split the bucket on every
         frame.
+
+        Returns how many cells were accepted.
         """
+        accepted_total = 0
         scrub = self.settings.scrub
         # Skip anything already represented: compare *grid slots*, not raw
         # timestamps. Each segment is decimated independently, so a slot
@@ -769,11 +784,12 @@ class _TierWriter:
                     width=self.cell_w, height=self.cell_h,
                     generated_through=self._generated_through, complete=True,
                 )
-                self.conn.commit()
+                _commit(self.conn, self.stats)
                 self._bucket_sealed()
                 self._bucket_start = pending[0].timestamp
             result = grid.assign_cells(pending, self._bucket_start, self.interval_s)
             self.new_frames += len(result.accepted)
+            accepted_total += len(result.accepted)
 
             if result.accepted:
                 # Route accepted cells into their sheet (a bucket ~30 sheets deep).
@@ -831,7 +847,7 @@ class _TierWriter:
                     width=self.cell_w, height=self.cell_h,
                     generated_through=self._generated_through, complete=False,
                 )
-                self.conn.commit()
+                _commit(self.conn, self.stats)
 
             if result.split_at is not None:
                 # Seal the current bucket and start a fresh one at split_at.
@@ -842,12 +858,13 @@ class _TierWriter:
                     width=self.cell_w, height=self.cell_h,
                     generated_through=self._generated_through, complete=True,
                 )
-                self.conn.commit()
+                _commit(self.conn, self.stats)
                 self._bucket_sealed()
                 self._bucket_start = None
                 pending = result.remaining
             else:
                 pending = []
+        return accepted_total
 
     async def flush(self) -> None:
         """One version per still-filling sheet per cycle, not per segment."""
@@ -874,7 +891,7 @@ class _TierWriter:
                 width=self.cell_w, height=self.cell_h,
                 generated_through=self._generated_through, complete=True,
             )
-            self.conn.commit()
+            _commit(self.conn, self.stats)
             self._bucket_sealed()
             self._bucket_start = None
 
@@ -919,6 +936,7 @@ async def _generate_tier(
     consumed_through: float | None = None,
     min_segments: int = 0,
     fed: _FedSegments | None = None,
+    derived_writers: Sequence[_TierWriter] = (),
 ) -> dict[str, Any]:
     """Sample `[since, window_end)` for one thinning tier, never emitting frames
     outside `[window_start, window_end)` (§4.2 non-overlap, §5.5 thinning tiers).
@@ -933,7 +951,8 @@ async def _generate_tier(
     `newest_first`, when set, picks the *newest* `budget` segments of
     `[since, window_end)` rather than the oldest -- see `_generate_tiers`.
 
-    `consumed_through`, `min_segments`, `fed` -- see `_generate_tiers`.
+    `consumed_through`, `min_segments`, `fed`, `derived_writers` -- see
+    `_generate_tiers`.
     """
     if window_end <= window_start or budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0}
@@ -951,6 +970,7 @@ async def _generate_tier(
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
         profile=profile, sem=sem, deadline=deadline, newest_first=newest_first,
         consumed_through=consumed_through, min_segments=min_segments, fed=fed,
+        derived_writers=derived_writers,
     )
 
 
@@ -972,6 +992,7 @@ async def _generate_tiers(
     consumed_through: float | None = None,
     min_segments: int = 0,
     fed: _FedSegments | None = None,
+    derived_writers: Sequence[_TierWriter] = (),
 ) -> dict[str, Any]:
     """Open each segment in `[since, window_end)` and feed it to `writer`.
 
@@ -1070,6 +1091,7 @@ async def _generate_tiers(
     # assignment is order-dependent, and the writer, the DB, `fed` and the stats
     # all stay on one task in row order, exactly as when this was serial.
     window_size = max(1, scrub.ffmpeg_concurrency)
+    live_derived = list(derived_writers)
     idx = 0
     while idx < len(rows_):
         size = window_size
@@ -1131,10 +1153,44 @@ async def _generate_tiers(
                     raise result
                 if result:
                     await writer.feed(result)
+                    for dw in list(live_derived):
+                        # Only frames on the derived grid *as the drive tier sees
+                        # it* -- exactly the cells Pass 3's `_decimate_source`
+                        # would pick. Without this a writer takes the first frame
+                        # of the slot's half-interval window it is handed (decoded
+                        # segments are ~10s long), which for an hourly tier is up
+                        # to half an hour before the slot, and `_last_slot` then
+                        # refuses the frame that sits on it.
+                        ratio = round(dw.interval_s / drive_interval_s)
+                        on_grid = [
+                            f for f in result
+                            if round(f.timestamp / drive_interval_s) % ratio == 0
+                        ]
+                        if not on_grid:
+                            continue
+                        try:
+                            accepted = await dw.feed(on_grid)
+                        except Exception:
+                            logger.warning(
+                                "scrub: feeding derived %gs tier for %s from the live edge "
+                                "failed; Pass 3 will carry on from what it stored",
+                                dw.interval_s, camera, exc_info=True,
+                            )
+                            live_derived.remove(dw)
+                            continue
+                        profile.stats.derived_live_cells += accepted
                 if fed is not None and row["end_time"] <= window_end:
                     fed.ends[row["path"]] = row["end_time"]
 
     await writer.flush()
+    for dw in live_derived:
+        try:
+            await dw.flush()
+        except Exception:
+            logger.warning(
+                "scrub: flushing derived %gs tier for %s failed", dw.interval_s, camera,
+                exc_info=True,
+            )
     if fed is not None:
         # Anything this far behind the tier's frontier can never match the query
         # again (`min_end` only moves forward), so don't let the memory grow.
@@ -1517,7 +1573,7 @@ async def generate_camera(
     # produced it.
     _retire_stale_recent_buckets(
         sidecar_conn, scrub.cache_dir, camera, scrub.recent_interval_s,
-        effective_boundary, aged_interval_s=scrub.aged_interval_s,
+        effective_boundary, aged_interval_s=scrub.aged_interval_s, stats=profile.stats,
     )
     return {
         "camera": camera,
@@ -1575,6 +1631,12 @@ async def generate_live_edge(
     live_since = max(window_start, now - scrub.live_edge_lookback_s)
     if recent_through is not None and recent_through > live_since:
         live_since = recent_through
+    derived_writers: list[_TierWriter] = []
+    if scrub.derived_from_live_edge:
+        derived_writers = await _open_derived_writers(
+            settings, camera, drive_interval_s=interval_s, live_since=live_since,
+            frigate_conn=frigate_conn, sidecar_conn=sidecar_conn, now=now, profile=profile,
+        )
     result = await _generate_tier(
         settings, camera,
         interval_s=interval_s,
@@ -1585,6 +1647,7 @@ async def generate_live_edge(
         profile=profile, sem=sem, newest_first=True, deadline=deadline,
         consumed_through=recent_through, min_segments=min_segments,
         fed=profile.fed_segments.setdefault((camera, interval_s), _FedSegments()),
+        derived_writers=derived_writers,
     )
     return {"camera": camera, **result}
 
@@ -1711,8 +1774,6 @@ async def _decimate_source(
         if deadline is not None and time.monotonic() >= deadline:
             break
         img_path = cache_dir / sheet["path"]
-        if not img_path.exists():
-            continue
         cols = sheet["cols"]
         cell_w, cell_h = sheet["cell_w"], sheet["cell_h"]
         wanted: list[tuple[int, float]] = []
@@ -1723,7 +1784,10 @@ async def _decimate_source(
             if round(cell_t / finer_interval_s) % ratio:
                 continue
             wanted.append((k, cell_t))
-        if not wanted:
+        # Decided before the image is touched: most sheets overlapping the
+        # window hold no cell on the derived grid, and opening one costs a full
+        # decode of a multi-megapixel image.
+        if not wanted or not img_path.exists():
             continue
 
         def _slice_sheet(
@@ -1766,6 +1830,81 @@ async def _decimate_source(
     return frames
 
 
+async def _open_derived_writer(
+    settings: Settings,
+    camera: str,
+    *,
+    interval_s: float,
+    frigate_conn: sqlite3.Connection,
+    sidecar_conn: sqlite3.Connection,
+    now: float,
+    profile: SourceProfile,
+) -> tuple[_TierWriter, float | None, float]:
+    """Build and resume the writer for one derived tier.
+
+    The single place a derived writer is constructed -- Pass 3
+    (`generate_derived_tier`) and the live edge (`_open_derived_writers`) must
+    agree on window, geometry, canvas-cache use and resume point, or they would
+    fight over the same buckets. Returns `(writer, since, resume_since)`: the
+    tier's `latest_generated_through` (None when it has no data) and where the
+    writer was resumed.
+    """
+    retention_cutoff = now - settings.scrub.retention_days * 86400
+    cell_w, cell_h = await camera_cell_size(
+        settings, camera, frigate_conn=frigate_conn, profile=profile
+    )
+    writer = _TierWriter(
+        settings, camera, interval_s=interval_s,
+        window_start=retention_cutoff, window_end=now,
+        cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn, stats=profile.stats,
+    )
+    since = db.latest_generated_through(sidecar_conn, camera, interval_s)
+    resume_since = since if since is not None else retention_cutoff
+    writer.resume(resume_since)
+    return writer, since, resume_since
+
+
+async def _open_derived_writers(
+    settings: Settings,
+    camera: str,
+    *,
+    drive_interval_s: float,
+    live_since: float,
+    frigate_conn: sqlite3.Connection,
+    sidecar_conn: sqlite3.Connection,
+    now: float,
+    profile: SourceProfile,
+) -> list[_TierWriter]:
+    """Writers for the derived tiers the live edge can feed.
+
+    A derived interval qualifies when Pass 3 would build it from the recent
+    tier (`_is_whole_multiple`) and the tier's next slot is at or after where
+    the live edge resumes. The second condition matters: a writer drops everything
+    at or behind the newest slot it holds, and Pass 3 resumes from the tier's
+    `generated_through`, so feeding frames from the edge into a tier that is
+    still behind (cold start, restart, Pass 3 starved by a deadline) would
+    jump it forward and strand the span in between for good. Such a tier is
+    left to Pass 3 until it catches up.
+    """
+    writers: list[_TierWriter] = []
+    for interval_s in settings.scrub.derived_intervals_s:
+        if not _is_whole_multiple(interval_s, drive_interval_s):
+            continue
+        through = db.latest_generated_through(sidecar_conn, camera, interval_s)
+        # `through` is the last stored cell's timestamp; its next slot must not
+        # fall before the live edge, or it sits in segments Pass 1 already
+        # consumed -- only Pass 3 can still fill it, and feeding a later slot
+        # first would strand it.
+        if through is None or (round(through / interval_s) + 1) * interval_s < live_since:
+            continue
+        writer, _since, _resume = await _open_derived_writer(
+            settings, camera, interval_s=interval_s,
+            frigate_conn=frigate_conn, sidecar_conn=sidecar_conn, now=now, profile=profile,
+        )
+        writers.append(writer)
+    return writers
+
+
 async def generate_derived_tier(
     settings: Settings,
     camera: str,
@@ -1801,17 +1940,10 @@ async def generate_derived_tier(
     if not decode_plan:
         return {"camera": camera, "interval_s": interval_s, "new_frames": 0}
 
-    cell_w, cell_h = await camera_cell_size(
-        settings, camera, frigate_conn=frigate_conn, profile=profile
-    )
-    writer = _TierWriter(
+    writer, since, resume_since = await _open_derived_writer(
         settings, camera, interval_s=interval_s,
-        window_start=retention_cutoff, window_end=now,
-        cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn, stats=profile.stats,
+        frigate_conn=frigate_conn, sidecar_conn=sidecar_conn, now=now, profile=profile,
     )
-    since = db.latest_generated_through(sidecar_conn, camera, interval_s)
-    resume_since = since if since is not None else retention_cutoff
-    writer.resume(resume_since)
     # Where decimation starts reading. `since` is the last derived cell
     # already stored, so a source window opening *at* it selects that cell
     # again -- and `_decimate_source` decodes the whole source sheet around it
@@ -2264,19 +2396,28 @@ async def generate_cycle(
                 break
             served_d += 1
             try:
-                aged_result = await generate_aged_tier(
-                    settings, camera, frigate_conn=conn, sidecar_conn=conn,
-                    now=now, profile=profile, deadline=pass3_deadline,
-                )
+                aged_started = _time.monotonic()
+                try:
+                    aged_result = await generate_aged_tier(
+                        settings, camera, frigate_conn=conn, sidecar_conn=conn,
+                        now=now, profile=profile, deadline=pass3_deadline,
+                    )
+                finally:
+                    stats.pass3_aged_s += _time.monotonic() - aged_started
                 totals[camera]["new_frames"] += aged_result["new_frames"]
-                derived_result = await generate_derived(
-                    settings, camera, frigate_conn=conn, sidecar_conn=conn,
-                    now=now, profile=profile, deadline=pass3_deadline,
-                )
+                derived_started = _time.monotonic()
+                try:
+                    derived_result = await generate_derived(
+                        settings, camera, frigate_conn=conn, sidecar_conn=conn,
+                        now=now, profile=profile, deadline=pass3_deadline,
+                    )
+                finally:
+                    stats.pass3_derived_s += _time.monotonic() - derived_started
                 totals[camera]["new_frames"] += derived_result["new_frames"]
                 _retire_stale_recent_buckets(
                     conn, scrub.cache_dir, camera, scrub.recent_interval_s,
                     effective_boundary, aged_interval_s=scrub.aged_interval_s,
+                    stats=stats,
                 )
             except Exception:
                 logger.exception(

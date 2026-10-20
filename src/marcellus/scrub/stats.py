@@ -25,6 +25,9 @@ class CycleStats:
     pass1_s: float = 0.0
     pass2_s: float = 0.0
     pass3_s: float = 0.0
+    # Pass 3 split: aged-tier decimation vs derived-tier work (summed over cameras).
+    pass3_aged_s: float = 0.0
+    pass3_derived_s: float = 0.0
     # ffmpeg extraction subprocesses (one per segment decoded) and their summed
     # wall time. Failed and timed-out spawns count: they cost CPU all the same.
     ffmpeg_spawns: int = 0
@@ -44,6 +47,13 @@ class CycleStats:
     pil_decodes: int = 0
     pil_sheet_encodes: int = 0
     pil_cell_encodes: int = 0
+    # Sidecar-DB commits the generator issued this cycle and their summed wall
+    # time (every fsync is a stall for the event loop that runs them).
+    db_commits: int = 0
+    db_commit_s: float = 0.0
+    # Cells accepted by derived-tier writers fed from the live edge (Pass 1)
+    # rather than built by Pass 3 decimation.
+    derived_live_cells: int = 0
     # CPU (user+sys) baselines taken at cycle start. Wall time above is not CPU
     # time, and CPU-hours are what the box shares with Frigate. Children are
     # reaped subprocesses -- the generator's ffmpeg/ffprobe, plus anything else
@@ -77,10 +87,13 @@ class CycleStats:
     def summary(self) -> str:
         return (
             f"pass1={self.pass1_s:.2f}s pass2={self.pass2_s:.2f}s pass3={self.pass3_s:.2f}s "
+            f"pass3_aged={self.pass3_aged_s:.2f}s pass3_derived={self.pass3_derived_s:.2f}s "
             f"ffmpeg_spawns={self.ffmpeg_spawns} ffmpeg_s={self.ffmpeg_s:.2f} "
             f"ffmpeg_wall_s={self.ffmpeg_wall_s:.2f} "
             f"segments_decoded={self.segments_decoded} ms_per_segment={self.ms_per_segment:.0f} "
             f"ffprobe_calls={self.ffprobe_calls} pil_decodes={self.pil_decodes} "
             f"pil_sheet_encodes={self.pil_sheet_encodes} pil_cell_encodes={self.pil_cell_encodes} "
+            f"db_commits={self.db_commits} db_commit_s={self.db_commit_s:.2f} "
+            f"derived_live_cells={self.derived_live_cells} "
             f"child_cpu_s={self.child_cpu_s:.2f} self_cpu_s={self.self_cpu_s:.2f}"
         )

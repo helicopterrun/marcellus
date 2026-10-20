@@ -3081,6 +3081,10 @@ def test_derived_tier_resume_does_not_reopen_the_source_sheet(
     to discard the result. With nothing new upstream it must open nothing, and
     must still pick up the next cell once the source grows."""
     denv = _derived_env(env, derived_intervals_s=[10.0])
+    # Pass 3's own resume behaviour is under test, so keep the live edge out of it.
+    denv = denv.model_copy(
+        update={"scrub": denv.scrub.model_copy(update={"derived_from_live_edge": False})}
+    )
     base = 1_800_000_000.0
     opened: list[object] = []
     real_open = generator.Image.open
@@ -3673,3 +3677,307 @@ def test_concurrency_one_decodes_strictly_one_at_a_time(
     assert fed_starts == [base, base + 10, base + 20]
     assert not any(d.exists() for d in dirs)
     assert profile.stats.ffmpeg_s == pytest.approx(profile.stats.ffmpeg_wall_s, rel=0.05)
+
+
+# ----- Derived tiers fed from the live edge (scrub.derived_from_live_edge) -----
+
+_BASE = 1_800_000_000.0
+
+
+def _add_segment3(env: Settings) -> None:
+    """A third 10s segment (base+20..30) lands in the recordings table."""
+    (env.frigate.recordings_path / "3.mp4").write_bytes(b"fake")
+    w = sqlite3.connect(env.frigate.db_path)
+    w.execute(
+        "INSERT INTO recordings VALUES ('s3','doorbell','/media/frigate/3.mp4',?,?,10.0,5.0)",
+        (_BASE + 20, _BASE + 30),
+    )
+    w.commit()
+    w.close()
+
+
+def _tier_rows(
+    conn: sqlite3.Connection, interval_s: float
+) -> tuple[list[tuple[float, float]], list[tuple[float, int]]]:
+    buckets = [
+        (b["start_ts"], b["generated_through"])
+        for b in db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
+        if b["interval_s"] == interval_s
+    ]
+    sheets = [
+        (s["start_ts"], s["count"])
+        for s in db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000, interval=interval_s)
+    ]
+    return sorted(buckets), sorted(sheets)
+
+
+def _seed_derived(
+    denv: Settings, conn: sqlite3.Connection, profile: generator.SourceProfile
+) -> None:
+    """Recent tier + a caught-up 10s derived tier (the state a live edge feeds)."""
+    asyncio.run(
+        generator.generate_camera(
+            denv, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+            now=_BASE + 30, profile=profile, sem=asyncio.Semaphore(3),
+        )
+    )
+    asyncio.run(
+        generator.generate_derived_tier(
+            denv, "doorbell", interval_s=10.0,
+            frigate_conn=conn, sidecar_conn=conn, now=_BASE + 30, profile=profile,
+        )
+    )
+
+
+def _live_tick(
+    denv: Settings, conn: sqlite3.Connection, profile: generator.SourceProfile, now: float
+) -> None:
+    asyncio.run(
+        generator.generate_live_edge(
+            denv, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+            now=now, profile=profile, sem=asyncio.Semaphore(3),
+        )
+    )
+
+
+def test_live_edge_feeds_a_caught_up_derived_tier_without_pass3(env: Settings) -> None:
+    denv = _derived_env(env, derived_intervals_s=[10.0])
+    conn = db.open_joined(denv.frigate.db_path, denv.sidecar.db_path)
+    try:
+        profile = generator.SourceProfile()
+        _seed_derived(denv, conn, profile)
+        before_b, before_s = _tier_rows(conn, 10.0)
+        assert before_b[0][1] == pytest.approx(_BASE + 10)
+
+        _add_segment3(denv)
+        _live_tick(denv, conn, profile, _BASE + 50)
+        after_b, after_s = _tier_rows(conn, 10.0)
+        through = db.latest_generated_through(conn, "doorbell", 10.0)
+    finally:
+        conn.close()
+
+    assert through == pytest.approx(_BASE + 20)  # advanced with no Pass 3 call
+    assert len(after_b) == 1  # resumed the open bucket, no new one
+    assert after_s == [(_BASE, 3)]
+    assert profile.stats.derived_live_cells == 1
+
+
+def test_pass3_after_live_feeding_opens_no_source_sheet_and_no_new_bucket(
+    env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    denv = _derived_env(env, derived_intervals_s=[10.0])
+    conn = db.open_joined(denv.frigate.db_path, denv.sidecar.db_path)
+    opened: list[object] = []
+    real_open = generator.Image.open
+
+    def _counting_open(*a: object, **k: object) -> object:
+        opened.append(a[0] if a else None)
+        return real_open(*a, **k)  # type: ignore[arg-type]
+
+    try:
+        profile = generator.SourceProfile()
+        _seed_derived(denv, conn, profile)
+        _add_segment3(denv)
+        _live_tick(denv, conn, profile, _BASE + 50)
+        buckets_before, sheets_before = _tier_rows(conn, 10.0)
+
+        monkeypatch.setattr(generator.Image, "open", _counting_open)
+        decodes_before = profile.stats.pil_decodes
+        result = asyncio.run(
+            generator.generate_derived_tier(
+                denv, "doorbell", interval_s=10.0,
+                frigate_conn=conn, sidecar_conn=conn, now=_BASE + 50, profile=profile,
+            )
+        )
+        buckets_after, sheets_after = _tier_rows(conn, 10.0)
+    finally:
+        conn.close()
+
+    assert result["new_frames"] == 0
+    assert opened == []
+    assert profile.stats.pil_decodes == decodes_before
+    assert buckets_after == buckets_before
+    assert sheets_after == sheets_before
+
+
+def test_live_fed_derived_tier_matches_pass3_only(env: Settings, tmp_path: Path) -> None:
+    """Same slots filled, same bucket/sheet geometry, whichever path built it.
+
+    The fixture's frames sit exactly on the grid, so even the timestamps agree.
+    In general they may differ by < interval_s/2 of the finer tier: the live
+    path picks the frame nearest each derived slot, Pass 3 takes the finer
+    tier's cell at its nominal grid time -- both within the same slot.
+    """
+
+    def _scenario(flag: bool, sub: str) -> tuple[object, object]:
+        scrub = env.scrub.model_copy(
+            update={
+                "derived_intervals_s": [10.0],
+                "derived_from_live_edge": flag,
+                "cache_dir": tmp_path / sub / "scrub",
+            }
+        )
+        senv = env.model_copy(
+            update={
+                "scrub": scrub,
+                "sidecar": env.sidecar.model_copy(update={"db_path": tmp_path / sub / "s.db"}),
+            }
+        )
+        (tmp_path / sub).mkdir()
+        conn = db.open_joined(senv.frigate.db_path, senv.sidecar.db_path)
+        try:
+            profile = generator.SourceProfile()
+            _seed_derived(senv, conn, profile)
+            _add_segment3_once(senv)
+            _live_tick(senv, conn, profile, _BASE + 50)
+            asyncio.run(
+                generator.generate_derived_tier(
+                    senv, "doorbell", interval_s=10.0,
+                    frigate_conn=conn, sidecar_conn=conn, now=_BASE + 50, profile=profile,
+                )
+            )
+            return _tier_rows(conn, 10.0)
+        finally:
+            conn.close()
+
+    def _add_segment3_once(senv: Settings) -> None:
+        w = sqlite3.connect(senv.frigate.db_path)
+        have = w.execute("SELECT COUNT(*) FROM recordings WHERE id='s3'").fetchone()[0]
+        w.close()
+        if not have:
+            _add_segment3(senv)
+
+    assert _scenario(True, "live") == _scenario(False, "p3only")
+
+
+def test_flag_off_does_not_write_derived_tiers_in_pass1(env: Settings) -> None:
+    denv = _derived_env(env, derived_intervals_s=[10.0])
+    denv = denv.model_copy(
+        update={"scrub": denv.scrub.model_copy(update={"derived_from_live_edge": False})}
+    )
+    conn = db.open_joined(denv.frigate.db_path, denv.sidecar.db_path)
+    try:
+        profile = generator.SourceProfile()
+        _seed_derived(denv, conn, profile)
+        before = _tier_rows(conn, 10.0)
+        _add_segment3(denv)
+        _live_tick(denv, conn, profile, _BASE + 50)
+        after = _tier_rows(conn, 10.0)
+    finally:
+        conn.close()
+    assert after == before
+    assert profile.stats.derived_live_cells == 0
+
+
+def test_non_multiple_derived_interval_is_not_fed_from_live_edge(env: Settings) -> None:
+    # 1.0s recent tier, 2.5s: not a whole multiple. Seed a bucket row so only
+    # the multiple check could exclude it.
+    denv = _derived_env(env, derived_intervals_s=[2.5])
+    conn = db.open_joined(denv.frigate.db_path, denv.sidecar.db_path)
+    try:
+        db.upsert_scrub_bucket(
+            conn, camera="doorbell", start_ts=_BASE, end_ts=_BASE + 20, interval_s=2.5,
+            width=32, height=18, generated_through=_BASE + 17.5, complete=False,
+        )
+        conn.commit()
+        writers = asyncio.run(
+            generator._open_derived_writers(
+                denv, "doorbell", drive_interval_s=1.0, live_since=_BASE + 19,
+                frigate_conn=conn, sidecar_conn=conn, now=_BASE + 50,
+                profile=generator.SourceProfile(),
+            )
+        )
+    finally:
+        conn.close()
+    assert writers == []
+
+
+def test_derived_tier_that_is_behind_or_cold_is_not_fed_from_live_edge(env: Settings) -> None:
+    """Feeding would jump the tier over a span Pass 3 could then never fill."""
+    denv = _derived_env(env, derived_intervals_s=[10.0])
+    conn = db.open_joined(denv.frigate.db_path, denv.sidecar.db_path)
+    try:
+        profile = generator.SourceProfile()
+
+        def _open(live_since: float) -> list[generator._TierWriter]:
+            return asyncio.run(
+                generator._open_derived_writers(
+                    denv, "doorbell", drive_interval_s=1.0, live_since=live_since,
+                    frigate_conn=conn, sidecar_conn=conn, now=_BASE + 100, profile=profile,
+                )
+            )
+
+        assert _open(_BASE + 60) == []  # cold: no derived data at all
+        db.upsert_scrub_bucket(
+            conn, camera="doorbell", start_ts=_BASE, end_ts=_BASE + 11, interval_s=10.0,
+            width=32, height=18, generated_through=_BASE + 10, complete=False,
+        )
+        conn.commit()
+        assert _open(_BASE + 60) == []  # behind by 50s
+        # Next slot (+20) already behind the live edge: Pass 3 must fill it
+        # before live feeding may move the tier past it.
+        assert _open(_BASE + 21) == []
+        assert len(_open(_BASE + 20)) == 1  # caught up
+    finally:
+        conn.close()
+
+
+def test_decimate_source_does_not_open_a_sheet_without_wanted_cells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache_dir = tmp_path / "scrub"
+    conn = db.open_sidecar(tmp_path / "s.db")
+    opened: list[object] = []
+    real_open = generator.Image.open
+    try:
+        start = 1001.0  # cells 1001..1012: none a multiple of 100
+        rel = grid.sheet_rel_path("cam", 1.0, start, 12)
+        out = cache_dir / rel
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cells = [(i, _distinct_cell(tmp_path / f"c{i}.jpg", 8, 6, i)) for i in range(12)]
+        tiling.tile_sheet(cells, cols=4, rows=3, cell_w=8, cell_h=6, out_path=out)
+        db.upsert_scrub_sheet(
+            conn, camera="cam", start_ts=start, interval_s=1.0, cols=4, rows=3,
+            cell_w=8, cell_h=6, count=12, path=rel, complete=True,
+        )
+        conn.commit()
+        work = tmp_path / "work"
+        work.mkdir()
+        stats = generator.CycleStats()
+        monkeypatch.setattr(
+            generator.Image, "open",
+            lambda *a, **k: (opened.append(a[0]), real_open(*a, **k))[1],
+        )
+        frames = asyncio.run(
+            generator._decimate_source(
+                conn, cache_dir, "cam", finer_interval_s=1.0, derived_interval_s=100.0,
+                window_start=start, window_end=start + 12, work_dir=work, stats=stats,
+            )
+        )
+    finally:
+        conn.close()
+    assert frames == []
+    assert opened == []
+    assert stats.pil_decodes == 0
+
+
+def test_cycle_stats_count_db_commits_and_expose_new_fields(env: Settings) -> None:
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        profile = generator.SourceProfile()
+        profile.stats = generator.CycleStats()
+        asyncio.run(
+            generator.generate_camera(
+                env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=_BASE + 30, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+    finally:
+        conn.close()
+    assert profile.stats.db_commits > 0
+    assert profile.stats.db_commit_s >= 0.0
+    summary = profile.stats.summary()
+    for key in (
+        "db_commits=", "db_commit_s=", "pass3_aged=", "pass3_derived=", "derived_live_cells=",
+    ):
+        assert key in summary
