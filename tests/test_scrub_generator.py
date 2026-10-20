@@ -2955,7 +2955,6 @@ def test_cycle_stats_are_populated_and_logged(
     assert profile.stats is not stats
 
 
-
 def test_live_edge_does_not_redecode_a_fully_consumed_segment(
     env: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
