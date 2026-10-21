@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import threading
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -969,6 +970,12 @@ def open_frigate_ro(path: str | Path) -> sqlite3.Connection:
 # each one is pure overhead once the file exists.
 _SCHEMA_APPLIED: set[str] = set()
 
+# Serializes schema application within this process. Threads replaying the
+# DDL against a brand-new file at once can trip SQLITE_SCHEMA ("database
+# schema has changed") when one's CREATE lands mid-way through another's
+# statement; only the first open of a file ever takes it.
+_SCHEMA_LOCK = threading.Lock()
+
 
 #: How long `_enable_wal` keeps retrying a fresh DB's switch into WAL.
 _WAL_SWITCH_DEADLINE_S = 5.0
@@ -1008,10 +1015,12 @@ def open_sidecar(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout = 3000")
     _enable_wal(conn)
     if needs_schema:
-        conn.executescript(SIDECAR_SCHEMA)
-        _apply_added_columns(conn)
-        conn.commit()
-        _SCHEMA_APPLIED.add(key)
+        with _SCHEMA_LOCK:
+            if key not in _SCHEMA_APPLIED or not p.exists():
+                conn.executescript(SIDECAR_SCHEMA)
+                _apply_added_columns(conn)
+                conn.commit()
+                _SCHEMA_APPLIED.add(key)
     return conn
 
 
