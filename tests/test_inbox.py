@@ -101,6 +101,51 @@ def test_select_prefers_a_new_bucket_over_a_repeat() -> None:
     assert [i.key for i in inbox.select(items, 2)] == ["day1", "night"]
 
 
+def test_select_puts_a_lookalike_of_a_pick_behind_something_new() -> None:
+    parked = [0.1, 0.5, 0.2, 0.2]
+    items = [
+        inbox.Item(key="car1", kind="event", camera="a", label="car", ts=0.0, light="day",
+                   priority=80, box=parked),
+        # Same spot, nearly the same box: the same parked car again.
+        inbox.Item(key="car2", kind="event", camera="a", label="car", ts=9.0, light="night",
+                   priority=79, box=[0.11, 0.5, 0.2, 0.21]),
+        _item("other", "b", prio=30),
+    ]
+    assert [i.key for i in inbox.select(items, 2)] == ["car1", "other"]
+    assert len(inbox.select(items, 3)) == 3  # still offered once nothing else is left
+
+
+def test_select_treats_close_visits_on_one_camera_as_one_animal() -> None:
+    def visit(key: str, cam: str, ts: float) -> inbox.Item:
+        return inbox.Item(key=key, kind="visit", camera=cam, label="squirrel", ts=ts,
+                          light=key, priority=95)
+
+    items = [visit("v1", "pkg", 0.0), visit("v2", "pkg", 600.0), visit("v3", "pkg", 7200.0),
+             visit("w1", "walk", 300.0)]
+    picked = {i.key for i in inbox.select(items, 3)}
+    assert {"v3", "w1"} <= picked
+    assert len(picked & {"v1", "v2"}) == 1  # ten minutes apart: one squirrel, one card
+
+
+def test_build_demotes_a_lookalike_of_an_answered_event(settings: Settings) -> None:
+    before = {i["event_id"]: i for i in inbox.build(settings)["items"] if i["event_id"]}
+    assert "lookalike" not in {r["code"] for r in before["e2"]["reasons"]}
+    # e1 is the same camera, label and box as e2 (the fixture's boxes are identical).
+    inbox.apply_verdict(settings, key="event:e1", verdict="skip", plus_enabled=True)
+    data = inbox.build(settings)
+    after = {i["event_id"]: i for i in data["items"] if i["event_id"]}
+    assert "lookalike" in {r["code"] for r in after["e2"]["reasons"]}
+    assert after["e2"]["priority"] < before["e2"]["priority"] / 5
+
+
+def test_build_demotes_a_visit_next_to_a_reviewed_one(settings: Settings) -> None:
+    first = _seed_visit(settings)
+    inbox.apply_verdict(settings, key=f"visit:{first}", verdict="skip", plus_enabled=True)
+    second = _seed_visit(settings)  # same camera, same minute: the same animal
+    item = next(i for i in inbox.build(settings)["items"] if i["key"] == f"visit:{second}")
+    assert [r["code"] for r in item["reasons"]] == ["missed", "lookalike"]
+
+
 def test_build_offers_borderline_rare_and_coverage_but_not_confident_or_old(
     settings: Settings,
 ) -> None:
