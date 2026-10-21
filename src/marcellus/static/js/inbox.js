@@ -17,6 +17,10 @@
   var finished = document.getElementById("ib-finished");
   var focused = 0;
   var lastDecided = null;
+  // On a phone, an animated scroll still settling when the next tap lands
+  // can swallow that tap (iOS Safari), so touch scrolls jump instead.
+  var scrollBehavior = window.matchMedia && window.matchMedia("(pointer: coarse)").matches
+    ? "auto" : "smooth";
 
   var NAMES = {
     event: { tp: "Real", fp: "False alarm", wrong: "Wrong label", skip: "Skipped" },
@@ -43,7 +47,7 @@
     var c = cards[focused];
     cards.forEach(function (x) { x.classList.toggle("focused", x === c); });
     c.focus({ preventScroll: true });
-    c.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    c.scrollIntoView({ block: "center", behavior: scrollBehavior });
   }
 
   function focusNextUndecided(from) {
@@ -51,7 +55,10 @@
       var i = (from + k) % cards.length;
       if (!cards[i].classList.contains("decided")) { focusCard(i); return; }
     }
-    if (finished) finished.hidden = false;
+    if (finished) {
+      finished.hidden = false;
+      finished.scrollIntoView({ block: "center", behavior: scrollBehavior });
+    }
   }
 
   // Countdown on a queued upload; stops at "uploading" (the outbox picks it

@@ -26,12 +26,19 @@ offers only items that carry signal. Each card says why it was chosen:
 | **borderline** | The top score landed just over the camera's threshold (within `borderline_margin`). Frigate+ asks for true *and* false positives near the threshold, to widen the gap between them. |
 | **rare here** | That label appeared at most `rare_label_max` times on that camera in `lookback_days`, like a rabbit on the alley camera. |
 | **few Frigate+ images** | The current Frigate+ model has fewer than `camera_target_images` verified images of this camera (the Frigate+ guide recommends at least 100). |
+| **looks like one you've already answered** | The same camera, label and spot as an event you've answered in the last 30 days (a parked car), or a wildlife visit within 30 minutes of one you've reviewed (the finder often splits one animal into several visits). It only comes up once everything else is gone. |
 
 The batch is picked greedily by priority, with two rules for diversity. Each
 pick halves the weight of the other items with the same camera, label and
 light (day, dusk or night), and one camera can take at most 40% of a batch.
 Wildlife visits take at most 60%, so a finder backlog still leaves room for
 Frigate's own detections.
+
+Look-alikes are pushed to the back too, within a batch as well as across
+them. An event whose box overlaps an already-picked one on the same camera and
+label by 80% or more is the same scene. So is a visit within 30 minutes of an
+already-picked one on the same camera. Answering both would show Frigate+ the
+same picture twice.
 
 ## Using it
 

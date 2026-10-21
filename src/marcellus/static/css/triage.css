@@ -1522,6 +1522,9 @@ body.map-full-open .me-toolbar {
 .ib-outbox-table tr.ob-error td:first-child { color: var(--danger); }
 .ib-outbox-table tr.ob-sent td:first-child { color: var(--ok); }
 @media (max-width: 720px) {
+  /* Room below the last card, so it can scroll up to mid-screen like the
+     rest instead of sitting pinned just above the tab bar. */
+  main.inbox { padding-bottom: 40vh; }
   .ib-grid { grid-template-columns: 1fr; }
   .ib-actions button, .ib-wrong button { min-height: 48px; font-size: 14px; }
   .ib-bar { width: 100px; }

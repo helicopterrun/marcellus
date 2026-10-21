@@ -70,6 +70,21 @@ _DIVERSITY_DECAY = 0.5
 #: Wildlife hits shown per visit card (its strongest).
 _VISIT_FRAMES = 4
 
+#: Two events on one camera and label whose boxes overlap this much (IoU) are
+#: the same scene -- typically a parked car -- and teach Frigate+ nothing new.
+_LOOKALIKE_IOU = 0.8
+
+#: Wildlife visits on one camera this close together are usually one animal
+#: the finder split up (one squirrel made ten visits in 40 minutes on 10-20).
+_LOOKALIKE_GAP_S = 1800.0
+
+#: Weight multiplier for a look-alike of something already answered or
+#: already in the batch: it still comes up, but only once the rest is gone.
+_LOOKALIKE_DECAY = 0.1
+
+#: How far back answered events count as "already seen" for look-alikes.
+_LOOKALIKE_LOOKBACK_S = 30 * 86400.0
+
 
 @dataclass
 class Item:
@@ -136,6 +151,32 @@ def light_bucket(settings: Settings, ts: float) -> str:
 # ----- candidates -----
 
 
+def _iou(a: list[float], b: list[float]) -> float:
+    """Overlap of two [x, y, w, h] boxes."""
+    iw = max(0.0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
+    ih = max(0.0, min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]))
+    inter = iw * ih
+    union = a[2] * a[3] + b[2] * b[3] - inter
+    return inter / union if union > 0 else 0.0
+
+
+def lookalike(a: Item, b: Item) -> bool:
+    """Would answering `b` after `a` show Frigate+ the same picture again?"""
+    if a.kind != b.kind or a.camera != b.camera:
+        return False
+    if a.kind == "visit":
+        return abs(a.ts - b.ts) <= _LOOKALIKE_GAP_S
+    return (
+        a.label == b.label
+        and a.box is not None
+        and b.box is not None
+        and _iou(a.box, b.box) >= _LOOKALIKE_IOU
+    )
+
+
+_SEEN = ("lookalike", "looks like one you've already answered")
+
+
 def _reason(code: str, text: str) -> dict[str, str]:
     return {"code": code, "text": text}
 
@@ -182,6 +223,16 @@ def _event_candidates(
                 (since,),
             )
         }
+        answered: dict[tuple[str, str], list[list[float]]] = {}
+        for a in conn.execute(
+            "SELECT e.camera, e.label, json_extract(e.data, '$.box') AS box FROM event e "
+            "JOIN sidecar.triage_labels t ON t.event_id = e.id WHERE e.start_time >= ?",
+            (now - _LOOKALIKE_LOOKBACK_S,),
+        ):
+            try:
+                answered.setdefault((a["camera"], a["label"]), []).append(json.loads(a["box"]))
+            except (TypeError, ValueError):
+                continue
         rows = conn.execute(
             """
             SELECT e.id, e.camera, e.label, e.start_time, e.has_clip, e.top_score,
@@ -246,6 +297,11 @@ def _event_candidates(
             box = json.loads(r["box"])
         except (TypeError, ValueError):
             box = None
+        seen = box is not None and any(
+            _iou(box, b) >= _LOOKALIKE_IOU for b in answered.get((cam, label), ())
+        )
+        if seen:
+            reasons.append(_reason(*_SEEN))
         out.append(
             Item(
                 key=f"event:{r['id']}",
@@ -259,7 +315,8 @@ def _event_candidates(
                     max(prios) + 5.0 * (len(prios) - 1) + 5.0 * cover_gap
                     if prios
                     else _PRIORITY["coverage"] + 30.0 * cover_gap
-                ),
+                )
+                * (_LOOKALIKE_DECAY if seen else 1.0),
                 score=float(top) if top is not None else None,
                 threshold=thr,
                 box=box,
@@ -278,6 +335,13 @@ def _visit_candidates(settings: Settings, now: float) -> list[Item]:
             "SELECT * FROM wildlife_visits WHERE review = 'pending' AND start_ts >= ?",
             (since,),
         ).fetchall()
+        reviewed: dict[str, list[float]] = {}
+        for r in conn.execute(
+            "SELECT camera, start_ts FROM wildlife_visits WHERE review != 'pending' "
+            "AND start_ts >= ?",
+            (since - _LOOKALIKE_GAP_S,),
+        ):
+            reviewed.setdefault(str(r["camera"]), []).append(float(r["start_ts"]))
         out: list[Item] = []
         for v in visits:
             hits = conn.execute(
@@ -296,6 +360,12 @@ def _visit_candidates(settings: Settings, now: float) -> list[Item]:
                     )
             label = max(votes, key=lambda k: votes[k]) if votes else "animal"
             start = float(v["start_ts"])
+            seen = any(
+                abs(start - t) <= _LOOKALIKE_GAP_S for t in reviewed.get(str(v["camera"]), ())
+            )
+            reasons = [_reason("missed", "Frigate missed this; the wildlife finder found it")]
+            if seen:
+                reasons.append(_reason(*_SEEN))
             out.append(
                 Item(
                     key=f"visit:{v['id']}",
@@ -304,10 +374,8 @@ def _visit_candidates(settings: Settings, now: float) -> list[Item]:
                     label=label,
                     ts=start,
                     light=light_bucket(settings, start),
-                    reasons=[
-                        _reason("missed", "Frigate missed this; the wildlife finder found it")
-                    ],
-                    priority=_PRIORITY["missed"],
+                    reasons=reasons,
+                    priority=_PRIORITY["missed"] * (_LOOKALIKE_DECAY if seen else 1.0),
                     score=float(hits[0]["det_score"]),
                     visit_id=int(v["id"]),
                     frames=[
@@ -326,7 +394,8 @@ def _visit_candidates(settings: Settings, now: float) -> list[Item]:
 
 
 def select(items: list[Item], budget: int) -> list[Item]:
-    """Greedy pick by priority, decayed per already-picked bucket.
+    """Greedy pick by priority, decayed per already-picked bucket and again
+    for a look-alike of something already picked.
 
     The camera and visit caps hold while anything uncapped is left; if they
     would leave the batch short (few cameras with candidates, a day of only
@@ -353,6 +422,8 @@ def select(items: list[Item], budget: int) -> list[Item]:
                     continue
                 b = (it.camera, it.label, it.light)
                 w = it.priority * _DIVERSITY_DECAY ** buckets.get(b, 0)
+                if w > best_w and any(lookalike(p, it) for p in picked):
+                    w *= _LOOKALIKE_DECAY
                 if w > best_w:
                     best_i, best_w = i, w
             if best_i < 0:
