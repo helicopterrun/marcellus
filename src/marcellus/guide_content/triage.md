@@ -1,11 +1,14 @@
 ---
 title: Triage
 section: daily-review
-order: 2
+order: 3
 routes: ["/triage", "/event/{event_id}"]
 ---
 
-[Triage](/triage) is for reviewing detections and labeling them
+For the daily habit, use the [inbox](/guide/inbox). It picks the ~15
+detections a day worth labeling and uploads verdicts to Frigate+ for you.
+[Triage](/triage) is the full event list, for when you want a specific
+camera, label or day. It's for reviewing detections and labeling them
 **real** (a true positive), a **false alarm** (false positive), or
 **skip**. The labels feed
 the [threshold tuning](/guide/tuning-scores) workflow — a few labeling
@@ -33,6 +36,11 @@ desktop the header shows running real/false-alarm/skip counts.
 
 Labels are stored in the sidecar's own database; Frigate's data is never
 modified.
+
+**Also submit to Frigate+** (<kbd>p</kbd>) queues a real or false-alarm
+label's upload in the same outbox the inbox uses: it waits out the undo
+window, retries failures, and shows on the [coverage page](/inbox/coverage).
+Relabeling or clearing the event before then cancels it.
 
 **Related events.** `GET /v1/events/{event_id}/related` looks up other
 cameras that saw the same object -- cards the push pipeline's cross-camera

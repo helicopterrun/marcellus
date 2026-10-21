@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import threading
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -27,9 +28,52 @@ CREATE TABLE IF NOT EXISTS triage_labels (
     label      TEXT NOT NULL CHECK(label IN ('fp','tp','skip')),
     note       TEXT,
     labeled_at TEXT NOT NULL,
-    session    TEXT
+    session    TEXT,
+    -- Set when the verdict was "wrong label": label stays 'fp' (it IS a
+    -- false positive for the detected label, and Frigate+ takes it as one),
+    -- and this names what it really was, if the reviewer said.
+    correct_label TEXT,
+    -- Where the verdict came from: 'inbox' for /inbox, NULL for /triage.
+    source     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_triage_label ON triage_labels(label);
+
+-- Frigate+ uploads waiting out their undo window, in flight, or done
+-- (config `triage`). kind: tp (POST /api/events/{id}/plus with the box) |
+-- fp (PUT /api/events/{id}/false_positive) | frame (POST
+-- /api/{camera}/plus/{frame_ts}, a wildlife hit, `box_id` its row).
+-- status: queued -> sent | error, or cancelled by an undo. `not_before` is
+-- both the undo deadline and the retry backoff.
+CREATE TABLE IF NOT EXISTS plus_outbox (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,
+    event_id    TEXT,
+    box_id      INTEGER,
+    camera      TEXT NOT NULL,
+    label       TEXT NOT NULL DEFAULT '',
+    item_ts     REAL,
+    status      TEXT NOT NULL DEFAULT 'queued',
+    not_before  REAL NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    plus_id     TEXT,
+    detail      TEXT,
+    created_at  REAL NOT NULL,
+    sent_at     REAL
+);
+CREATE INDEX IF NOT EXISTS idx_plus_outbox_due   ON plus_outbox(status, not_before);
+CREATE INDEX IF NOT EXISTS idx_plus_outbox_event ON plus_outbox(event_id);
+CREATE INDEX IF NOT EXISTS idx_plus_outbox_box   ON plus_outbox(box_id);
+
+-- POST /v1/push/feedback verdicts (the app's "Not this"). Used to be
+-- log-only; kept now so /inbox can ask whether the detection was wrong.
+CREATE TABLE IF NOT EXISTS push_feedback (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_key    TEXT NOT NULL,
+    event_id    TEXT NOT NULL DEFAULT '',
+    verdict     TEXT NOT NULL,
+    received_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_push_feedback_ts ON push_feedback(received_at);
 
 -- Toybox: arcade-style high scores for the in-house games (50-states quiz, etc).
 -- Not Frigate-related; it's a for-fun page. `game` namespaces the leaderboard so
@@ -779,6 +823,12 @@ CREATE TABLE IF NOT EXISTS external_source_state (
 # whole migration story the sidecar needs (nothing is ever dropped or
 # retyped, and SQLite's ALTER ... ADD COLUMN is O(1) metadata only).
 _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "triage_labels": [
+        # Review inbox (2026-10-21): "wrong label" verdicts and provenance.
+        # Also in the CREATE TABLE literal above for fresh installs.
+        ("correct_label", "TEXT"),
+        ("source", "TEXT"),
+    ],
     # ONE entry per table: a duplicate key in this literal silently clobbers
     # the earlier one (Python dict semantics) — exactly how the zones_csv
     # migration vanished on 2026-08-14 and broke every card upsert until
@@ -920,6 +970,12 @@ def open_frigate_ro(path: str | Path) -> sqlite3.Connection:
 # each one is pure overhead once the file exists.
 _SCHEMA_APPLIED: set[str] = set()
 
+# Serializes schema application within this process. Threads replaying the
+# DDL against a brand-new file at once can trip SQLITE_SCHEMA ("database
+# schema has changed") when one's CREATE lands mid-way through another's
+# statement; only the first open of a file ever takes it.
+_SCHEMA_LOCK = threading.Lock()
+
 
 #: How long `_enable_wal` keeps retrying a fresh DB's switch into WAL.
 _WAL_SWITCH_DEADLINE_S = 5.0
@@ -959,10 +1015,12 @@ def open_sidecar(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout = 3000")
     _enable_wal(conn)
     if needs_schema:
-        conn.executescript(SIDECAR_SCHEMA)
-        _apply_added_columns(conn)
-        conn.commit()
-        _SCHEMA_APPLIED.add(key)
+        with _SCHEMA_LOCK:
+            if key not in _SCHEMA_APPLIED or not p.exists():
+                conn.executescript(SIDECAR_SCHEMA)
+                _apply_added_columns(conn)
+                conn.commit()
+                _SCHEMA_APPLIED.add(key)
     return conn
 
 

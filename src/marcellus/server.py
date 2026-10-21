@@ -42,6 +42,7 @@ from marcellus.routes import face_captures as face_capture_routes
 from marcellus.routes import fps_budget as fps_budget_routes
 from marcellus.routes import guide as guide_routes
 from marcellus.routes import health as health_routes
+from marcellus.routes import inbox as inbox_routes
 from marcellus.routes import login_page as login_page_routes
 from marcellus.routes import map_page as map_page_routes
 from marcellus.routes import motion as motion_routes
@@ -436,6 +437,24 @@ async def _face_enrich_loop(app: FastAPI) -> None:
             logger.exception("face_enrich: cycle failed")
 
 
+async def _plus_outbox_loop(app: FastAPI) -> None:
+    """Send due Frigate+ uploads (triage/outbox.py) every
+    `triage.outbox_interval_s`. Each upload is one blocking HTTP call, so the
+    pass runs in a thread. An idle pass is one indexed SELECT.
+    """
+    from marcellus.triage import outbox as plus_outbox
+
+    settings: Settings = app.state.settings
+    while True:
+        await asyncio.sleep(settings.triage.outbox_interval_s)
+        try:
+            await asyncio.to_thread(plus_outbox.drain, settings)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("plus outbox: drain failed")
+
+
 async def _encounters_loop(app: FastAPI) -> None:
     """Drive `EncounterService.reconcile` on a fixed cadence -- the "belt"
     catching anything the live `on_review` hook missed or saw only
@@ -699,12 +718,17 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         else:
             enrich_task = asyncio.create_task(_face_enrich_loop(app))
 
+    # Always on: it only ever sends rows a person queued from /inbox or
+    # /event, and costs one SELECT a tick when there are none.
+    outbox_task = asyncio.create_task(_plus_outbox_loop(app))
+
     try:
         yield
     finally:
         for pending in (
             task,
             probe_task,
+            outbox_task,
             push_task,
             sweep_task,
             delivery_sweep_task,
@@ -826,6 +850,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(debug_routes.router)
     app.include_router(zone_hits_routes.router)
     app.include_router(triage_routes.router)
+    app.include_router(inbox_routes.router)
     app.include_router(encounters_routes.router)
     app.include_router(encounters_routes.v1_router)
     app.include_router(sources_routes.v1_router)

@@ -1454,3 +1454,73 @@ body.map-full-open .me-toolbar {
 @media (max-width: 680px) {
   .ws-gallery { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 6px; }
 }
+
+/* ============================================================ inbox
+   /inbox: the daily review queue. One card per item; verdict buttons carry
+   their status colors with their own text color (not --on-accent, which is
+   too dark on the -bg fills). */
+.ib-head { display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-5); align-items: center; margin-bottom: var(--space-3); }
+.ib-progress { display: flex; align-items: center; gap: var(--space-3); font-family: var(--font-mono); font-size: var(--text-base); }
+.ib-bar { display: inline-block; width: 160px; height: 6px; background: var(--surface-2); border-radius: 999px; overflow: hidden; vertical-align: middle; }
+.ib-bar > span { display: block; height: 100%; background: var(--accent); transition: width var(--dur) var(--ease); }
+.ib-bar > span.full { background: var(--ok); }
+.ib-outbox { font-family: var(--font-mono); font-size: var(--text-sm); color: var(--muted); text-decoration: none; }
+.ib-outbox:hover { color: var(--text); }
+.ib-err { color: var(--danger); }
+.ib-banner { background: var(--warn-bg); color: var(--warn-text); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); font-size: var(--text-sm); }
+.ib-keys { margin: 0 0 var(--space-3); }
+.ib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--space-3); }
+.ib-card { background: var(--surface); border: 1px solid var(--stroke); border-radius: var(--radius-md); overflow: hidden; display: flex; flex-direction: column; outline: none; transition: border-color var(--dur-fast), opacity var(--dur); }
+.ib-card.focused, .ib-card:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.ib-card.busy { opacity: 0.6; }
+.ib-card.decided { opacity: 0.55; }
+.ib-card.decided.focused { opacity: 0.8; }
+.ib-media { position: relative; background: var(--deep); }
+.ib-frame { position: relative; line-height: 0; }
+.ib-img { width: 100%; height: auto; display: block; }
+.ib-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.ib-box { fill: none; stroke: var(--accent); stroke-width: 2px; vector-effect: non-scaling-stroke; }
+.ib-frame.playing .ib-img, .ib-frame.playing .ib-overlay { visibility: hidden; }
+.ib-video { position: absolute; inset: 0; width: 100%; height: 100%; background: var(--deep); }
+.ib-play { position: absolute; right: var(--space-2); bottom: var(--space-2); background: rgba(11, 12, 16, 0.75); color: var(--text); border: 1px solid var(--stroke); border-radius: var(--radius-sm); padding: 4px 8px; font-family: var(--font-mono); font-size: var(--text-sm); cursor: pointer; }
+.ib-strip { display: flex; gap: 4px; padding: 4px; background: var(--deep); overflow-x: auto; }
+.ib-thumb { flex: 0 0 auto; padding: 0; border: 1px solid var(--stroke); border-radius: var(--radius-sm); background: none; cursor: pointer; line-height: 0; }
+.ib-thumb.on { border-color: var(--accent); }
+.ib-thumb img { width: 56px; height: 42px; object-fit: cover; border-radius: 3px; }
+.ib-meta { padding: var(--space-2) var(--space-3) 0; font-family: var(--font-mono); font-size: var(--text-sm); }
+.ib-row { display: flex; justify-content: space-between; gap: var(--space-2); }
+.ib-sub { color: var(--muted-2); font-size: var(--text-xs); margin-top: 2px; }
+.ib-score { color: var(--warn); font-variant-numeric: tabular-nums; }
+.ib-reasons { display: flex; flex-wrap: wrap; gap: 4px; margin-top: var(--space-2); }
+.ib-reason { font-family: var(--font-body); font-size: var(--text-xs); padding: 2px 7px; border-radius: 999px; border: 1px solid var(--stroke); color: var(--muted); }
+.ib-reason.r-phone { border-color: var(--danger); color: var(--danger-text); }
+.ib-reason.r-missed { border-color: var(--lane-animal); color: var(--text); }
+.ib-reason.r-borderline { border-color: var(--warn); color: var(--warn-text); }
+.ib-reason.r-rare { border-color: var(--info); color: var(--info-text); }
+.ib-actions, .ib-wrong, .ib-result { display: flex; flex-wrap: wrap; gap: 6px; padding: var(--space-3); margin-top: auto; align-items: center; }
+.ib-actions button, .ib-wrong button { flex: 1 1 0; min-width: 0; padding: 10px 6px; border: 0; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: var(--text-sm); font-weight: 600; cursor: pointer; }
+.ib-card .btn-tp { background: var(--ok-bg); color: var(--ok-text); }
+.ib-card .btn-fp { background: var(--danger-bg); color: var(--danger-text); }
+.ib-card .btn-wrong { background: var(--warn-bg); color: var(--warn-text); }
+.ib-card .btn-skip { background: var(--btn-neutral); color: var(--text); }
+.ib-actions button:hover, .ib-wrong button:hover { filter: brightness(1.2); }
+.ib-wrong label { flex: 1 0 100%; display: flex; gap: var(--space-2); align-items: center; font-size: var(--text-sm); color: var(--muted); }
+.ib-wrong select { flex: 1; background: var(--surface-2); color: var(--text); border: 1px solid var(--stroke); border-radius: var(--radius-sm); padding: 6px; font-family: var(--font-mono); }
+.ib-wrong .help { flex: 1 0 100%; margin: 0; }
+.ib-result { justify-content: space-between; font-family: var(--font-mono); font-size: var(--text-sm); }
+.ib-card.v-tp .ib-result-text { color: var(--ok); }
+.ib-card.v-fp .ib-result-text, .ib-card.v-wrong .ib-result-text { color: var(--danger); }
+.ib-result .btn-clear { border: 0; border-radius: var(--radius-sm); padding: 6px 12px; cursor: pointer; }
+.ib-finished { margin-top: var(--space-4); }
+.ib-finished .btn-primary { margin-left: var(--space-2); text-decoration: none; }
+.ib-foot { margin-top: var(--space-5); }
+.ib-model p { margin: 0 0 var(--space-2); }
+.ib-cov-bar .ib-bar { width: 120px; }
+.ib-detail { max-width: 420px; white-space: normal; color: var(--muted); font-size: var(--text-xs); }
+.ib-outbox-table tr.ob-error td:first-child { color: var(--danger); }
+.ib-outbox-table tr.ob-sent td:first-child { color: var(--ok); }
+@media (max-width: 720px) {
+  .ib-grid { grid-template-columns: 1fr; }
+  .ib-actions button, .ib-wrong button { min-height: 48px; font-size: 14px; }
+  .ib-bar { width: 100px; }
+}

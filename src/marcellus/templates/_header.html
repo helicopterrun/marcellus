@@ -1,5 +1,5 @@
 {# Shared header with cross-page nav, included by base.html's header block.
-   Templates set `active_page` to one of: 'status', 'scrub', 'triage',
+   Templates set `active_page` to one of: 'status', 'scrub', 'inbox', 'triage',
    'encounters', 'map', 'settings', 'replay', 'guide', 'debug', 'toybox',
    'cameras', or one of the People/Tuning pages listed in `_people_pages` /
    `_tuning_pages` below. #}
@@ -23,7 +23,7 @@
   <nav class="pages" aria-label="Main">
     <a href="/" class="page-link{% if _active == 'status' %} active{% endif %}"{% if _active == 'status' %} aria-current="page"{% endif %}>Status</a>
     <a href="/scrub" class="page-link{% if _active == 'scrub' %} active{% endif %}"{% if _active == 'scrub' %} aria-current="page"{% endif %}>Scrub</a>
-    <a href="/triage" class="page-link{% if _active == 'triage' %} active{% endif %}"{% if _active == 'triage' %} aria-current="page"{% endif %}>Triage</a>
+    <a href="/inbox" class="page-link{% if _active in ('inbox', 'triage') %} active{% endif %}"{% if _active in ('inbox', 'triage') %} aria-current="page"{% endif %}>Inbox</a>
     <a href="/encounters" class="page-link{% if _active == 'encounters' %} active{% endif %}"{% if _active == 'encounters' %} aria-current="page"{% endif %}>Encounters</a>
     <a href="/map" class="page-link{% if _active == 'map' %} active{% endif %}"{% if _active == 'map' %} aria-current="page"{% endif %}>Map</a>
     <details class="nav-group">
@@ -68,7 +68,7 @@
 <nav class="tabbar" aria-label="Primary">
   <a href="/" class="tab{% if _active in ('status', 'cameras') %} active{% endif %}"{% if _active in ('status', 'cameras') %} aria-current="page"{% endif %}><svg><use href="#i-status"/></svg><span>Status</span></a>
   <a href="/scrub" class="tab{% if _active == 'scrub' %} active{% endif %}"{% if _active == 'scrub' %} aria-current="page"{% endif %}><svg><use href="#i-scrub"/></svg><span>Scrub</span></a>
-  <a href="/triage" class="tab{% if _active == 'triage' %} active{% endif %}"{% if _active == 'triage' %} aria-current="page"{% endif %}><svg><use href="#i-triage"/></svg><span>Triage</span></a>
+  <a href="/inbox" class="tab{% if _active in ('inbox', 'triage') %} active{% endif %}"{% if _active in ('inbox', 'triage') %} aria-current="page"{% endif %}><svg><use href="#i-triage"/></svg><span>Inbox</span></a>
   <a href="/map" class="tab{% if _active == 'map' %} active{% endif %}"{% if _active == 'map' %} aria-current="page"{% endif %}><svg><use href="#i-map"/></svg><span>Map</span></a>
   <button type="button" class="tab" id="search-btn" aria-label="Search events"><svg><use href="#i-search"/></svg><span>Search</span></button>
   <button type="button" class="tab" id="more-btn" aria-label="More pages" aria-expanded="false"><svg><use href="#i-more"/></svg><span>More</span></button>
@@ -83,7 +83,8 @@
   <div class="more-group">
     <div class="more-heading">Review</div>
     <a href="/scrub" class="page-link">Scrub</a>
-    <a href="/triage" class="page-link">Triage</a>
+    <a href="/inbox" class="page-link">Inbox</a>
+    <a href="/triage" class="page-link">All events</a>
     <a href="/encounters" class="page-link">Encounters</a>
   </div>
   <div class="more-group">

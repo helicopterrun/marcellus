@@ -19,7 +19,9 @@ def test_open_sidecar_creates_schema(sidecar_db_path: Path) -> None:
     assert not sidecar_db_path.exists()
     conn = db.open_sidecar(sidecar_db_path)
     cols = {row[1] for row in conn.execute("PRAGMA table_info(triage_labels)")}
-    assert cols == {"event_id", "label", "note", "labeled_at", "session"}
+    assert cols == {
+        "event_id", "label", "note", "labeled_at", "session", "correct_label", "source",
+    }
     conn.close()
 
 

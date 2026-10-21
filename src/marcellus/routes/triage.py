@@ -12,11 +12,11 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from marcellus.config import Settings
-from marcellus.db import open_joined
+from marcellus.db import open_joined, open_sidecar
 from marcellus.errors import error_detail
-from marcellus.frigate_api import FrigateClient, FrigatePlusError
 from marcellus.routes._deps import settings_of as _settings
 from marcellus.routes._deps import templates_of as _templates
+from marcellus.triage import outbox
 from marcellus.triage.recorder import (
     AlreadyLabeledError,
     EventNotFoundError,
@@ -354,47 +354,34 @@ class ClearPayload(BaseModel):
 
 
 def _maybe_submit_plus(
-    *, request: Request, event_id: str, label: str
+    *, request: Request, event_id: str, label: str, submit: bool
 ) -> dict[str, Any]:
-    """Submit to Frigate+ when the user labels TP/FP and Plus is configured.
+    """Queue the Frigate+ upload for a TP/FP label (triage/outbox.py).
 
-    Returns a small status dict for the UI: status in {"sent", "skipped",
-    "error"} plus an optional reason/plus_id. Never raises — Plus failures
-    must not roll back the triage label write.
+    Returns a small status dict for the UI: status in {"queued", "skipped",
+    "not_requested"} plus a reason/send_in_s. Never raises -- Plus problems
+    must not roll back the triage label write. Any upload still queued for
+    the event is cancelled first, so a relabel or an unticked toggle wins.
     """
-    if not getattr(request.app.state, "plus_enabled", False):
-        return {"status": "skipped", "reason": "plus_not_enabled"}
-    if label not in ("tp", "fp"):
-        return {"status": "skipped", "reason": "label_not_submittable"}
-
-    # Pull the event row to gate on the same preconditions Frigate's own
-    # endpoint checks — saves a round-trip when we know it'll 400.
     s = _settings(request)
-    ev = _get_event_full(
-        frigate_db=s.frigate.db_path, sidecar_db=s.sidecar.db_path, event_id=event_id,
-    )
-    if not ev:
-        return {"status": "error", "reason": "event_not_found"}
-    if not ev["has_snapshot"]:
-        return {"status": "skipped", "reason": "no_snapshot"}
-    if ev["box"] is None:
-        return {"status": "skipped", "reason": "no_box"}
-    if not ev["end_time"]:
-        return {"status": "skipped", "reason": "in_progress"}
-    if label == "tp" and ev["plus_id"]:
-        return {"status": "skipped", "reason": "already_submitted", "plus_id": ev["plus_id"]}
-    if label == "fp" and ev["plus_false_positive"]:
-        return {"status": "skipped", "reason": "already_submitted", "plus_id": ev["plus_id"]}
-
+    conn = open_sidecar(s.sidecar.db_path)
     try:
-        with FrigateClient(s.frigate.base_url) as fc:
-            if label == "tp":
-                plus_id = fc.submit_plus(event_id, include_annotation=True)
-            else:
-                plus_id = fc.submit_false_positive(event_id)
-    except FrigatePlusError as exc:
-        return {"status": "error", "reason": str(exc), "status_code": exc.status_code}
-    return {"status": "sent", "plus_id": plus_id}
+        outbox.cancel_event(conn, event_id)
+        conn.commit()
+        if not submit:
+            return {"status": "not_requested"}
+        if not getattr(request.app.state, "plus_enabled", False):
+            return {"status": "skipped", "reason": "plus_not_enabled"}
+        if label not in ("tp", "fp"):
+            return {"status": "skipped", "reason": "label_not_submittable"}
+        try:
+            outbox.enqueue_event(s, conn, event_id=event_id, kind=label)
+        except outbox.NotSubmittable as exc:
+            return {"status": "skipped", "reason": exc.reason, "message": str(exc)}
+        conn.commit()
+        return {"status": "queued", "send_in_s": round(s.triage.plus_delay_s)}
+    finally:
+        conn.close()
 
 
 @router.post("/label")
@@ -422,16 +409,21 @@ def post_label(payload: LabelPayload, request: Request) -> JSONResponse:
             status_code=409, detail=error_detail("conflict", str(exc))
         ) from exc
 
-    plus_result: dict[str, Any] = {"status": "not_requested"}
-    if payload.submit_plus:
-        plus_result = _maybe_submit_plus(
-            request=request, event_id=payload.event_id, label=payload.label,
-        )
+    plus_result = _maybe_submit_plus(
+        request=request, event_id=payload.event_id, label=payload.label,
+        submit=payload.submit_plus,
+    )
     return JSONResponse({"ok": True, "plus": plus_result, "before": result.get("before")})
 
 
 @router.post("/clear-label")
 def post_clear(payload: ClearPayload, request: Request) -> JSONResponse:
     s = _settings(request)
+    conn = open_sidecar(s.sidecar.db_path)
+    try:
+        outbox.cancel_event(conn, payload.event_id)
+        conn.commit()
+    finally:
+        conn.close()
     recorder_clear(sidecar_db=s.sidecar.db_path, event_id=payload.event_id)
     return JSONResponse({"ok": True})
