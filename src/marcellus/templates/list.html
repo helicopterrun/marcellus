@@ -83,7 +83,7 @@
     {% for ev in events %}
     <a class="card" href="/event/{{ ev.id }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
       {% if ev.has_snapshot %}
-      <img class="thumb" src="{{ frigate_base }}/api/events/{{ ev.id }}/thumbnail.jpg" alt="" loading="lazy">
+      <img class="thumb" src="/api/events/{{ ev.id }}/thumbnail.jpg" alt="" loading="lazy">
       {% else %}
       <div class="thumb thumb-missing">no snapshot</div>
       {% endif %}
