@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% set active_page = 'inbox' %}
+{% set _n = items|length %}
+{% set summary = _n ~ ' to review' %}
+{% block title %}Inbox · Marcellus{% endblock %}
+
+{% block page_heading %}<h1 class="sr-only">Review inbox</h1>{% endblock %}
+{% block body %}
+<main id="main-content" class="inbox" data-budget="{{ budget }}" data-done="{{ done_today }}">
+  <div class="ib-head">
+    <div class="ib-progress" aria-live="polite">
+      <span><b id="ib-done">{{ done_today }}</b> of {{ budget }} reviewed today</span>
+      <span class="ib-bar"><span id="ib-bar-fill" style="width: {{ [100, (100 * done_today / budget)|round|int]|min }}%"></span></span>
+    </div>
+    <a class="ib-outbox" href="/inbox/coverage" title="Frigate+ coverage and the upload outbox">
+      Frigate+:
+      <span id="ib-ob-queued">{{ outbox.queued }} queued</span>
+      · {{ outbox.sent_30d }} sent in 30 days{% if outbox.real_share is not none %} ({{ (outbox.real_share * 100)|round|int }}% real){% endif %}
+      {% if outbox.errors %}· <b class="ib-err">{{ outbox.errors }} failed</b>{% endif %}
+    </a>
+  </div>
+
+  {% if not plus_enabled %}
+  <p class="ib-banner">Frigate+ isn't configured in Frigate, so verdicts are saved but nothing uploads.</p>
+  {% endif %}
+  {% if not plus_meta_ok %}
+  <p class="ib-banner">Couldn't read Frigate's config, so thresholds are the 0.70 default and camera coverage is unknown.</p>
+  {% endif %}
+
+  <p class="help kbd-hint ib-keys">
+    <kbd>t</kbd> real · <kbd>f</kbd> false alarm · <kbd>w</kbd> wrong label · <kbd>s</kbd> skip ·
+    <kbd>u</kbd> undo · <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>space</kbd> play clip ·
+    uploads wait {{ plus_delay_s }}s so you can undo
+  </p>
+
+  {% if items %}
+  <div class="ib-grid" id="ib-grid">
+    {% for it in items %}
+    {% set is_visit = it.kind == 'visit' %}
+    {% set box = it.frames[0].box if is_visit else it.box %}
+    <article class="ib-card" tabindex="0" data-key="{{ it.key }}" data-kind="{{ it.kind }}"
+             data-label="{{ it.label }}"
+             {% if it.has_clip %}data-clip="{{ frigate_base }}/api/events/{{ it.event_id }}/clip.mp4"{% endif %}>
+      <div class="ib-media">
+        <div class="ib-frame">
+          {% if is_visit %}
+          <img class="ib-img" loading="lazy" src="/wildlife/boxes/{{ it.frames[0].box_id }}/frame.jpg" alt="{{ it.label }} on {{ it.camera }}">
+          {% else %}
+          <img class="ib-img" loading="lazy" src="{{ frigate_base }}/api/events/{{ it.event_id }}/snapshot.jpg" alt="{{ it.label }} on {{ it.camera }}">
+          {% endif %}
+          {% if box %}
+          <svg class="ib-overlay" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
+            <rect class="ib-box" x="{{ box[0] }}" y="{{ box[1] }}" width="{{ box[2] }}" height="{{ box[3] }}"/>
+          </svg>
+          {% endif %}
+        </div>
+        {% if is_visit and it.frames|length > 1 %}
+        <div class="ib-strip">
+          {% for f in it.frames %}
+          <button type="button" class="ib-thumb{% if loop.first %} on{% endif %}" data-frame="/wildlife/boxes/{{ f.box_id }}/frame.jpg"
+                  data-box="{{ f.box|join(',') }}" title="+{{ f.offset_s }}s">
+            <img loading="lazy" src="/wildlife/boxes/{{ f.box_id }}/crop.jpg" alt="">
+          </button>
+          {% endfor %}
+        </div>
+        {% endif %}
+        {% if it.has_clip %}<button type="button" class="ib-play" title="play the clip (space)">▶ clip</button>{% endif %}
+      </div>
+
+      <div class="ib-meta">
+        <div class="ib-row">
+          <span class="ib-what"><b>{{ it.label }}</b> on {{ it.camera }}</span>
+          {% if it.score is not none %}<span class="ib-score" title="{{ 'detector score' if is_visit else 'top score' }}">{{ '%.2f'|format(it.score) }}</span>{% endif %}
+        </div>
+        <div class="ib-row ib-sub"><span>{{ it.when }}</span><span>{{ it.light }}</span></div>
+        <div class="ib-reasons">
+          {% for r in it.reasons %}<span class="ib-reason r-{{ r.code }}">{{ r.text }}</span>{% endfor %}
+        </div>
+      </div>
+
+      <div class="ib-actions">
+        <button type="button" class="btn-tp" data-v="tp">{{ 'Animal' if is_visit else 'Real' }}</button>
+        <button type="button" class="btn-fp" data-v="fp">{{ 'Not an animal' if is_visit else 'False alarm' }}</button>
+        {% if not is_visit %}<button type="button" class="btn-wrong" data-v="wrong">Wrong label</button>{% endif %}
+        <button type="button" class="btn-skip" data-v="skip">Skip</button>
+      </div>
+      {% if not is_visit %}
+      <form class="ib-wrong" hidden>
+        <label>It's actually
+          <select name="correct">
+            <option value="">not sure</option>
+            {% for l in labels if l != it.label %}<option value="{{ l }}">{{ l }}</option>{% endfor %}
+          </select>
+        </label>
+        <button type="submit" class="btn-fp">Send</button>
+        <button type="button" class="btn-skip" data-cancel>Cancel</button>
+        <p class="help">Goes to Frigate+ as a false positive. Add the right label when you verify it there.</p>
+      </form>
+      {% endif %}
+      <div class="ib-result" hidden>
+        <span class="ib-result-text"></span>
+        <button type="button" class="btn-clear" data-undo>Undo</button>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <section class="ib-finished panel" id="ib-finished"{% if items %} hidden{% endif %}>
+    {% if candidates %}
+    <h2>{{ 'Batch done' if more else "That's today's " ~ budget }}</h2>
+    <p>{{ candidates }} more candidates are waiting. Come back tomorrow, or
+      <a class="btn-primary" href="/inbox?more=1">keep going ({{ budget }} more)</a></p>
+    {% else %}
+    <h2>Nothing to review</h2>
+    <p>No borderline, rare, missed or under-covered detections in the last few days.</p>
+    {% endif %}
+    <p class="help">Uploaded images still need verifying on
+      <a href="https://plus.frigate.video" target="_blank" rel="noopener">plus.frigate.video</a>
+      before a model build uses them. <a href="/inbox/coverage">Coverage &amp; outbox</a></p>
+  </section>
+
+  <p class="help ib-foot">
+    Chosen from {{ candidates }} candidates in the last week:
+    {% for code, n in by_reason|dictsort %}{{ n }} {{ code }}{% if not loop.last %}, {% endif %}{% endfor %}.
+    <a href="/guide/inbox">How items are picked</a> · <a href="/triage">Browse all events</a>
+  </p>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/inbox.js?v={{ asset_v }}" defer></script>
+{% endblock %}

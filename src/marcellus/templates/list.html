@@ -8,9 +8,9 @@
 <main id="main-content">
   {% set untriaged = events | selectattr('triage_label', 'none') | list %}
   <div class="triage-intro">
-    <p class="page-intro">Label detections as <b>real</b> or a
-      <b>false alarm</b> — labels feed Frigate+ training and
-      <a href="/guide/tuning-scores">threshold tuning</a>.</p>
+    <p class="page-intro">Every event, for when you want a particular camera,
+      label or day. For the daily review, the <a href="/inbox">inbox</a> picks
+      the ones worth labeling and uploads them to Frigate+ for you.</p>
     <div class="triage-progress">
       <span class="badge tp">{{ counts.get('tp', 0) }} real</span>
       <span class="badge fp">{{ counts.get('fp', 0) }} false alarm</span>

@@ -39,6 +39,8 @@ def record(
     note: str | None = None,
     session: str | None = None,
     force: bool = False,
+    correct_label: str | None = None,
+    source: str | None = None,
 ) -> dict[str, str | None]:
     """Insert or update a triage label. Verifies the event exists first."""
     if label not in VALID_LABELS:
@@ -64,13 +66,15 @@ def record(
 
         conn.execute(
             """
-            INSERT INTO triage_labels(event_id, label, note, labeled_at, session)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO triage_labels(
+                event_id, label, note, labeled_at, session, correct_label, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(event_id) DO UPDATE SET
                 label=excluded.label, note=excluded.note,
-                labeled_at=excluded.labeled_at, session=excluded.session
+                labeled_at=excluded.labeled_at, session=excluded.session,
+                correct_label=excluded.correct_label, source=excluded.source
             """,
-            (event_id, label, note, now, session),
+            (event_id, label, note, now, session, correct_label, source),
         )
         conn.commit()
     finally:

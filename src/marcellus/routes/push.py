@@ -996,4 +996,25 @@ async def post_feedback(request: Request) -> dict[str, Any]:
         body.get("event_id", ""),
         body["verdict"],
     )
+    # Kept for /inbox ("you tapped Not this: was the detection wrong?").
+    # Best-effort: the app fires and forgets, so a write failure is logged,
+    # never surfaced.
+    try:
+        conn = db.open_sidecar(request.app.state.settings.sidecar.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO push_feedback(card_key, event_id, verdict, received_at) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    str(body["card_key"])[:200],
+                    str(body.get("event_id") or "")[:100],
+                    str(body["verdict"])[:50],
+                    _datetime.datetime.now(_datetime.timezone.utc).timestamp(),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("push-feedback: could not store verdict")
     return {"ok": True}

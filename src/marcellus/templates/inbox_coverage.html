@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% set active_page = 'inbox' %}
+{% set summary = 'Frigate+ coverage' %}
+{% block title %}Frigate+ coverage · Marcellus{% endblock %}
+
+{% block page_heading %}<h1 class="sr-only">Frigate+ coverage</h1>{% endblock %}
+{% block body %}
+<main id="main-content" class="inbox">
+  <p class="page-intro"><a href="/inbox">← Inbox</a></p>
+
+  {% if not meta.ok %}
+  <p class="ib-banner">Couldn't read Frigate's config, so there's no model metadata to compare against.</p>
+  {% else %}
+  <section class="panel ib-model">
+    <h2>Current model</h2>
+    <p><b>{{ meta.model_name or 'unknown' }}</b>{% if meta.base_model %} on base {{ meta.base_model }}{% endif %},
+      trained {{ meta.train_date[:10] or 'unknown' }}.
+      {% if pending_verify %}
+      <b>{{ pending_verify }}</b> image{{ 's' if pending_verify != 1 }} uploaded since then. Verify them on
+      <a href="https://plus.frigate.video" target="_blank" rel="noopener">plus.frigate.video</a>, then request a new model.
+      {% else %}Nothing uploaded since then.{% endif %}
+    </p>
+    <p class="help">Frigate+ asks for at least {{ target }} verified images per camera, from day, dusk and night,
+      and about 80% true / 20% false positives.
+      {% if outbox.sent_30d %}Last 30 days: {{ outbox.sent_30d_real }} real, {{ outbox.sent_30d_fp }} false alarm
+      ({{ (outbox.real_share * 100)|round|int }}% real).{% endif %}</p>
+  </section>
+
+  <h2 class="section-h">Verified images per camera</h2>
+  <div class="table-scroll">
+  <table class="motion-table ib-cov">
+    <thead><tr>
+      <th>camera</th><th>verified</th><th></th>
+      <th title="uploads since the model was trained; they count once verified and a new model is built">sent since build</th>
+      <th title="when the images sent from here were taken">day · dusk · night</th>
+    </tr></thead>
+    <tbody>
+    {% for c in cameras %}
+      <tr>
+        <td>{{ c.camera }}{% if c.aliases %} <span class="muted">(was {{ c.aliases|join(', ') }})</span>{% endif %}</td>
+        <td>{{ c.verified }}</td>
+        <td class="ib-cov-bar"><span class="ib-bar"><span style="width: {{ c.pct }}%"{% if c.pct >= 100 %} class="full"{% endif %}></span></span></td>
+        <td>{{ c.since_build or '—' }}</td>
+        <td>{{ c.light.day }} · {{ c.light.twilight }} · {{ c.light.night }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if retired %}
+  <p class="help">Also in the model under camera names that no longer exist:
+    {% for name, n in retired %}{{ name }} {{ n }}{% if not loop.last %}, {% endif %}{% endfor %}.
+    Map a renamed camera with <code>triage.plus_camera_aliases</code>.</p>
+  {% endif %}
+  {% endif %}
+
+  <h2 class="section-h">Outbox</h2>
+  {% if not plus_enabled %}<p class="ib-banner">Frigate+ isn't configured in Frigate, so nothing will send.</p>{% endif %}
+  {% if outbox_rows %}
+  <div class="table-scroll">
+  <table class="motion-table ib-outbox-table">
+    <thead><tr><th>status</th><th>what</th><th>camera</th><th>queued</th><th>tries</th><th>detail</th><th></th></tr></thead>
+    <tbody>
+    {% for r in outbox_rows %}
+      <tr class="ob-{{ r.status }}">
+        <td>{{ r.status }}{% if r.status == 'queued' and r.not_before > now %} <span class="muted">in {{ (r.not_before - now)|round|int }}s</span>{% endif %}</td>
+        <td>{{ {'tp': 'real', 'fp': 'false alarm', 'frame': 'frame'}[r.kind] }} {{ r.label }}
+          {% if r.event_id %}<a href="/event/{{ r.event_id }}">event</a>{% endif %}</td>
+        <td>{{ r.camera }}</td>
+        <td>{{ fmt_ts(r.created_at) }}</td>
+        <td>{{ r.attempts }}</td>
+        <td class="ib-detail">{{ r.detail or '' }}</td>
+        <td>{% if r.status == 'error' %}<button type="button" class="btn-neutral ib-retry" data-id="{{ r.id }}">retry</button>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="empty">Nothing has been queued yet.</p>
+  {% endif %}
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.querySelectorAll('.ib-retry').forEach(function (b) {
+  b.addEventListener('click', async function () {
+    b.disabled = true;
+    try {
+      await SC.fetchJson('/inbox/outbox/' + b.dataset.id + '/retry', {method: 'POST'});
+      window.location.reload();
+    } catch (e) { b.disabled = false; SC.toast(String(e.message || e), true); }
+  });
+});
+</script>
+{% endblock %}

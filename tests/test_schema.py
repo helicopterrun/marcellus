@@ -32,6 +32,15 @@ from marcellus import db
 # existed (indexes on these tables are unaffected and are NOT duplicated
 # here -- they're left in place from the current SIDECAR_SCHEMA text).
 _OLD_TABLES: dict[str, str] = {
+    "triage_labels": """
+CREATE TABLE IF NOT EXISTS triage_labels (
+    event_id   TEXT PRIMARY KEY,
+    label      TEXT NOT NULL CHECK(label IN ('fp','tp','skip')),
+    note       TEXT,
+    labeled_at TEXT NOT NULL,
+    session    TEXT
+);
+""",
     "push_devices": """
 CREATE TABLE IF NOT EXISTS push_devices (
     apns_token   TEXT PRIMARY KEY,

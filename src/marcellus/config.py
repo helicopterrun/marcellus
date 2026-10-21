@@ -782,6 +782,60 @@ class ProxySection(BaseModel):
     )
 
 
+class TriageSection(BaseModel):
+    """The review inbox (/inbox) and its Frigate+ outbox.
+
+    The inbox is a short daily queue of the detections most worth a human
+    look *for training*: animals the wildlife finder says Frigate missed,
+    "Not this" taps from the phone, scores just over the camera's threshold,
+    labels rare on that camera, and anything on a camera the current
+    Frigate+ model has few verified images of. Confident detections on
+    well-covered cameras never appear -- in the May 2026 labeling pass 95% of
+    newest-first events were simply "real", which teaches the model nothing.
+
+    A verdict queues the Frigate+ upload in `plus_outbox`; the web process
+    sends it after `plus_delay_s` (the undo window) and retries failures.
+    """
+
+    # Items per day. The page shows this many minus what was already
+    # reviewed today, then offers "keep going" for another batch.
+    daily_budget: int = Field(default=15, ge=1, le=200)
+
+    # Candidates come from this many days back.
+    lookback_days: int = Field(default=7, ge=1, le=30)
+
+    # "Borderline": top_score below the camera/label threshold plus this.
+    # Frigate censors events at the threshold (nothing scores below it), so
+    # the band just above it is where its true/false calls are closest.
+    borderline_margin: float = Field(default=0.08, ge=0.01, le=0.5)
+
+    # A label seen at most this many times on a camera in the lookback is
+    # "rare there" and worth confirming (an animal on a stairway camera).
+    rare_label_max: int = Field(default=5, ge=0, le=100)
+
+    # Frigate+ recommends at least 100 verified images per camera; cameras
+    # below this get a coverage boost proportional to the gap.
+    camera_target_images: int = Field(default=100, ge=1, le=10000)
+
+    # Undo window: a verdict's upload waits this long in the outbox.
+    plus_delay_s: float = Field(default=60.0, ge=0.0, le=3600.0)
+
+    # Outbox worker cadence and retry ceiling (backoff doubles per attempt).
+    outbox_interval_s: float = Field(default=15.0, ge=1.0, le=3600.0)
+    outbox_max_attempts: int = Field(default=5, ge=1, le=20)
+
+    # Frames sent per kept wildlife visit (its strongest hits).
+    wildlife_frames_per_visit: int = Field(default=2, ge=1, le=12)
+
+    # Current camera -> older names its images were uploaded under, for the
+    # coverage count (Frigate+ keys verifiedCounts by the camera name at
+    # upload time, so a rename starts a camera back at zero).
+    plus_camera_aliases: dict[str, list[str]] = Field(default_factory=dict)
+
+    # IANA zone "today" is counted in. Empty = wildlife.timezone, then UTC.
+    timezone: str = ""
+
+
 class EncountersSection(BaseModel):
     """Encounters (docs/encounters.md): group Frigate review segments
     ("atoms") into human-legible chains across cameras and time gaps --
@@ -1401,6 +1455,7 @@ class Settings(BaseSettings):
     face_capture: FaceCaptureSection = Field(default_factory=FaceCaptureSection)
     face_enrich: FaceEnrichSection = Field(default_factory=FaceEnrichSection)
     wildlife: WildlifeSection = Field(default_factory=WildlifeSection)
+    triage: TriageSection = Field(default_factory=TriageSection)
     watchdog: WatchdogSection = Field(default_factory=WatchdogSection)
     scrub: ScrubSection = Field(default_factory=ScrubSection)
     proxy: ProxySection = Field(default_factory=ProxySection)
