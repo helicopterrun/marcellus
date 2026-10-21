@@ -1497,6 +1497,8 @@ body.map-full-open .me-toolbar {
 .ib-reason.r-missed { border-color: var(--lane-animal); color: var(--text); }
 .ib-reason.r-borderline { border-color: var(--warn); color: var(--warn-text); }
 .ib-reason.r-rare { border-color: var(--info); color: var(--info-text); }
+/* The display: flex below would otherwise beat the `hidden` attribute. */
+.ib-wrong[hidden], .ib-result[hidden] { display: none; }
 .ib-actions, .ib-wrong, .ib-result { display: flex; flex-wrap: wrap; gap: 6px; padding: var(--space-3); margin-top: auto; align-items: center; }
 .ib-actions button, .ib-wrong button { flex: 1 1 0; min-width: 0; padding: 10px 6px; border: 0; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: var(--text-sm); font-weight: 600; cursor: pointer; }
 .ib-card .btn-tp { background: var(--ok-bg); color: var(--ok-text); }

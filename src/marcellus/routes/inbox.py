@@ -48,7 +48,6 @@ def inbox_view(request: Request, more: int = 0) -> Any:
             "more": bool(more),
             "outbox": _outbox_summary(request),
             "plus_enabled": _plus_enabled(request),
-            "frigate_base": s.frigate.base_url,
             "plus_delay_s": int(s.triage.plus_delay_s),
             "labels": sorted(plusmeta.get(s).labels),
         },

@@ -274,7 +274,6 @@ def list_view(
             "labels": opts["labels"],
             "counts": opts["counts"],
             "filters": filters,
-            "frigate_base": s.frigate.base_url,
         },
     )
 
@@ -329,7 +328,6 @@ def detail_view(
             "next_id": next_id,
             "position": position,
             "counts": opts["counts"],
-            "frigate_base": s.frigate.base_url,
             "plus_enabled": bool(getattr(request.app.state, "plus_enabled", False)),
             "zone_polygons": polygons,
             "zone_legend": zone_legend,

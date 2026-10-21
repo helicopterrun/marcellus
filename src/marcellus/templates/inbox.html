@@ -40,13 +40,13 @@
     {% set box = it.frames[0].box if is_visit else it.box %}
     <article class="ib-card" tabindex="0" data-key="{{ it.key }}" data-kind="{{ it.kind }}"
              data-label="{{ it.label }}"
-             {% if it.has_clip %}data-clip="{{ frigate_base }}/api/events/{{ it.event_id }}/clip.mp4"{% endif %}>
+             {% if it.has_clip %}data-clip="/api/events/{{ it.event_id }}/clip.mp4"{% endif %}>
       <div class="ib-media">
         <div class="ib-frame">
           {% if is_visit %}
           <img class="ib-img" loading="lazy" src="/wildlife/boxes/{{ it.frames[0].box_id }}/frame.jpg" alt="{{ it.label }} on {{ it.camera }}">
           {% else %}
-          <img class="ib-img" loading="lazy" src="{{ frigate_base }}/api/events/{{ it.event_id }}/snapshot.jpg" alt="{{ it.label }} on {{ it.camera }}">
+          <img class="ib-img" loading="lazy" src="/api/events/{{ it.event_id }}/snapshot.jpg" alt="{{ it.label }} on {{ it.camera }}">
           {% endif %}
           {% if box %}
           <svg class="ib-overlay" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">

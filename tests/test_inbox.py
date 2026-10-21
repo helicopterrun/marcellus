@@ -433,6 +433,14 @@ def test_inbox_page_renders_cards(client: TestClient) -> None:
     assert "reviewed today" in r.text
 
 
+def test_inbox_media_goes_through_the_proxy(client: TestClient, settings: Settings) -> None:
+    """Snapshots must load via this origin's proxy: the LAN-only Frigate base
+    URL is plain http, which an https page (or a phone off the LAN) can't load."""
+    r = client.get("/inbox")
+    assert 'src="/api/events/e2/snapshot.jpg"' in r.text
+    assert settings.frigate.base_url not in r.text
+
+
 def test_verdict_and_undo_routes(client: TestClient) -> None:
     r = client.post("/inbox/verdict", json={"key": "event:e2", "verdict": "tp"})
     assert r.status_code == 200
