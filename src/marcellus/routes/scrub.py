@@ -498,7 +498,6 @@ async def scrub_sheet_image(camera: str, spec: str, request: Request) -> Any:
     )
 
 
-
 # --- single-cell crops (`GET .../sheet/{spec}/cell/{index}`) ----------------
 
 _CELL_CACHE_MAX = 128
@@ -526,6 +525,16 @@ def _crop_cell(path: Path, index: int, cols: int, cell_w: int, cell_h: int) -> t
     return buf.getvalue(), "image/webp" if webp else "image/jpeg"
 
 
+async def _crop_cell_or_404(path: Path, index: int, row: dict[str, Any]) -> tuple[bytes, str]:
+    try:
+        return await _crop_cell_bounded(path, index, row["cols"], row["cell_w"], row["cell_h"])
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": _ERR_NOT_GENERATED, "message": "sheet file missing on disk"},
+        ) from exc
+
+
 async def _crop_cell_bounded(
     path: Path, index: int, cols: int, cell_w: int, cell_h: int
 ) -> tuple[bytes, str]:
@@ -548,7 +557,12 @@ async def scrub_sheet_cell(camera: str, spec: str, index: int, request: Request)
     if hit is None:
         pending = _cell_inflight.get(key)
         if pending is not None:
-            hit = await asyncio.shield(pending)
+            try:
+                hit = await asyncio.shield(pending)
+            except Exception:
+                # The first request's crop failed or was cancelled with its client:
+                # crop for this one rather than inherit someone else's outcome.
+                hit = await _crop_cell_or_404(path, index, row)
         else:
             fut: asyncio.Future[tuple[bytes, str]] = asyncio.get_running_loop().create_future()
             _cell_inflight[key] = fut
