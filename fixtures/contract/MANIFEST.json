@@ -1,6 +1,6 @@
 {
   "files": {
-    "capabilities.json": "38605a50b94a7f92749313c01e600ad85137a8248fd2e130d4eea980a79ebe65",
+    "capabilities.json": "208e953792074419b3cc9e1571d12b3ea009e67115579119d4707daf064a210e",
     "card_push.json": "32962eefc42db5bbc3561b9b0e19aabf72c6d9a3c6da48d1e35ceb49934b30ae",
     "card_push_silent.json": "d20c0cd6bd23a417cd71dcd92085b1940883e2065dbf8962c54e90e8506593dd",
     "card_push_test.json": "b3aa845223322fd9ebed4e7d4b7fdd7692f72e05382228a1d541f6ce722e6f9a",
