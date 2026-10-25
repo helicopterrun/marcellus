@@ -16,14 +16,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import sqlite3
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
+from PIL import Image
 
 from marcellus import __version__, db, zones
 from marcellus.analysis import clock_offset
@@ -267,6 +270,7 @@ async def capabilities(request: Request) -> dict[str, Any]:
             "cameras": generated_cameras,
             "generated": generated,
             "intervals": intervals,
+            "cells": settings.scrub.enabled,
         },
         "proxy": {"enabled": settings.proxy.enabled},
         "push": {
@@ -431,12 +435,9 @@ async def scrub_sheets(
     return response
 
 
-@router.get("/scrub/{camera}/sheet/{spec}")
-async def scrub_sheet_image(camera: str, spec: str, request: Request) -> Any:
-    """Serve one sheet image (§4.3). `spec` is `{start}-{interval}-{count}.jpg`
-    -- every version of a still-filling sheet is its own immutable object, so
-    the header is unconditional (no freshness reasoning exists anywhere in
-    this path)."""
+async def _resolve_sheet(request: Request, camera: str, spec: str) -> tuple[dict[str, Any], Path]:
+    """Shared lookup for the whole-sheet and single-cell routes: camera check,
+    spec parse, DB row, on-disk path. Raises 404 for anything unknown/missing."""
     settings = request.app.state.settings
     _require_known_camera(request, camera)
     try:
@@ -462,6 +463,16 @@ async def scrub_sheet_image(camera: str, spec: str, request: Request) -> Any:
             status_code=404,
             detail={"error": _ERR_NOT_GENERATED, "message": "sheet file missing on disk"},
         )
+    return row, path
+
+
+@router.get("/scrub/{camera}/sheet/{spec}")
+async def scrub_sheet_image(camera: str, spec: str, request: Request) -> Any:
+    """Serve one sheet image (§4.3). `spec` is `{start}-{interval}-{count}.jpg`
+    -- every version of a still-filling sheet is its own immutable object, so
+    the header is unconditional (no freshness reasoning exists anywhere in
+    this path)."""
+    _, path = await _resolve_sheet(request, camera, spec)
     # `FileResponse` stats lazily in `__call__` (send time) when it isn't given
     # a `stat_result` up front -- and on a missing file it raises RuntimeError
     # there, not FileNotFoundError, which is both untimely (after we've
@@ -485,6 +496,102 @@ async def scrub_sheet_image(camera: str, spec: str, request: Request) -> Any:
         stat_result=stat_result,
         headers={"Cache-Control": _IMMUTABLE},
     )
+
+
+# --- single-cell crops (`GET .../sheet/{spec}/cell/{index}`) ----------------
+
+_CELL_CACHE_MAX = 128
+_CELL_CROP_SLOTS = 2  # the NVR has 4 cores and runs Frigate
+_cell_crop_sem = asyncio.Semaphore(_CELL_CROP_SLOTS)
+#: (camera, spec, index) -> (encoded bytes, media type). Specs are
+#: content-addressed, so entries never go stale.
+_cell_cache: OrderedDict[tuple[str, str, int], tuple[bytes, str]] = OrderedDict()
+_cell_inflight: dict[tuple[str, str, int], asyncio.Future[tuple[bytes, str]]] = {}
+
+
+def _crop_cell(path: Path, index: int, cols: int, cell_w: int, cell_h: int) -> tuple[bytes, str]:
+    """Blocking: open the sheet, crop one cell, re-encode in the sheet's format
+    (quality matches `scrub.tiling`'s defaults: JPEG 85, WebP 75)."""
+    x = (index % cols) * cell_w
+    y = (index // cols) * cell_h
+    webp = path.suffix == ".webp"
+    with Image.open(path) as sheet:
+        cell = sheet.crop((x, y, x + cell_w, y + cell_h)).convert("RGB")
+    buf = io.BytesIO()
+    if webp:
+        cell.save(buf, format="WEBP", quality=75, lossless=False)
+    else:
+        cell.save(buf, format="JPEG", quality=85)
+    return buf.getvalue(), "image/webp" if webp else "image/jpeg"
+
+
+async def _crop_cell_or_404(path: Path, index: int, row: dict[str, Any]) -> tuple[bytes, str]:
+    try:
+        return await _crop_cell_bounded(path, index, row["cols"], row["cell_w"], row["cell_h"])
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": _ERR_NOT_GENERATED, "message": "sheet file missing on disk"},
+        ) from exc
+
+
+async def _crop_cell_bounded(
+    path: Path, index: int, cols: int, cell_w: int, cell_h: int
+) -> tuple[bytes, str]:
+    async with _cell_crop_sem:
+        return await asyncio.to_thread(_crop_cell, path, index, cols, cell_w, cell_h)
+
+
+@router.get("/scrub/{camera}/sheet/{spec}/cell/{index}")
+async def scrub_sheet_cell(camera: str, spec: str, index: int, request: Request) -> Response:
+    """One cell of a sheet as its own small image (row-major `index`), so the
+    first still of an event doesn't need the whole multi-MB sheet."""
+    row, path = await _resolve_sheet(request, camera, spec)
+    if index < 0 or index >= row["count"]:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": _ERR_NOT_GENERATED, "message": "cell index out of range"},
+        )
+    key = (camera, spec, index)
+    hit = _cell_cache.get(key)
+    if hit is None:
+        pending = _cell_inflight.get(key)
+        if pending is not None:
+            try:
+                hit = await asyncio.shield(pending)
+            except Exception:
+                # The first request's crop failed or was cancelled with its client:
+                # crop for this one rather than inherit someone else's outcome.
+                hit = await _crop_cell_or_404(path, index, row)
+        else:
+            fut: asyncio.Future[tuple[bytes, str]] = asyncio.get_running_loop().create_future()
+            _cell_inflight[key] = fut
+            try:
+                hit = await _crop_cell_bounded(
+                    path, index, row["cols"], row["cell_w"], row["cell_h"]
+                )
+            except FileNotFoundError as exc:
+                fut.set_exception(exc)
+                fut.exception()  # mark retrieved; waiters re-raise it themselves
+                raise HTTPException(
+                    status_code=404,
+                    detail={"error": _ERR_NOT_GENERATED, "message": "sheet file missing on disk"},
+                ) from exc
+            except BaseException as exc:
+                fut.set_exception(exc)
+                fut.exception()
+                raise
+            else:
+                fut.set_result(hit)
+                _cell_cache[key] = hit
+                while len(_cell_cache) > _CELL_CACHE_MAX:
+                    _cell_cache.popitem(last=False)
+            finally:
+                _cell_inflight.pop(key, None)
+    else:
+        _cell_cache.move_to_end(key)
+    data, media_type = hit
+    return Response(content=data, media_type=media_type, headers={"Cache-Control": _IMMUTABLE})
 
 
 async def _fetch_and_aggregate_motion(

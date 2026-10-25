@@ -52,6 +52,7 @@
   },
   "scrub_cache": {
     "cameras": [],
+    "cells": false,
     "enabled": false,
     "format": "jpeg",
     "generated": false,

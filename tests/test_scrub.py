@@ -1923,3 +1923,113 @@ async def test_reel_windows_do_not_serialize(
     # Serialized on the loop the DB reads alone are >= 5 x 0.4 = 2 s; overlapped
     # it is ~0.4 s plus thread-pool scheduling.
     assert elapsed < 1.5, f"5 windows took {elapsed:.2f}s -- serialized?"
+
+
+# --- single-cell route -------------------------------------------------------
+
+_CELL_COLOURS = [
+    (200, 30, 30), (30, 200, 30), (30, 30, 200), (200, 200, 30),
+    (30, 200, 200), (200, 30, 200), (120, 120, 120), (250, 250, 250),
+]
+
+
+def _publish_colour_sheet(
+    cache_dir: Path, sidecar_db_path: Path, *, cols: int = 4, rows: int = 2,
+    cell_w: int = 40, cell_h: int = 30, count: int = 8, start: float = 1_785_380_400.0,
+) -> str:
+    rel = grid.sheet_rel_path("doorbell", 1.0, start, count)
+    out = cache_dir / rel
+    out.parent.mkdir(parents=True, exist_ok=True)
+    sheet = Image.new("RGB", (cols * cell_w, rows * cell_h))
+    for i in range(cols * rows):
+        sheet.paste(
+            _CELL_COLOURS[i % len(_CELL_COLOURS)],
+            ((i % cols) * cell_w, (i // cols) * cell_h,
+             (i % cols + 1) * cell_w, (i // cols + 1) * cell_h),
+        )
+    sheet.save(out, format="JPEG", quality=95)
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        db.upsert_scrub_sheet(
+            conn, camera="doorbell", start_ts=start, interval_s=1.0, cols=cols, rows=rows,
+            cell_w=cell_w, cell_h=cell_h, count=count, path=rel, complete=False,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return rel
+
+
+_CELL_URL = "/v1/scrub/doorbell/sheet/1785380400-1.0-8.jpg/cell/{}"
+_AUTH = {"cookie": "session=fake"}
+
+
+@pytest.fixture(autouse=False)
+def _clean_cell_cache() -> None:
+    scrub_routes._cell_cache.clear()
+
+
+def test_sheet_cell_crop_and_geometry(
+    client: TestClient, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch,
+    _clean_cell_cache: None,
+) -> None:
+    import io
+
+    _skip_auth(monkeypatch)
+    cache_dir = client.app.state.settings.scrub.cache_dir  # type: ignore[attr-defined]
+    _publish_colour_sheet(cache_dir, sidecar_db_path)
+    for idx in range(8):
+        r = client.get(_CELL_URL.format(idx), headers=_AUTH)
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "image/jpeg"
+        assert r.headers["cache-control"] == "public, max-age=31536000, immutable"
+        img = Image.open(io.BytesIO(r.content))
+        assert img.size == (40, 30)
+        px = img.convert("RGB").getpixel((20, 15))
+        assert all(abs(a - b) <= 12 for a, b in zip(px, _CELL_COLOURS[idx], strict=True)), (idx, px)
+
+
+def test_sheet_cell_404s(
+    client: TestClient, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch,
+    _clean_cell_cache: None,
+) -> None:
+    _skip_auth(monkeypatch)
+    cache_dir = client.app.state.settings.scrub.cache_dir  # type: ignore[attr-defined]
+    _publish_colour_sheet(cache_dir, sidecar_db_path)
+    assert client.get(_CELL_URL.format(8), headers=_AUTH).status_code == 404
+    assert client.get(_CELL_URL.format(-1), headers=_AUTH).status_code == 404
+    unknown = "/v1/scrub/doorbell/sheet/1785380400-1.0-9.jpg/cell/0"
+    assert client.get(unknown, headers=_AUTH).status_code == 404
+
+
+def test_sheet_cell_auth_matches_sheet_route(client: TestClient) -> None:
+    sheet = client.get("/v1/scrub/doorbell/sheet/1785380400-1.0-8.jpg")
+    cell = client.get(_CELL_URL.format(0))
+    assert cell.status_code == sheet.status_code == 401
+
+
+def test_sheet_cell_served_from_lru(
+    client: TestClient, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch,
+    _clean_cell_cache: None,
+) -> None:
+    _skip_auth(monkeypatch)
+    cache_dir = client.app.state.settings.scrub.cache_dir  # type: ignore[attr-defined]
+    _publish_colour_sheet(cache_dir, sidecar_db_path)
+    calls: list[int] = []
+    real = scrub_routes._crop_cell
+
+    def _spy(*a: object, **kw: object) -> tuple[bytes, str]:
+        calls.append(1)
+        return real(*a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(scrub_routes, "_crop_cell", _spy)
+    r1 = client.get(_CELL_URL.format(3), headers=_AUTH)
+    r2 = client.get(_CELL_URL.format(3), headers=_AUTH)
+    assert r1.content == r2.content
+    assert len(calls) == 1
+
+
+def test_capabilities_cells_flag(client: TestClient) -> None:
+    assert client.get("/v1/capabilities").json()["scrub_cache"]["cells"] is False
+    client.app.state.settings.scrub.enabled = True  # type: ignore[attr-defined]
+    assert client.get("/v1/capabilities").json()["scrub_cache"]["cells"] is True

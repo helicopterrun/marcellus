@@ -44,6 +44,8 @@ class ScrubCacheCapabilities(_Wire):
     cameras: list[str]
     generated: bool
     intervals: list[float]
+    #: `GET /v1/scrub/{camera}/sheet/{spec}/cell/{index}` is served. Additive.
+    cells: bool = False
 
 
 class ProxyCapabilities(_Wire):
