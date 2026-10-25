@@ -1760,3 +1760,166 @@ def test_reel_route_matches_compose_reel_byte_for_byte(
     direct_body = _asyncio.run(_run())
 
     assert json.dumps(route_body, sort_keys=True) == json.dumps(direct_body, sort_keys=True)
+
+
+# --- /v1/reel motion deadline (2026-10-25: a slow Frigate held reels ~2 s) ---
+
+
+def test_reel_answers_within_deadline_when_frigate_motion_hangs(
+    client: TestClient, sidecar_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Frigate motion API that hangs must not hold the reel: coverage,
+    frames and events come back inside the deadline, motion is flagged
+    unavailable (the app's "draw no motion")."""
+    import asyncio as _asyncio
+
+    _skip_auth(monkeypatch)
+    client.app.state.settings.scrub.reel_motion_deadline_s = 0.2  # type: ignore[attr-defined]
+
+    async def _hanging(
+        request: object, camera: str, start: float, end: float, scale: float
+    ) -> tuple[list[float], bool]:
+        await _asyncio.sleep(5)
+        return [9.0] * int((end - start) / scale), False
+
+    monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _hanging)
+
+    now = time.time()
+    _seed_bucket(sidecar_db_path, "doorbell", now - 300, now - 200, 1.0)
+    t0 = time.monotonic()
+    r = client.get(
+        "/v1/reel/doorbell",
+        params={"start": now - 3700, "end": now, "motion_scale": 10},
+        headers={"cookie": "session=fake"},
+    )
+    elapsed = time.monotonic() - t0
+    assert r.status_code == 200
+    assert elapsed < 2.0, f"reel waited {elapsed:.2f}s on a hanging motion fetch"
+    body = r.json()
+    assert body["motion_unavailable"] is True
+    assert body["motion"]["values"] == [0.0] * int(3700 / 10)
+    assert {e["id"] for e in body["events"]} == {"ev1", "ev2"}
+    assert body["recorded"]
+    assert len(body["frames"]) == 1
+
+
+def test_reel_fast_motion_unchanged_by_deadline(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _skip_auth(monkeypatch)
+    client.app.state.settings.scrub.reel_motion_deadline_s = 0.5  # type: ignore[attr-defined]
+
+    async def _fast(
+        request: object, camera: str, start: float, end: float, scale: float
+    ) -> tuple[list[float], bool]:
+        return [3.0] * int((end - start) / scale), False
+
+    monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _fast)
+    now = time.time()
+    r = client.get(
+        "/v1/reel/doorbell",
+        params={"start": now - 600, "end": now, "motion_scale": 10},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["motion"]["values"] == [3.0] * 60
+    assert "motion_unavailable" not in body
+
+
+def test_reel_late_motion_lands_in_cache_for_next_request(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fetch that missed the deadline keeps running (one per window) and
+    its result completes the next request for that window, even while
+    Frigate is still slow."""
+    import asyncio as _asyncio
+
+    _skip_auth(monkeypatch)
+    client.app.state.settings.scrub.reel_motion_deadline_s = 0.1  # type: ignore[attr-defined]
+    calls = 0
+
+    async def _slow(
+        request: object, camera: str, start: float, end: float, scale: float
+    ) -> tuple[list[float], bool]:
+        nonlocal calls
+        calls += 1
+        await _asyncio.sleep(0.4)
+        return [7.0] * int((end - start) / scale), False
+
+    monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _slow)
+    start, end = 1_800_000_000.0, 1_800_003_600.0  # a settled past hour
+    params = {"start": start, "end": end, "motion_scale": 10}
+    headers = {"cookie": "session=fake"}
+
+    # One event loop across requests, as in production (uvicorn).
+    with client as c:
+        first = c.get("/v1/reel/doorbell", params=params, headers=headers).json()
+        assert first["motion_unavailable"] is True
+        # A second request while the first fetch is still running joins it.
+        joined = c.get("/v1/reel/doorbell", params=params, headers=headers).json()
+        assert joined["motion_unavailable"] is True
+        assert calls == 1
+
+        flight = c.app.state.reel_motion_flight  # type: ignore[attr-defined]
+        deadline = time.monotonic() + 3.0
+        while flight.inflight_count() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert flight.inflight_count() == 0
+
+        second = c.get("/v1/reel/doorbell", params=params, headers=headers).json()
+        assert "motion_unavailable" not in second
+        assert second["motion"]["values"] == [7.0] * 360
+
+
+async def test_reel_windows_do_not_serialize(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An arrival asks for up to five windows at once. Frigate-DB reads run on
+    worker threads and motion is async, so five slow windows overlap instead
+    of queueing on the event loop."""
+    import asyncio as _asyncio
+
+    import httpx
+
+    _skip_auth(monkeypatch)
+    client.app.state.settings.scrub.reel_motion_deadline_s = 2.0  # type: ignore[attr-defined]
+
+    real_coverage = db.recording_coverage
+
+    def _blocking_coverage(*args: object, **kwargs: object) -> dict:
+        time.sleep(0.4)  # a busy frigate.db: blocking sqlite, as in prod
+        return real_coverage(*args, **kwargs)  # type: ignore[arg-type]
+
+    async def _slow_motion(
+        request: object, camera: str, start: float, end: float, scale: float
+    ) -> tuple[list[float], bool]:
+        await _asyncio.sleep(0.3)
+        return [1.0] * int((end - start) / scale), False
+
+    monkeypatch.setattr(db, "recording_coverage", _blocking_coverage)
+    monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _slow_motion)
+
+    now = time.time()
+    transport = httpx.ASGITransport(app=client.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as ac:
+        t0 = time.monotonic()
+        responses = await _asyncio.gather(
+            *(
+                ac.get(
+                    "/v1/reel/doorbell",
+                    params={
+                        "start": now - (i + 1) * 3600, "end": now - i * 3600,
+                        "motion_scale": 10,
+                    },
+                    headers={"cookie": "session=fake"},
+                )
+                for i in range(5)
+            )
+        )
+        elapsed = time.monotonic() - t0
+    assert all(r.status_code == 200 for r in responses)
+    assert all("motion_unavailable" not in r.json() for r in responses)
+    # Serialized on the loop the DB reads alone are >= 5 x 0.4 = 2 s; overlapped
+    # it is ~0.4 s plus thread-pool scheduling.
+    assert elapsed < 1.5, f"5 windows took {elapsed:.2f}s -- serialized?"

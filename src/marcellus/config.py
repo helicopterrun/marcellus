@@ -701,6 +701,16 @@ class ScrubSection(BaseModel):
     # else (cold start, catch-up, the aged window). False is the kill switch:
     # derived tiers are then built only by Pass 3 decimation.
     derived_from_live_edge: bool = True
+    # How long `/v1/reel` waits for Frigate's motion API before answering
+    # without it. Motion is the reel's only Frigate-HTTP dependency, and the
+    # reel is what a client needs before it can show its first still; a
+    # Frigate slow under detection load (measured 2026-10-25: ~2 s per answer
+    # during an arrival burst) held whole reel responses back. On a miss the
+    # reel answers with coverage/frames/events and `motion_unavailable: true`,
+    # and the fetch finishes in the background into a small cache so the next
+    # request for that window is complete. 0 (or less) waits unbounded, as
+    # before. Not applied to `/v1/motion`, whose whole answer is motion.
+    reel_motion_deadline_s: float = 0.9
 
     @field_validator("format")
     @classmethod

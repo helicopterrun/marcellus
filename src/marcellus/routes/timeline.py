@@ -23,7 +23,7 @@ from marcellus.errors import error_detail
 from marcellus.models.wire import TimelineResponse
 from marcellus.routes._deps import settings_of as _settings
 from marcellus.routes.encounters import summaries
-from marcellus.routes.scrub import _etagged, _known_cameras, compose_reel
+from marcellus.routes.scrub import _etagged, compose_reel, known_cameras_async
 
 router = APIRouter(prefix="/v1", tags=["v1"])
 
@@ -111,39 +111,29 @@ async def timeline(
             f"{max_window:.0f}s timeline_max_window_s cap"
         )
 
-    conn = db.open_frigate_ro(settings.frigate.db_path)
-    try:
-        known = _known_cameras(request.app.state, conn)
-        unknown = [c for c in camera_list if c not in known]
-        if unknown:
-            raise HTTPException(
-                status_code=404,
-                detail=error_detail(_ERR_CAMERA_UNKNOWN, f"no such camera: {unknown[0]}"),
+    known = await known_cameras_async(request.app.state, settings)
+    unknown = [c for c in camera_list if c not in known]
+    if unknown:
+        raise HTTPException(
+            status_code=404,
+            detail=error_detail(_ERR_CAMERA_UNKNOWN, f"no such camera: {unknown[0]}"),
+        )
+
+    # Each lane's `compose_reel` opens its own Frigate connection on a worker
+    # thread (no shared sqlite connection, nothing on the event loop), so the
+    # lanes genuinely overlap up to `_LANE_CONCURRENCY`.
+    semaphore = asyncio.Semaphore(_LANE_CONCURRENCY)
+
+    async def _lane(camera: str) -> dict[str, Any]:
+        async with semaphore:
+            body = await compose_reel(
+                request, settings, camera, window_start, window_end, motion_scale,
             )
+        body["camera"] = camera
+        body["observations"] = []
+        return body
 
-        # Every camera's Frigate-side work in `compose_reel` runs
-        # synchronously inline on the event-loop thread (never via
-        # `asyncio.to_thread`), so it is never touched from more than one
-        # OS thread even while `asyncio.gather` interleaves the lanes at
-        # their `await` points -- sharing this one connection across every
-        # lane is safe for that reason. It would NOT be safe to share it
-        # with anything that moves the Frigate connection onto a worker
-        # thread (e.g. via `db.with_sidecar`'s `asyncio.to_thread` pattern).
-        semaphore = asyncio.Semaphore(_LANE_CONCURRENCY)
-
-        async def _lane(camera: str) -> dict[str, Any]:
-            async with semaphore:
-                body = await compose_reel(
-                    request, settings, camera, window_start, window_end, motion_scale,
-                    frigate_conn=conn,
-                )
-            body["camera"] = camera
-            body["observations"] = []
-            return body
-
-        lanes = await asyncio.gather(*(_lane(camera) for camera in camera_list))
-    finally:
-        conn.close()
+    lanes = await asyncio.gather(*(_lane(camera) for camera in camera_list))
 
     lanes_by_camera = {lane["camera"]: lane for lane in lanes}
 

@@ -14,6 +14,7 @@ Auth (§3.2 -- `/v1` is never less protected than `/api`) is applied centrally i
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import sqlite3
@@ -42,6 +43,7 @@ from marcellus.models.wire import (
 from marcellus.push import policy_settings
 from marcellus.scrub import grid
 from marcellus.scrub.motion import aggregate_motion, safe_fetch_scale
+from marcellus.scrub.motion_flight import MotionFlight
 
 router = APIRouter(prefix="/v1", tags=["v1"])
 
@@ -92,6 +94,27 @@ def _known_cameras(app_state: Any, conn: Any) -> set[str]:
     cameras = {row["camera"] for row in rows}
     app_state.scrub_known_cameras_cache = (now, cameras)
     return cameras
+
+
+async def known_cameras_async(app_state: Any, settings: Any) -> set[str]:
+    """`_known_cameras` without touching sqlite on the event loop.
+
+    A fresh cached set is returned inline; a miss opens `frigate.db` and runs
+    the query on a worker thread (the `db.with_sidecar` pattern), so a slow
+    or busy-locked Frigate DB stalls only this request, not the loop.
+    """
+    cached = getattr(app_state, "scrub_known_cameras_cache", None)
+    if cached is not None and time.time() - cached[0] < _CAMERA_CACHE_TTL_S:
+        return cast("set[str]", cached[1])
+
+    def _run() -> set[str]:
+        conn = db.open_frigate_ro(settings.frigate.db_path)
+        try:
+            return _known_cameras(app_state, conn)
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_run)
 
 
 def _bad_range(message: str) -> HTTPException:
@@ -496,6 +519,42 @@ async def _fetch_and_aggregate_motion(
     return aggregate_motion(points, start, end, scale), unavailable
 
 
+def _motion_flight(app_state: Any) -> MotionFlight:
+    flight = getattr(app_state, "reel_motion_flight", None)
+    if not isinstance(flight, MotionFlight):
+        flight = MotionFlight()
+        app_state.reel_motion_flight = flight
+    return flight
+
+
+async def _reel_motion(
+    request: Request, camera: str, start: float, end: float, scale: float
+) -> tuple[list[float], bool]:
+    """`/v1/reel`'s motion: `_fetch_and_aggregate_motion` raced against
+    `scrub.reel_motion_deadline_s`.
+
+    Motion is the only part of a reel that waits on Frigate's HTTP API, and
+    the reel is what a client needs before it can show its first still -- a
+    Frigate slow to answer (CPU-bound on detection) must not hold coverage,
+    frames and events hostage. On a miss the reel answers with a zero-filled
+    trace and `motion_unavailable: true`; the fetch keeps running (one per
+    window at most) and its result is cached for the next request.
+    """
+    deadline_s = float(request.app.state.settings.scrub.reel_motion_deadline_s)
+    if deadline_s <= 0:
+        return await _fetch_and_aggregate_motion(request, camera, start, end, scale)
+    # Looked up at call time (not bound into the closure at import) so a
+    # test's monkeypatch of `_fetch_and_aggregate_motion` is what runs.
+    fetch_fn = _fetch_and_aggregate_motion
+    return await _motion_flight(request.app.state).get(
+        (camera, start, end, scale),
+        end,
+        lambda: fetch_fn(request, camera, start, end, scale),
+        deadline_s=deadline_s,
+        zero_fill=lambda: aggregate_motion([], start, end, scale),
+    )
+
+
 @router.get("/motion/{camera}")
 async def motion(camera: str, start: float, end: float, scale: float, request: Request) -> Any:
     """Total motion (§4.6) -- any `scale`, always covering the full requested
@@ -769,46 +828,48 @@ async def compose_reel(
     start: float,
     end: float,
     motion_scale: float,
-    *,
-    frigate_conn: Any = None,
 ) -> dict[str, Any]:
     """Build the `/v1/reel/{camera}` body (§4.5) without the HTTP wrapper --
     shared by `reel()` and `/v1/timeline`, which composes several lanes in
     one request.
 
-    `frigate_conn`, when given, is used instead of opening a fresh
-    `db.open_frigate_ro` connection -- the caller owns closing it. The
-    Frigate-side work here runs synchronously inline (never via
-    `asyncio.to_thread`), so it only ever executes on the event-loop thread;
-    sharing one connection across several `compose_reel` calls composed with
-    `asyncio.gather` is safe for that reason (never touched from more than
-    one thread), but is NOT a general invitation to hold a sqlite3
-    connection across threads.
+    Nothing here touches sqlite on the event loop: the Frigate-DB reads
+    (coverage, events, continuations, reviews -- plus the clock-offset lookup,
+    which may parse the Frigate config and read the sidecar) run on one worker
+    thread with their own connection, the scrub-bucket read on another via
+    `db.with_sidecar`, and the motion fetch is async and deadline-bounded
+    (`_reel_motion`). All three run concurrently, so a reel costs the slowest
+    of them -- not their sum -- and several windows requested at once (an
+    arrival asks for up to five) don't queue behind one another on the loop.
     """
-    conn = (
-        frigate_conn
-        if frigate_conn is not None
-        else db.open_frigate_ro(settings.frigate.db_path)
-    )
-    try:
-        if camera not in _known_cameras(request.app.state, conn):
-            raise HTTPException(
-                status_code=404,
-                detail={"error": _ERR_CAMERA_UNKNOWN, "message": f"no such camera: {camera}"},
-            )
-        coverage_result = db.recording_coverage(conn, camera, start, end, now=time.time())
-        offset_s = _event_clock_offset_s(settings, camera)
-        events = _events_json(conn, camera, start, end, offset_s=offset_s)
-        _attach_continuations(conn, settings, camera, events)
-        # Review segments come off the detect stream too -- same clock shift.
-        reviews = _reviews_json(conn, camera, start, end, offset_s=offset_s)
-    finally:
-        if frigate_conn is None:
-            conn.close()
+    if camera not in await known_cameras_async(request.app.state, settings):
+        raise HTTPException(
+            status_code=404,
+            detail={"error": _ERR_CAMERA_UNKNOWN, "message": f"no such camera: {camera}"},
+        )
 
-    bucket_rows = await db.with_sidecar(
-        settings.sidecar.db_path,
-        lambda conn: db.list_scrub_buckets(conn, camera, start, end),
+    def _frigate_reads() -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+        conn = db.open_frigate_ro(settings.frigate.db_path)
+        try:
+            coverage_result = db.recording_coverage(conn, camera, start, end, now=time.time())
+            offset_s = _event_clock_offset_s(settings, camera)
+            events = _events_json(conn, camera, start, end, offset_s=offset_s)
+            _attach_continuations(conn, settings, camera, events)
+            # Review segments come off the detect stream too -- same clock shift.
+            reviews = _reviews_json(conn, camera, start, end, offset_s=offset_s)
+        finally:
+            conn.close()
+        return coverage_result, events, reviews
+
+    (coverage_result, events, reviews), bucket_rows, (motion_values, motion_unavailable) = (
+        await asyncio.gather(
+            asyncio.to_thread(_frigate_reads),
+            db.with_sidecar(
+                settings.sidecar.db_path,
+                lambda conn: db.list_scrub_buckets(conn, camera, start, end),
+            ),
+            _reel_motion(request, camera, start, end, motion_scale),
+        )
     )
 
     # Same exclusion `/v1/scrub/{camera}/coverage` applies -- without it, a
@@ -824,9 +885,6 @@ async def compose_reel(
         }
         for r in bucket_rows
     ]
-    motion_values, motion_unavailable = await _fetch_and_aggregate_motion(
-        request, camera, start, end, motion_scale
-    )
 
     body: dict[str, Any] = {
         "queried": [start, end],
