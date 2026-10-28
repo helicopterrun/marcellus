@@ -311,6 +311,18 @@ class FaceEnrichSection(BaseModel):
     # Must be writable by the service user under ProtectSystem=strict.
     model_dir: Path = Path("/opt/marcellus/data/models")
 
+    # Best-face crops: the highest-quality face of each enriched event, saved
+    # as a small JPEG for display (inbox cards, push thumbnails, identities).
+    # Crops follow their cluster's retention: reaped with a stale unnamed
+    # cluster, dropped when a cluster is deleted, kept while a name holds.
+    crops_dir: Path = Path("/opt/marcellus/data/face-crops")
+    # Margin added on EACH side of the face box, as a fraction of its larger
+    # side. A tight detector box clips hair and chin and reads as a mugshot.
+    crop_pad: float = 0.4
+    # Longest edge of the stored crop. Never upscaled: a gate-face face is
+    # ~90px across, so most crops land well under this.
+    crop_max_edge: int = 384
+
     # Bounds one cycle so a first run against a long lookback can't hog the
     # shared 4-core host; the lookback picks up the rest next cycle.
     max_events_per_cycle: int = 10

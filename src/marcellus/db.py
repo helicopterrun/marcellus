@@ -497,7 +497,14 @@ CREATE TABLE IF NOT EXISTS face_enrichments (
     -- without hard-detaching it (POST .../remove still does that). NULL =
     -- included. Excluded rows must not feed centroids, sub_label decisions,
     -- or cluster/stats aggregates unless explicitly asked for.
-    excluded_at       TEXT
+    excluded_at       TEXT,
+    -- Best face (status 'enriched' only): the recording instant and
+    -- normalized [x1, y1, x2, y2] box of the highest-quality face, and its
+    -- saved crop relative to face_enrich.crops_dir. NULL path = no crop
+    -- (render failed, or reaped with its cluster).
+    best_frame_ts     REAL,
+    best_bbox         TEXT,
+    best_crop_path    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_face_enrich_cluster ON face_enrichments(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_face_enrich_age     ON face_enrichments(event_start_ts);
@@ -902,6 +909,10 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "face_enrichments": [
         # Soft-exclude (Wave 6B-2): added after face_enrichments first shipped.
         ("excluded_at", "TEXT"),
+        # Best-face crop (faces/enrich.py). Also in the CREATE TABLE literal.
+        ("best_frame_ts", "REAL"),
+        ("best_bbox", "TEXT"),
+        ("best_crop_path", "TEXT"),
     ],
     "encounters": [
         # Notability stamp (encounters/notability.py). Also in the CREATE
