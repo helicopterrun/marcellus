@@ -504,7 +504,11 @@ CREATE TABLE IF NOT EXISTS face_enrichments (
     -- (render failed, or reaped with its cluster).
     best_frame_ts     REAL,
     best_bbox         TEXT,
-    best_crop_path    TEXT
+    best_crop_path    TEXT,
+    -- Face-stack backfill queue (faces/enrich.py): NULL | queued | done |
+    -- no_frames | no_faces | error. Only events enriched before face_crops
+    -- existed ever get a value.
+    stack_status      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_face_enrich_cluster ON face_enrichments(cluster_id);
 
@@ -928,6 +932,8 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("best_frame_ts", "REAL"),
         ("best_bbox", "TEXT"),
         ("best_crop_path", "TEXT"),
+        # Face-stack backfill queue. Also in the CREATE TABLE literal.
+        ("stack_status", "TEXT"),
     ],
     "encounters": [
         # Notability stamp (encounters/notability.py). Also in the CREATE

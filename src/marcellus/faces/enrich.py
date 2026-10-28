@@ -12,6 +12,9 @@ strangers accumulate an identity that a human can later promote by naming.
 The top `crop_keep` faces (best first, including ones under the quality gate)
 are also saved as padded crops under `crops_dir` — the display copies, so no
 surface has to re-detect them. Rank 0 doubles as the event's `best_crop_path`.
+Events enriched before stacks existed get theirs from the stack backfill: a
+person queues them (`stack_status='queued'`) and idle cycles work the queue,
+rewriting crops only — never embeddings, clusters, or sub_labels.
 
 Work discovery is crosscam's lookback pattern, not an MQTT hook: recordings
 commit at segment END (measured lag 5.4-9.4s), so enrichment is inherently
@@ -649,10 +652,10 @@ def _record(
     )
 
 
-def process_event(
-    conn: sqlite3.Connection, client: FrigateClient, cand: Candidate, *, cfg: Any
-) -> str:
-    """Run the full pipeline for one event; returns the terminal status."""
+def _scan(
+    client: FrigateClient, cand: Candidate, *, cfg: Any
+) -> tuple[int, list[DetectedFace], list[tuple[DetectedFace, bytes]]]:
+    """Sample the event's frames and detect faces: (frames_ok, faces, top-k kept)."""
     engine = _engine(str(cfg.model_dir))
     faces: list[DetectedFace] = []
     frames_ok = 0
@@ -669,31 +672,60 @@ def process_event(
         if found:
             kept = keep_top(kept, found, jpeg, cfg.crop_keep)
         faces.extend(found)
+    return frames_ok, faces, kept
 
-    if frames_ok == 0:
-        _record(conn, cand, status="no_frames")
-        return "no_frames"
-    usable = sorted(
+
+def _usable(faces: list[DetectedFace], *, cfg: Any) -> list[DetectedFace]:
+    """The faces that feed the embedding: over the gate, best `best_n` first."""
+    return sorted(
         (f for f in faces if f.quality >= cfg.min_quality), key=lambda f: -f.quality
     )[: cfg.best_n]
-    if not usable:
-        _record(conn, cand, status="no_faces", faces_found=len(faces))
-        return "no_faces"
-    best = usable[0]  # == kept[0][0]: same stable order over the same faces
-    crop_paths = store_crops(cand.event_id, kept, cfg=cfg)
-    conn.execute("DELETE FROM face_crops WHERE event_id = ?", (cand.event_id,))
+
+
+def _write_stack(
+    conn: sqlite3.Connection,
+    event_id: str,
+    kept: list[tuple[DetectedFace, bytes]],
+    n_used: int,
+    *,
+    cfg: Any,
+) -> str | None:
+    """Save the kept faces' crops and face_crops rows; returns rank 0's path.
+
+    Ranks under `n_used` are the ones that fed the embedding — kept and
+    usable share one stable order over the same faces.
+    """
+    crop_paths = store_crops(event_id, kept, cfg=cfg)
+    conn.execute("DELETE FROM face_crops WHERE event_id = ?", (event_id,))
     conn.executemany(
         "INSERT INTO face_crops (event_id, rank, quality, frame_ts, bbox, used, crop_path) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         [
             (
-                cand.event_id, rank, face.quality, face.frame_ts,
+                event_id, rank, face.quality, face.frame_ts,
                 json.dumps([round(v, 5) for v in face.bbox]),
-                1 if rank < len(usable) else 0, path,
+                1 if rank < n_used else 0, path,
             )
             for rank, ((face, _jpeg), path) in enumerate(zip(kept, crop_paths, strict=True))
         ],
     )
+    return crop_paths[0] if crop_paths else None
+
+
+def process_event(
+    conn: sqlite3.Connection, client: FrigateClient, cand: Candidate, *, cfg: Any
+) -> str:
+    """Run the full pipeline for one event; returns the terminal status."""
+    frames_ok, faces, kept = _scan(client, cand, cfg=cfg)
+    if frames_ok == 0:
+        _record(conn, cand, status="no_frames")
+        return "no_frames"
+    usable = _usable(faces, cfg=cfg)
+    if not usable:
+        _record(conn, cand, status="no_faces", faces_found=len(faces))
+        return "no_faces"
+    best = usable[0]  # == kept[0][0]: same stable order over the same faces
+    best_path = _write_stack(conn, cand.event_id, kept, len(usable), cfg=cfg)
 
     event_emb = aggregate([f.embedding for f in usable], [f.quality for f in usable])
     cluster_id, name, dist = match_or_cluster(conn, event_emb, cfg=cfg, seen_ts=cand.end_time)
@@ -715,11 +747,126 @@ def process_event(
         faces_used=len(usable),
         best_quality=best.quality,
         best=best,
-        best_crop_path=crop_paths[0] if crop_paths else None,
+        best_crop_path=best_path,
         embedding=event_emb,
         sub_label_written=sub_label,
     )
     return "enriched"
+
+
+# ---------------------------------------------------------------------------
+# Stack backfill: face stacks for events enriched before stacks existed.
+#
+# `face_enrichments.stack_status` is the queue, as `status` is for enrichment:
+# NULL = never asked, 'queued' = waiting, and done | no_frames | no_faces |
+# error are terminal (queueing again retries only 'error'). Eligible = an
+# enriched event with no face_crops rows.
+
+_ELIGIBLE = (
+    "status = 'enriched' "
+    "AND NOT EXISTS (SELECT 1 FROM face_crops fc WHERE fc.event_id = face_enrichments.event_id)"
+)
+
+
+def queue_backfill(conn: sqlite3.Connection) -> int:
+    """Queue every eligible event not already settled; returns how many."""
+    cur = conn.execute(
+        "UPDATE face_enrichments SET stack_status = 'queued' WHERE " + _ELIGIBLE
+        + " AND (stack_status IS NULL OR stack_status = 'error')"
+    )
+    return cur.rowcount or 0
+
+
+def pause_backfill(conn: sqlite3.Connection) -> int:
+    """Un-queue what hasn't run yet; returns how many."""
+    cur = conn.execute(
+        "UPDATE face_enrichments SET stack_status = NULL WHERE stack_status = 'queued'"
+    )
+    return cur.rowcount or 0
+
+
+def backfill_status(conn: sqlite3.Connection) -> dict[str, int]:
+    """Counts for the page: queued, done, failed, and `ready` (eligible, unqueued)."""
+    row = conn.execute(
+        "SELECT "
+        " SUM(stack_status = 'queued') AS queued,"
+        " SUM(stack_status = 'done') AS done,"
+        " SUM(stack_status IN ('no_frames', 'no_faces', 'error')) AS failed,"
+        " SUM(" + _ELIGIBLE + " AND (stack_status IS NULL OR stack_status = 'error')) AS ready"
+        " FROM face_enrichments"
+    ).fetchone()
+    return {k: int(row[k] or 0) for k in ("queued", "done", "failed", "ready")}
+
+
+def find_backfill(conn: sqlite3.Connection, *, limit: int) -> list[Candidate | str]:
+    """Queued events, oldest first — their recordings expire first.
+
+    An event Frigate no longer has comes back as its bare id, so the caller
+    can settle it without a fetch.
+    """
+    out: list[Candidate | str] = []
+    for r in conn.execute(
+        "SELECT fe.event_id, fe.camera, e.start_time, e.end_time "
+        "  FROM sidecar.face_enrichments fe LEFT JOIN event e ON e.id = fe.event_id "
+        " WHERE fe.stack_status = 'queued' ORDER BY fe.event_start_ts LIMIT ?",
+        (limit,),
+    ):
+        if r["start_time"] is None or r["end_time"] is None:
+            out.append(str(r["event_id"]))
+            continue
+        out.append(
+            Candidate(
+                event_id=str(r["event_id"]),
+                camera=str(r["camera"]),
+                start_time=float(r["start_time"]),
+                end_time=float(r["end_time"]),
+                attempts=0,
+            )
+        )
+    return out
+
+
+def backfill_event(
+    conn: sqlite3.Connection, client: FrigateClient, cand: Candidate, *, cfg: Any
+) -> str:
+    """Build one event's face stack; returns the stack_status it settled at.
+
+    Re-runs the same deterministic sampling and scoring as process_event, so
+    the stack is what enrichment would have kept. "Used" is judged by the
+    CURRENT min_quality/best_n, which can differ from the config the event
+    was enriched under. Writes crops only: the stored embedding, cluster and
+    sub_label are left exactly as they are.
+    """
+    frames_ok, faces, kept = _scan(client, cand, cfg=cfg)
+    if frames_ok == 0:
+        status = "no_frames"  # recordings aged out
+    elif not kept:
+        status = "no_faces"
+    else:
+        old = conn.execute(
+            "SELECT best_crop_path FROM face_enrichments WHERE event_id = ?", (cand.event_id,)
+        ).fetchone()
+        best_path = _write_stack(conn, cand.event_id, kept, len(_usable(faces, cfg=cfg)), cfg=cfg)
+        if old is not None and old["best_crop_path"] and old["best_crop_path"] != best_path:
+            # A single-crop file from before stacks; the stack supersedes it.
+            with contextlib.suppress(OSError):
+                (Path(cfg.crops_dir) / str(old["best_crop_path"])).unlink()
+        best = kept[0][0]
+        conn.execute(
+            "UPDATE face_enrichments SET best_frame_ts = ?, best_bbox = ?, "
+            "best_crop_path = ?, stack_status = 'done' WHERE event_id = ?",
+            (best.frame_ts, json.dumps([round(v, 5) for v in best.bbox]), best_path,
+             cand.event_id),
+        )
+        return "done"
+    _set_stack_status(conn, cand.event_id, status)
+    return status
+
+
+def _set_stack_status(conn: sqlite3.Connection, event_id: str, status: str) -> None:
+    conn.execute(
+        "UPDATE face_enrichments SET stack_status = ? WHERE event_id = ?", (status, event_id)
+    )
 
 
 def run_cycle(settings: Settings, *, now: float | None = None) -> dict[str, Any]:
@@ -728,16 +875,24 @@ def run_cycle(settings: Settings, *, now: float | None = None) -> dict[str, Any]
     Sync by design — server.py runs it via asyncio.to_thread so inference
     never blocks the event loop. Per-event failures are recorded as
     status='error' and retried on later cycles; they never kill the cycle.
+    The stack backfill only gets cycles with no live work, so it can never
+    delay a fresh event.
     """
     cfg = settings.face_enrich
     now = time.time() if now is None else now
     summary: dict[str, Any] = {"candidates": 0, "enriched": 0, "no_faces": 0,
-                               "no_frames": 0, "errors": 0, "reaped": 0}
+                               "no_frames": 0, "errors": 0, "reaped": 0, "backfilled": 0}
     conn = db.open_joined(settings.frigate.db_path, settings.sidecar.db_path)
     try:
         candidates = find_candidates(conn, cfg=cfg, now=now)
         summary["candidates"] = len(candidates)
-        if candidates:
+        backlog = [] if candidates else find_backfill(conn, limit=cfg.backfill_per_cycle)
+        for gone in [b for b in backlog if isinstance(b, str)]:
+            _set_stack_status(conn, gone, "no_frames")  # Frigate dropped the event
+            summary["backfilled"] += 1
+        conn.commit()
+        backlog_cands = [b for b in backlog if isinstance(b, Candidate)]
+        if candidates or backlog_cands:
             with FrigateClient(settings.frigate.base_url, timeout=cfg.http_timeout_s) as client:
                 for cand in candidates:
                     try:
@@ -750,10 +905,21 @@ def run_cycle(settings: Settings, *, now: float | None = None) -> dict[str, Any]
                         _record(conn, cand, status="error", detail=str(exc)[:300])
                         summary["errors"] += 1
                     conn.commit()
+                for cand in backlog_cands:
+                    try:
+                        backfill_event(conn, client, cand, cfg=cfg)
+                    except EnrichUnavailable:
+                        raise
+                    except Exception:  # noqa: BLE001 - settle it; queueing again retries
+                        logger.exception("face_enrich: backfill of %s failed", cand.event_id)
+                        conn.rollback()
+                        _set_stack_status(conn, cand.event_id, "error")
+                    summary["backfilled"] += 1
+                    conn.commit()
         summary["reaped"] = reap_stale_clusters(conn, cfg=cfg, now=now)
         conn.commit()
     finally:
         conn.close()
-    if summary["candidates"]:
+    if summary["candidates"] or summary["backfilled"]:
         logger.info("face_enrich cycle: %s", summary)
     return summary

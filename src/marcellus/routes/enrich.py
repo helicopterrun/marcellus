@@ -153,6 +153,7 @@ def clusters_view(request: Request, show_excluded: int = 0) -> Any:
         clusters = _clusters(conn, show_excluded=bool(show_excluded))
         similar = _similar_pairs(conn)
         stats = _stats(conn, request)
+        backfill = enrich.backfill_status(conn)
     finally:
         conn.close()
     return _templates(request).TemplateResponse(
@@ -162,6 +163,7 @@ def clusters_view(request: Request, show_excluded: int = 0) -> Any:
             "clusters": clusters,
             "similar": similar,
             "stats": stats,
+            "backfill": backfill,
             "known_names": sorted({c["name"] for c in clusters if c["name"]}),
             "enabled": s.face_enrich.enabled,
             "cameras": s.face_enrich.cameras,
@@ -294,6 +296,37 @@ def _retro_label(
             )
             labeled += 1
     return labeled
+
+
+class BackfillPayload(BaseModel):
+    run: bool
+
+
+@router.get("/enrich/backfill.json")
+def backfill_get(request: Request) -> JSONResponse:
+    conn = open_sidecar(_settings(request).sidecar.db_path)
+    try:
+        return JSONResponse(enrich.backfill_status(conn))
+    finally:
+        conn.close()
+
+
+@router.post("/enrich/backfill")
+def backfill_set(payload: BackfillPayload, request: Request) -> JSONResponse:
+    """Queue (run=true) or un-queue (run=false) the face-stack backfill.
+
+    Only queues; the enrichment worker does the work in its idle cycles.
+    """
+    conn = open_sidecar(_settings(request).sidecar.db_path)
+    try:
+        if payload.run:
+            enrich.queue_backfill(conn)
+        else:
+            enrich.pause_backfill(conn)
+        conn.commit()
+        return JSONResponse(enrich.backfill_status(conn))
+    finally:
+        conn.close()
 
 
 class NamePayload(BaseModel):

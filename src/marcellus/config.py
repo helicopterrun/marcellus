@@ -326,6 +326,9 @@ class FaceEnrichSection(BaseModel):
     crop_max_edge: int = 384
     # Faces saved per event. Five 1s-apart samples already span a walk-up.
     crop_keep: int = 5
+    # Queued backfill events worked per cycle, and only in cycles with no live
+    # events. One ~14s event per 15s cycle is about half a core.
+    backfill_per_cycle: int = 1
 
     # Bounds one cycle so a first run against a long lookback can't hog the
     # shared 4-core host; the lookback picks up the rest next cycle.

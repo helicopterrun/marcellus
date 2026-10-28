@@ -78,6 +78,8 @@ sidecar is the sole author of `sub_label`, and two writers would fight.
   first download.
 - `crop_keep` — faces saved per enriched event, best first (default 5); the
   Identities page shows them as a stack, best on top.
+- `backfill_per_cycle` — older events given face stacks per idle cycle (default 1),
+  once you press **backfill stacks** on the page.
 - `crops_dir` — where the face crops of each enriched event are saved;
   must be writable by the service user. Crops are deleted with their
   cluster (stale unnamed clusters are reaped after `cluster_ttl_days`).
@@ -91,6 +93,17 @@ sidecar is the sole author of `sub_label`, and two writers would fight.
   (default 3).
 - `http_timeout_s` — timeout for the Frigate HTTP fetch of each sampled
   frame (default 15s).
+
+## Face stacks
+
+Each sighting shows up to five face crops from that event, best on top and
+worst at the bottom, each with its quality score (sharpness × size ×
+frontality). Faces that didn't feed the identity embedding are dimmed. Older
+sightings from before stacks existed show Frigate's thumbnail until you press
+**backfill stacks** in the toolbar: the worker then rebuilds their stacks
+oldest first, one event per idle cycle, without touching clusters or names.
+**pause** stops it; pressing it again picks up where it left off and retries
+failures. Events whose recordings have aged out can't be backfilled.
 
 ## If it goes wrong
 

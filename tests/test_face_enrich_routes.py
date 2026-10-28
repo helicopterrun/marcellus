@@ -511,6 +511,150 @@ def test_deleting_a_cluster_deletes_its_crops(client: TestClient) -> None:
     assert client.get("/enrich/face/ev-b.jpg").status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# Face-stack backfill
+
+
+def _seed_backfill(tmp_path: Path, now: float) -> Settings:
+    """Frigate events + enrichment rows: two old enriched events without a
+    stack (one Frigate has since dropped), one with a stack, one no_faces."""
+    frigate = tmp_path / "f.db"
+    c = sqlite3.connect(frigate)
+    c.executescript(FRIGATE_EVENT_SCHEMA)
+    for eid, start in (("old-1", 100.0), ("old-2", 200.0), ("stacked", 300.0), ("nf", 400.0)):
+        c.execute(
+            "INSERT INTO event (id, camera, label, start_time, end_time) "
+            "VALUES (?, 'gate-face', 'person', ?, ?)",
+            (eid, start, start + 10.0),
+        )
+    c.commit()
+    c.close()
+    settings = Settings(
+        frigate=FrigateSection(base_url="http://frigate.test:5000", db_path=frigate),
+        sidecar=SidecarSection(db_path=tmp_path / "s.db"),
+        face_enrich=FaceEnrichSection(
+            cameras=["gate-face"], crops_dir=tmp_path / "crops", backfill_per_cycle=5,
+            lookback_s=60.0,  # keeps the seeded (ancient) events out of live candidates
+        ),
+    )
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO face_clusters (name, centroid, observation_count, created_at, "
+            "last_seen_at) VALUES ('alice', ?, 3, '', ?)",
+            (enrich.pack_embedding([0.0, 1.0]), now),
+        )
+        for eid, status, start in (("old-1", "enriched", 100.0), ("old-2", "enriched", 200.0),
+                                   ("stacked", "enriched", 300.0), ("nf", "no_faces", 400.0),
+                                   ("gone", "enriched", 50.0)):
+            conn.execute(
+                "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+                "embedding, sub_label_written, status, processed_at) "
+                "VALUES (?, 'gate-face', ?, 1, ?, 'alice', ?, '')",
+                (eid, start, enrich.pack_embedding([0.0, 1.0]), status),
+            )
+        conn.execute(
+            "INSERT INTO face_crops (event_id, rank, quality, frame_ts, bbox, used, crop_path) "
+            "VALUES ('stacked', 0, 0.9, 300, '[]', 1, 'x.jpg')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return settings
+
+
+def test_backfill_queue_pause_and_status_count_only_stackless_enriched(tmp_path: Path) -> None:
+    settings = _seed_backfill(tmp_path, time.time())
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        assert enrich.backfill_status(conn) == {"queued": 0, "done": 0, "failed": 0, "ready": 3}
+        assert enrich.queue_backfill(conn) == 3  # old-1, old-2, gone
+        assert enrich.queue_backfill(conn) == 0  # idempotent
+        assert enrich.backfill_status(conn)["queued"] == 3
+        assert enrich.pause_backfill(conn) == 3
+        assert enrich.backfill_status(conn) == {"queued": 0, "done": 0, "failed": 0, "ready": 3}
+    finally:
+        conn.close()
+
+
+class _ClientCM(_StubClient):
+    def __enter__(self) -> _ClientCM:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def test_backfill_cycle_builds_stacks_without_touching_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_engine: _StubEngine
+) -> None:
+    now = time.time()
+    settings = _seed_backfill(tmp_path, now)
+    client = _ClientCM(jpeg=_frame_jpeg())
+    monkeypatch.setattr(enrich, "FrigateClient", lambda *a, **k: client)
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    enrich.queue_backfill(conn)
+    conn.commit()
+    conn.close()
+
+    summary = enrich.run_cycle(settings, now=now)
+    assert summary["candidates"] == 0 and summary["backfilled"] == 3
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        rows = {r["event_id"]: dict(r) for r in conn.execute("SELECT * FROM face_enrichments")}
+        assert rows["old-1"]["stack_status"] == "done" and rows["old-2"]["stack_status"] == "done"
+        assert rows["gone"]["stack_status"] == "no_frames"  # Frigate dropped it
+        assert rows["old-1"]["best_crop_path"] == "1970-01-01/old-1_0.jpg"
+        for eid in ("old-1", "old-2"):
+            # Identity untouched: same cluster, embedding, sub_label; no Frigate writes.
+            assert rows[eid]["cluster_id"] == 1 and rows[eid]["sub_label_written"] == "alice"
+            assert enrich.unpack_embedding(rows[eid]["embedding"]) == [0.0, 1.0]
+        assert client.sub_labels == []
+        stack = conn.execute(
+            "SELECT COUNT(*) FROM face_crops WHERE event_id = 'old-1'"
+        ).fetchone()[0]
+        assert stack == 5
+        centroid = conn.execute("SELECT observation_count FROM face_clusters").fetchone()[0]
+        assert centroid == 3
+        assert enrich.backfill_status(conn) == {"queued": 0, "done": 2, "failed": 1, "ready": 0}
+    finally:
+        conn.close()
+
+
+def test_backfill_yields_to_live_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_engine: _StubEngine
+) -> None:
+    now = time.time()
+    settings = _seed_backfill(tmp_path, now)
+    c = sqlite3.connect(settings.frigate.db_path)
+    c.execute(
+        "INSERT INTO event (id, camera, label, start_time, end_time) "
+        "VALUES ('live', 'gate-face', 'person', ?, ?)",
+        (now - 58.0, now - 50.0),
+    )
+    c.commit()
+    c.close()
+    client = _ClientCM(jpeg=_frame_jpeg())
+    monkeypatch.setattr(enrich, "FrigateClient", lambda *a, **k: client)
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    enrich.queue_backfill(conn)
+    conn.commit()
+    conn.close()
+    summary = enrich.run_cycle(settings, now=now)
+    assert summary["candidates"] == 1 and summary["backfilled"] == 0
+
+
+def test_backfill_routes_queue_pause_and_render(client: TestClient) -> None:
+    html = client.get("/enrich/clusters").text
+    assert "backfill stacks" in html and "older sightings without" in html
+    r = client.post("/enrich/backfill", json={"run": True})
+    assert r.status_code == 200 and r.json()["queued"] == 2  # ev-a, ev-b
+    assert client.get("/enrich/backfill.json").json()["queued"] == 2
+    assert "pause" in client.get("/enrich/clusters").text
+    assert client.post("/enrich/backfill", json={"run": False}).json()["queued"] == 0
+
+
 def test_run_cycle_records_errors_and_retries_until_cap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frigate_db_path: Path
 ) -> None:
