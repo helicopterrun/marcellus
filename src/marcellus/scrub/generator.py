@@ -108,6 +108,7 @@ class SourceProfile:
     stats: CycleStats
     canvas_cache: tiling.CanvasCache
     fed_segments: dict[tuple[str, float], _FedSegments]
+    dead_aged_spans: dict[str, set[tuple[float, float]]]
     cache_sizing_logged: bool
     hw_failures: int
     hwaccel_disabled: bool
@@ -122,6 +123,12 @@ class SourceProfile:
         # by each writer, so the profile needn't know the settings). Lives here
         # because it must outlive a cycle to be of any use.
         self.canvas_cache = tiling.CanvasCache(0)
+        # camera -> aged-tier spans that decimated to nothing, with time to spare
+        # (no sheet rows, sheet files gone, or no cell on the aged grid). Old
+        # recent-tier data doesn't come back, so `generate_aged_tier` skips them
+        # rather than re-trying them at the head of every cycle's budget.
+        # Per-process on purpose: a restart re-learns them in a cycle or two.
+        self.dead_aged_spans = {}
         # (camera, tier interval) -> segments the live edge has fed completely.
         self.fed_segments = {}
         self.cache_sizing_logged = False
@@ -2243,6 +2250,15 @@ async def generate_aged_tier(
         )
         return {"camera": camera, "new_frames": 0}
 
+    # Spans that already decimated to nothing are skipped: left in, they sit
+    # at the head of the sorted list and re-spend the budget every cycle.
+    # Measured on prod (street, 2026-10-24..28): 116 such spans tried per
+    # cycle, zero frames, deadline -- the tier made no progress for 4 days.
+    # Pruned to the current list so the set can't outgrow the window.
+    dead = profile.dead_aged_spans.setdefault(camera, set())
+    dead.intersection_update(spans)
+    live_spans = [sp for sp in spans if sp not in dead]
+
     # Window is the whole aged tier, not one span: this writer outlives each
     # of them, and `feed`'s own bounds check would otherwise throw away every
     # span but the first.
@@ -2252,18 +2268,21 @@ async def generate_aged_tier(
         cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn, stats=profile.stats,
         canvas_cache=profile.canvas_cache, use_canvas_cache=True,
     )
-    # Resume at the first span's start -- that is where last cycle's open
-    # bucket ends, which is the bucket this pass has to keep growing.
-    writer.resume(spans[0][0])
-    resume_before = writer._generated_through
-    attached = writer._bucket_start is not None
+    # Resumed at the first span that actually yields frames, not at spans[0]:
+    # last cycle's open bucket ends where the last FED span did, and a dead
+    # span ahead of it made `resume` miss it -- so every cycle opened a fresh
+    # bucket and left a part-filled sheet behind (6 adjacent open buckets in
+    # 6 cycles on prod's street camera).
+    resumed = False
+    resume_before = attached = None
 
     new_frames = 0
     spans_tried = spans_with_frames = frames_in = accepted_total = 0
     deadline_hit = False
     with tempfile.TemporaryDirectory(prefix="age-", dir=_work_root(scrub.cache_dir)) as td:
         work_dir = Path(td)
-        for span_start, span_end in spans:
+        for span in live_spans:
+            span_start, span_end = span
             if deadline is not None and time.monotonic() >= deadline:
                 deadline_hit = True
                 break
@@ -2275,7 +2294,18 @@ async def generate_aged_tier(
                 deadline=deadline, stats=profile.stats,
             )
             if not frames:
+                # Empty because the deadline cut the source scan short says
+                # nothing about the span; only an unhurried empty one is dead.
+                if deadline is not None and time.monotonic() >= deadline:
+                    deadline_hit = True
+                    break
+                dead.add(span)
                 continue
+            if not resumed:
+                writer.resume(span_start)
+                resume_before = writer._generated_through
+                attached = writer._bucket_start is not None
+                resumed = True
             spans_with_frames += 1
             frames_in += len(frames)
             accepted_total += await writer.feed(frames)
@@ -2290,14 +2320,24 @@ async def generate_aged_tier(
     # (resume slot / window), `frames_in` == 0 means the source sheets are
     # missing or off the grid.
     logger.info(
-        "scrub: aged tier %s: %s spans=%d first=%.2f-%.2f tried=%d with_frames=%d "
-        "source_frames=%d fed_accepted=%d resume_attached=%s resume_before=%.2f "
-        "resume_after=%.2f%s",
-        camera, hole_desc, len(spans), spans[0][0], spans[0][1], spans_tried,
-        spans_with_frames, frames_in, accepted_total, attached, resume_before,
-        writer._generated_through, " deadline" if deadline_hit else "",
+        "scrub: aged tier %s: %s spans=%d dead=%d first=%.2f-%.2f tried=%d with_frames=%d "
+        "source_frames=%d fed_accepted=%d resume_attached=%s resume_before=%s "
+        "resume_after=%s%s",
+        camera, hole_desc, len(spans), len(spans) - len(live_spans),
+        spans[0][0], spans[0][1], spans_tried, spans_with_frames, frames_in,
+        accepted_total, attached,
+        f"{resume_before:.2f}" if resume_before is not None else "-",
+        f"{writer._generated_through:.2f}" if resumed else "-",
+        " deadline" if deadline_hit else "",
     )
-    return {"camera": camera, "new_frames": new_frames}
+    # Starved = had live work but no time to try any of it. Pass 3 then
+    # doesn't count the camera as served, so it leads the next cycle instead
+    # of being rotated past with nothing done.
+    return {
+        "camera": camera,
+        "new_frames": new_frames,
+        "starved": deadline_hit and spans_tried == 0,
+    }
 
 
 async def generate_derived(
@@ -2572,6 +2612,13 @@ async def generate_cycle(
                     )
                 finally:
                     stats.pass3_aged_s += _time.monotonic() - aged_started
+                if aged_result.get("starved"):
+                    # The deadline passed during setup, before a single span:
+                    # not served. Counting it rotated such cameras to the back
+                    # every cycle (prod: gate-walkway / stairway-wide logging
+                    # tried=0 behind street), so the starved stayed starved.
+                    served_d -= 1
+                    break
                 totals[camera]["new_frames"] += aged_result["new_frames"]
                 derived_started = _time.monotonic()
                 try:
