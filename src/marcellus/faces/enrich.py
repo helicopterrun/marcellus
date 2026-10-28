@@ -180,13 +180,13 @@ def crop_box(
     face = max(x2 - x1, y2 - y1)
     if face <= 1.0:
         return None
-    side = face * (1.0 + 2.0 * max(0.0, pad))
+    # Integer side and corner first, so float noise (683.9999 vs 684) can
+    # never make the two axes round differently and the crop non-square.
+    side = int(round(face * (1.0 + 2.0 * max(0.0, pad))))
     cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
-    left = min(max(0.0, cx - side / 2.0), max(0.0, src_w - side))
-    top = min(max(0.0, cy - side / 2.0), max(0.0, src_h - side))
-    right = min(float(src_w), left + side)
-    bottom = min(float(src_h), top + side)
-    return (int(left), int(top), int(round(right)), int(round(bottom)))
+    left = min(max(0, int(round(cx - side / 2.0))), max(0, src_w - side))
+    top = min(max(0, int(round(cy - side / 2.0))), max(0, src_h - side))
+    return (left, top, min(src_w, left + side), min(src_h, top + side))
 
 
 def render_face_crop(
