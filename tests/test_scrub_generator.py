@@ -4227,3 +4227,96 @@ def test_pass3_starved_camera_leads_the_next_cycle(
         env, now=1_800_000_000.0 + 86400.0, profile=profile, backfill_deadline=clock.t + 20.0,
     ))
     assert order[0] == starved_camera, order
+
+
+def test_read_error_never_marks_a_span_dead(
+    growing_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_decimate_source` swallows an OSError per sheet (truncated file, a
+    brief lock, EMFILE) and can then return nothing. Marking that span dead
+    would drop real footage from the aged tier until restart -- and keep its
+    1s rows from ever retiring, since retirement waits on aged coverage."""
+    base = 1_800_000_000.0
+    collapsed = growing_env.model_copy(
+        update={"scrub": growing_env.scrub.model_copy(update={"aged_after_h": 1_000_000.0})}
+    )
+    conn = db.open_joined(growing_env.frigate.db_path, growing_env.sidecar.db_path)
+    try:
+        profile = generator.SourceProfile()
+        asyncio.run(
+            generator.generate_camera(
+                collapsed, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=base + 30.0, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        real_open = generator.Image.open
+
+        def _emfile(*a: object, **kw: object) -> object:
+            raise OSError(24, "Too many open files")
+
+        monkeypatch.setattr(generator.Image, "open", _emfile)
+        failed = asyncio.run(generator.generate_aged_tier(
+            growing_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+            now=base + 40.0, profile=profile,
+        ))
+        assert failed["new_frames"] == 0
+        assert not profile.dead_aged_spans["doorbell"]
+
+        monkeypatch.setattr(generator.Image, "open", real_open)
+        healed = asyncio.run(generator.generate_aged_tier(
+            growing_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+            now=base + 40.0, profile=profile,
+        ))
+        assert healed["new_frames"] > 0
+    finally:
+        conn.close()
+
+
+def test_dead_marks_expire_and_match_by_containment(
+    growing_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mark covers any span inside it -- the oldest span's start is the
+    retention cutoff, which moves every cycle, so exact tuples never match
+    again -- and expires after `_DEAD_SPAN_TTL_S`, capping a wrong mark at
+    hours instead of until restart."""
+    base = 1_800_000_000.0
+    conn = db.open_joined(growing_env.frigate.db_path, growing_env.sidecar.db_path)
+    tried: list[tuple[float, float]] = []
+    inner = generator._decimate_source
+
+    async def _counting(*a: object, **kw: object) -> list[object]:
+        tried.append((float(kw["window_start"]), float(kw["window_end"])))  # type: ignore[arg-type]
+        return await inner(*a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(generator, "_decimate_source", _counting)
+    clock = _FakeClock()
+    monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
+    try:
+        db.upsert_scrub_bucket(
+            conn, camera="doorbell", start_ts=base - 100.0, end_ts=base - 70.0,
+            interval_s=1.0, width=320, height=180, generated_through=base - 71.0,
+            complete=True,
+        )
+        conn.commit()
+        span = (base - 100.0, base - 70.0)
+        profile = generator.SourceProfile()
+
+        def _pass() -> None:
+            tried.clear()
+            asyncio.run(generator.generate_aged_tier(
+                growing_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=base + 10.0, profile=profile,
+            ))
+
+        # A wider, older mark (as last cycle's cutoff-anchored span would be)
+        # still covers today's narrower span.
+        profile.dead_aged_spans["doorbell"] = {(base - 110.0, base - 70.0): clock.t}
+        _pass()
+        assert span not in tried
+
+        clock.t += generator._DEAD_SPAN_TTL_S  # the mark has expired...
+        _pass()
+        assert span in tried  # ...so it is retried, and re-learned
+        assert profile.dead_aged_spans["doorbell"] == {span: clock.t}
+    finally:
+        conn.close()
