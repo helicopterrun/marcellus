@@ -77,6 +77,17 @@ def _clusters(conn: sqlite3.Connection, *, show_excluded: bool = False) -> list[
                 (r["cluster_id"], _SIGHTINGS_PER_CLUSTER),
             )
         ]
+        for sight in r["sightings"]:
+            # Rendered crops only, best first; empty for events enriched
+            # before stacks existed (the template falls back to the thumbnail).
+            sight["faces"] = [
+                dict(f)
+                for f in conn.execute(
+                    "SELECT rank, quality, used FROM face_crops "
+                    "WHERE event_id = ? AND crop_path IS NOT NULL ORDER BY rank",
+                    (sight["event_id"],),
+                )
+            ]
         r["sample_event_id"] = next(
             (s["event_id"] for s in r["sightings"] if not s["excluded_at"]),
             r["sightings"][0]["event_id"] if r["sightings"] else None,
@@ -208,31 +219,47 @@ async def cluster_thumb(event_id: str, request: Request) -> Response:
     )
 
 
-@router.get("/enrich/face/{event_id}.jpg")
-def event_face(event_id: str, request: Request) -> FileResponse:
-    """The event's saved best-face crop (faces/enrich.py store_crop)."""
-    s = _settings(request)
+def _crop_response(s: Settings, sql: str, args: tuple[Any, ...]) -> FileResponse:
+    """FileResponse for the crop path `sql` selects (as `rel`), or 404."""
     conn = open_sidecar(s.sidecar.db_path)
     try:
-        row = conn.execute(
-            "SELECT best_crop_path FROM face_enrichments WHERE event_id = ?", (event_id,)
-        ).fetchone()
+        row = conn.execute(sql, args).fetchone()
     finally:
         conn.close()
     missing = HTTPException(status_code=404, detail=error_detail("not_found", "no face crop"))
-    if row is None or not row["best_crop_path"]:
+    if row is None or not row["rel"]:
         raise missing
     root = Path(s.face_enrich.crops_dir).resolve()
     try:
-        path = (root / str(row["best_crop_path"])).resolve()
+        path = (root / str(row["rel"])).resolve()
     except OSError as exc:
         raise missing from exc
     # A hand-edited row must not become an arbitrary file read.
     if root not in path.parents or not path.is_file():
         raise missing
-    # Not immutable: an event retried after an error re-renders its crop.
+    # Not immutable: an event retried after an error re-renders its crops.
     return FileResponse(
         path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"}
+    )
+
+
+@router.get("/enrich/face/{event_id}.jpg")
+def event_face(event_id: str, request: Request) -> FileResponse:
+    """The event's best-face crop (faces/enrich.py store_crops, rank 0)."""
+    return _crop_response(
+        _settings(request),
+        "SELECT best_crop_path AS rel FROM face_enrichments WHERE event_id = ?",
+        (event_id,),
+    )
+
+
+@router.get("/enrich/face/{event_id}/{rank}.jpg")
+def event_face_rank(event_id: str, rank: int, request: Request) -> FileResponse:
+    """One face of the event's stack, rank 0 = best."""
+    return _crop_response(
+        _settings(request),
+        "SELECT crop_path AS rel FROM face_crops WHERE event_id = ? AND rank = ?",
+        (event_id, rank),
     )
 
 
