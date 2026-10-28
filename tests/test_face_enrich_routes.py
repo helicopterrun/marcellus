@@ -259,25 +259,23 @@ def test_hard_remove_still_works_alongside_soft_exclude(client: TestClient) -> N
 class _StubEngine:
     """Yields one good face per frame along a fixed embedding.
 
-    `peak_ts`, when set, makes the face in that frame the event's best one,
-    in its own place in the frame, so a test can tell which frame was cropped.
+    `by_ts` overrides the quality for the frame at that instant, so a test
+    can shape an event's best-to-worst order.
     """
 
     def __init__(self, embedding: list[float], quality: float = 0.8) -> None:
         self.embedding = embedding
         self.quality = quality
-        self.peak_ts: float | None = None
+        self.by_ts: dict[float, float] = {}
 
     def faces_in_jpeg(
         self, jpeg: bytes, *, frame_ts: float, min_face_area_px: int
     ) -> list[enrich.DetectedFace]:
-        peak = self.peak_ts is not None and abs(frame_ts - self.peak_ts) < 1e-6
+        q = next((v for t, v in self.by_ts.items() if abs(t - frame_ts) < 1e-6), self.quality)
         return [
             enrich.DetectedFace(
-                frame_ts=frame_ts, area_px=8000.0,
-                quality=0.95 if peak else self.quality,
-                embedding=list(self.embedding),
-                bbox=(0.6, 0.2, 0.65, 0.3) if peak else (0.1, 0.1, 0.15, 0.2),
+                frame_ts=frame_ts, area_px=8000.0, quality=q,
+                embedding=list(self.embedding), bbox=(0.1, 0.1, 0.15, 0.2),
             )
         ]
 
@@ -381,21 +379,39 @@ def _frame_jpeg() -> bytes:
     return buf.getvalue()
 
 
-def test_process_event_stores_the_best_face_crop(
+def test_process_event_stores_a_best_first_face_stack(
     tmp_path: Path, stub_engine: _StubEngine
 ) -> None:
-    cfg = FaceEnrichSection(cameras=["gate-face"], crops_dir=tmp_path / "crops")
-    stub_engine.peak_ts = 105.0  # the middle of _cand()'s 100..110 window
+    # 11 frames over 100..110 at 0.3; three stand out. best_n=2 and
+    # min_quality=0.5 leave ranks 0-1 used, 2 over the gate but past best_n,
+    # 3-4 under the gate -- all five kept, best on top.
+    cfg = FaceEnrichSection(
+        cameras=["gate-face"], crops_dir=tmp_path / "crops", best_n=2, min_quality=0.5,
+    )
+    stub_engine.quality = 0.3
+    stub_engine.by_ts = {105.0: 0.95, 102.0: 0.9, 108.0: 0.6}
     conn = _joined(tmp_path)
     try:
         status = enrich.process_event(conn, _StubClient(jpeg=_frame_jpeg()), _cand(), cfg=cfg)  # type: ignore[arg-type]
         assert status == "enriched"
+        stack = [
+            (r["rank"], r["quality"], r["frame_ts"], r["used"])
+            for r in conn.execute("SELECT * FROM face_crops WHERE event_id = 'ev1' ORDER BY rank")
+        ]
+        assert stack == [
+            (0, pytest.approx(0.95), pytest.approx(105.0), 1),
+            (1, pytest.approx(0.9), pytest.approx(102.0), 1),
+            (2, pytest.approx(0.6), pytest.approx(108.0), 0),
+            (3, pytest.approx(0.3), pytest.approx(100.0), 0),
+            (4, pytest.approx(0.3), pytest.approx(101.0), 0),
+        ]
         row = conn.execute("SELECT * FROM face_enrichments WHERE event_id = 'ev1'").fetchone()
         assert row["best_quality"] == pytest.approx(0.95)
         assert row["best_frame_ts"] == pytest.approx(105.0)
-        assert json.loads(row["best_bbox"]) == [0.6, 0.2, 0.65, 0.3]
-        assert row["best_crop_path"] == "1970-01-01/ev1.jpg"
-        assert (tmp_path / "crops" / row["best_crop_path"]).stat().st_size > 0
+        assert json.loads(row["best_bbox"]) == [0.1, 0.1, 0.15, 0.2]
+        assert row["best_crop_path"] == "1970-01-01/ev1_0.jpg"
+        for rank in range(5):
+            assert (tmp_path / "crops" / f"1970-01-01/ev1_{rank}.jpg").stat().st_size > 0
     finally:
         conn.close()
 
@@ -409,6 +425,8 @@ def test_process_event_survives_an_undecodable_best_frame(
         assert enrich.process_event(conn, _StubClient(), _cand(), cfg=cfg) == "enriched"  # type: ignore[arg-type]
         row = conn.execute("SELECT * FROM face_enrichments WHERE event_id = 'ev1'").fetchone()
         assert row["best_crop_path"] is None and row["best_frame_ts"] is not None
+        paths = [r[0] for r in conn.execute("SELECT crop_path FROM face_crops")]
+        assert paths and all(p is None for p in paths)
     finally:
         conn.close()
 
@@ -441,6 +459,42 @@ def test_face_route_serves_the_crop_and_404s_otherwise(client: TestClient) -> No
     assert client.get("/enrich/face/ev-b.jpg").status_code == 404
 
 
+def _set_stack(settings: Settings, event_id: str, qualities: list[float]) -> None:
+    crops = Path(settings.face_enrich.crops_dir)
+    (crops / "d").mkdir(parents=True, exist_ok=True)
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        for rank, q in enumerate(qualities):
+            rel = f"d/{event_id}_{rank}.jpg"
+            (crops / rel).write_bytes(f"face{rank}".encode())
+            conn.execute(
+                "INSERT INTO face_crops (event_id, rank, quality, frame_ts, bbox, used, "
+                "crop_path) VALUES (?, ?, ?, 0, '[]', ?, ?)",
+                (event_id, rank, q, 1 if q >= 0.5 else 0, rel),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_stack_ranks_are_served_and_rendered_best_first(client: TestClient) -> None:
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    _set_stack(settings, "ev-a", [0.91, 0.62, 0.31])
+    assert client.get("/enrich/face/ev-a/2.jpg").content == b"face2"
+    assert client.get("/enrich/face/ev-a/3.jpg").status_code == 404
+    html = client.get("/enrich/clusters").text
+    srcs = [f"/enrich/face/ev-a/{r}.jpg" for r in range(3)]
+    assert all(src in html for src in srcs)
+    assert html.index(srcs[0]) < html.index(srcs[1]) < html.index(srcs[2])
+    assert html.count("id-face-unused") == 1  # only the 0.31 face missed the gate
+    # A sighting without a stack still shows Frigate's thumbnail.
+    assert "/enrich/thumb/ev-b" in html and "/enrich/thumb/ev-a" not in html.split(
+        'data-event="ev-a"', 1
+    )[1].split("</figure>", 1)[0]
+    faces = client.get("/enrich/clusters.json").json()["clusters"][0]["sightings"][0]["faces"]
+    assert [f["rank"] for f in faces] == [0, 1, 2]
+
+
 def test_deleting_a_cluster_deletes_its_crops(client: TestClient) -> None:
     settings = client.app.state.settings  # type: ignore[attr-defined]
     crops = Path(settings.face_enrich.crops_dir)
@@ -448,8 +502,11 @@ def test_deleting_a_cluster_deletes_its_crops(client: TestClient) -> None:
     for eid in ("ev-a", "ev-b"):
         (crops / "d" / f"{eid}.jpg").write_bytes(b"x")
         _set_crop(settings, eid, f"d/{eid}.jpg")
+    _set_stack(settings, "ev-b", [0.8, 0.4])
     assert client.post("/enrich/clusters/2/delete").status_code == 200
     assert not (crops / "d" / "ev-b.jpg").exists()
+    assert not (crops / "d" / "ev-b_0.jpg").exists() and not (crops / "d" / "ev-b_1.jpg").exists()
+    assert client.get("/enrich/face/ev-b/0.jpg").status_code == 404
     assert (crops / "d" / "ev-a.jpg").exists()  # other cluster untouched
     assert client.get("/enrich/face/ev-b.jpg").status_code == 404
 

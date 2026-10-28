@@ -40,6 +40,7 @@ def _cfg(**overrides: Any) -> SimpleNamespace:
         "crops_dir": Path("/nonexistent/face-crops"),
         "crop_pad": 0.4,
         "crop_max_edge": 384,
+        "crop_keep": 5,
         "max_events_per_cycle": 10,
         "max_attempts": 3,
         "http_timeout_s": 15.0,
@@ -335,7 +336,19 @@ def test_reap_drops_crops_of_reaped_and_detached_sightings(tmp_path: Path) -> No
                 "status, processed_at, best_crop_path) VALUES (?, 'c', ?, ?, 'enriched', '', ?)",
                 (eid, start, cid, rel),
             )
+        # A stack-era sighting: crops only in face_crops, no best_crop_path.
+        (crops / "d" / "stack_1.jpg").write_bytes(b"x")
+        conn.execute(
+            "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+            "status, processed_at) VALUES ('stack', 'c', ?, 2, 'enriched', '')",
+            (old,),
+        )
+        conn.execute(
+            "INSERT INTO face_crops (event_id, rank, quality, frame_ts, bbox, used, crop_path) "
+            "VALUES ('stack', 1, 0.4, 0, '[]', 0, 'd/stack_1.jpg')"
+        )
         assert enrich.reap_stale_clusters(conn, cfg=cfg, now=now) == 1
+        assert conn.execute("SELECT COUNT(*) FROM face_crops").fetchone()[0] == 0
         kept = {
             r["event_id"]
             for r in conn.execute(
@@ -367,10 +380,12 @@ def test_crop_box_pads_squares_and_stays_in_frame() -> None:
 
 def test_crop_relative_path_is_date_sharded_and_whitelisted() -> None:
     ts = 1793147680.0  # 2026-10-28 UTC
-    assert enrich.crop_relative_path("1793147680.359-0jimtn", ts) == (
-        "2026-10-28/1793147680.359-0jimtn.jpg"
+    assert enrich.crop_relative_path("1793147680.359-0jimtn", ts, 0) == (
+        "2026-10-28/1793147680.359-0jimtn_0.jpg"
     )
-    assert enrich.crop_relative_path("../../etc/passwd", ts) == "2026-10-28/_._etc_passwd.jpg"
+    assert enrich.crop_relative_path("../../etc/passwd", ts, 3) == (
+        "2026-10-28/_._etc_passwd_3.jpg"
+    )
 
 
 def _jpeg(w: int, h: int) -> bytes:
@@ -397,6 +412,21 @@ def test_render_face_crop_never_upscales_and_caps_the_edge() -> None:
         assert max(im.size) == 384
     bad = enrich.render_face_crop(b"not a jpeg", (0.1, 0.1, 0.2, 0.2), pad=0.4, max_edge=384)
     assert bad is None
+
+
+def _face(q: float, ts: float) -> enrich.DetectedFace:
+    return enrich.DetectedFace(
+        frame_ts=ts, area_px=8000.0, quality=q, embedding=[1.0], bbox=(0.1, 0.1, 0.2, 0.2)
+    )
+
+
+def test_keep_top_holds_k_best_in_stable_order() -> None:
+    kept: list[tuple[enrich.DetectedFace, bytes]] = []
+    kept = enrich.keep_top(kept, [_face(0.5, 1), _face(0.7, 1)], b"f1", 3)
+    kept = enrich.keep_top(kept, [_face(0.7, 2)], b"f2", 3)
+    kept = enrich.keep_top(kept, [_face(0.9, 3), _face(0.1, 3)], b"f3", 3)
+    # Ties keep frame order: frame 1's 0.7 ranks above frame 2's.
+    assert [(f.quality, j) for f, j in kept] == [(0.9, b"f3"), (0.7, b"f1"), (0.7, b"f2")]
 
 
 # ---------------------------------------------------------------------------

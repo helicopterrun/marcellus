@@ -507,6 +507,21 @@ CREATE TABLE IF NOT EXISTS face_enrichments (
     best_crop_path    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_face_enrich_cluster ON face_enrichments(cluster_id);
+
+-- Per-event face stack (faces/enrich.py): the top face_enrich.crop_keep faces,
+-- rank 0 = best, including faces under min_quality so the scorer's choices
+-- can be judged. `used` = the face fed the event's embedding. crop_path is
+-- relative to face_enrich.crops_dir; NULL = that crop failed to render.
+CREATE TABLE IF NOT EXISTS face_crops (
+    event_id   TEXT NOT NULL,
+    rank       INTEGER NOT NULL,
+    quality    REAL NOT NULL,
+    frame_ts   REAL NOT NULL,
+    bbox       TEXT NOT NULL,
+    used       INTEGER NOT NULL,
+    crop_path  TEXT,
+    PRIMARY KEY (event_id, rank)
+);
 CREATE INDEX IF NOT EXISTS idx_face_enrich_age     ON face_enrichments(event_start_ts);
 
 -- Wildlife finder (config `wildlife`). One row per Frigate recording segment

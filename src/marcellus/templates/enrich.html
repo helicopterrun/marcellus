@@ -67,8 +67,22 @@
       <figure class="capture-card id-sighting{{ ' id-excluded' if e.excluded_at else '' }}"
               data-event="{{ e.event_id }}">
         <a href="/api/events/{{ e.event_id }}/snapshot.jpg" target="_blank" rel="noopener">
+          {% if e.faces %}
+          {# Best face on top, worst at the bottom; dimmed = didn't feed the embedding. #}
+          <span class="id-stack">
+            {% for f in e.faces %}
+            <span class="id-face{{ '' if f.used else ' id-face-unused' }}"
+                  title="rank {{ f.rank + 1 }} · quality {{ '%.2f'|format(f.quality) }}{{ '' if f.used else ' · not used' }}">
+              <img loading="lazy" src="/enrich/face/{{ e.event_id }}/{{ f.rank }}.jpg"
+                   alt="face {{ f.rank + 1 }} of sighting {{ loop.index }}">
+              <span class="id-face-q">{{ '%.2f'|format(f.quality) }}</span>
+            </span>
+            {% endfor %}
+          </span>
+          {% else %}
           <img loading="lazy" src="/enrich/thumb/{{ e.event_id }}"
                alt="sighting {{ loop.index }}">
+          {% endif %}
         </a>
         {% if e.excluded_at %}
         <button type="button" class="id-include" data-event="{{ e.event_id }}"

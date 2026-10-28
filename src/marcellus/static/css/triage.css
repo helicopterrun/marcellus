@@ -1077,6 +1077,22 @@ body.map-full-open .me-toolbar {
 .id-sighting { position: relative; max-width: 180px; }
 .id-sighting img { width: 100%; border-radius: var(--radius-sm); display: block; }
 .id-sighting figcaption { font-size: var(--text-xs); color: var(--muted); }
+/* Face stack: one event's crops, best on top. Rank 0 is framed in the accent
+   so the face the pipeline believes in reads first. */
+.id-sighting:has(.id-stack) { width: 112px; }
+.id-stack { display: flex; flex-direction: column; gap: 3px; }
+.id-face { position: relative; display: block; }
+.id-stack .id-face img {
+  width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: var(--radius-sm);
+}
+.id-face:first-child img { outline: 2px solid var(--accent); outline-offset: -2px; }
+.id-face-unused img { opacity: 0.45; filter: grayscale(0.6); }
+.id-face-q {
+  position: absolute; left: 3px; bottom: 3px; padding: 0 4px;
+  font: var(--text-xs)/1.4 var(--font-mono); color: var(--text);
+  background: color-mix(in srgb, var(--deep) 75%, transparent);
+  border-radius: var(--radius-sm);
+}
 .id-evict {
   position: absolute; top: 4px; right: 4px; width: 28px; height: 28px;
   border-radius: 50%; border: 1px solid var(--stroke);
@@ -1108,6 +1124,7 @@ body.map-full-open .me-toolbar {
 .id-pick-tap:hover { background: var(--panel); }
 @media (max-width: 720px) {
   .id-sighting { max-width: 132px; }
+  .id-sighting:has(.id-stack) { width: 88px; }
   .id-evict { width: 36px; height: 36px; }
   .id-similar { margin-left: 0; min-height: 44px; }
   .id-actions .btn { min-height: 44px; }
