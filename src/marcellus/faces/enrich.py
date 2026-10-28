@@ -9,6 +9,8 @@ aggregate into ONE embedding per event, and match it against identity clusters
 in the sidecar DB. A NAMED cluster match writes the event's sub_label back to
 Frigate; anything else folds into (or starts) an unnamed cluster, so recurring
 strangers accumulate an identity that a human can later promote by naming.
+The single best face is also saved as a padded crop under `crops_dir` — the
+display copy, so no surface has to re-detect it.
 
 Work discovery is crosscam's lookback pattern, not an MQTT hook: recordings
 commit at segment END (measured lag 5.4-9.4s), so enrichment is inherently
@@ -25,13 +27,20 @@ OpenVINO/iGPU path produced a multi-day embeddings OOM cycle on this host.
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import logging
 import math
+import os
+import re
 import sqlite3
+import tempfile
 import time
 from array import array
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from marcellus import db
@@ -138,6 +147,124 @@ def quality_score(
     a = min(1.0, max(0.0, area_px) / (4.0 * max(1, min_face_area_px)))
     f = max(0.0, min(1.0, frontality))
     return float((s * a * f) ** (1.0 / 3.0))
+
+
+# ---------------------------------------------------------------------------
+# Best-face crop: pure Pillow (a core dep), so it is testable without [enrich].
+
+_CROP_JPEG_QUALITY = 90
+_SAFE_STEM = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def crop_relative_path(event_id: str, frame_ts: float) -> str:
+    """Date-sharded path under `crops_dir`, as crosscam lays out its captures.
+
+    Event ids come from Frigate's DB, not a request, but a filesystem path
+    gets the same whitelist either way.
+    """
+    day = datetime.fromtimestamp(frame_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+    stem = re.sub(r"\.{2,}", ".", _SAFE_STEM.sub("_", event_id)).lstrip(".") or "face"
+    return f"{day}/{stem}.jpg"
+
+
+def crop_box(
+    bbox: tuple[float, float, float, float], src_w: int, src_h: int, *, pad: float
+) -> tuple[int, int, int, int] | None:
+    """Square pixel box around a normalized face bbox, padded and kept in frame.
+
+    The square is slid back inside the frame rather than clipped, so a face
+    near an edge keeps its framing; only a square larger than the frame
+    itself gets clipped. None for a degenerate box.
+    """
+    x1, y1, x2, y2 = bbox[0] * src_w, bbox[1] * src_h, bbox[2] * src_w, bbox[3] * src_h
+    face = max(x2 - x1, y2 - y1)
+    if face <= 1.0:
+        return None
+    # Integer side and corner first, so float noise (683.9999 vs 684) can
+    # never make the two axes round differently and the crop non-square.
+    side = int(round(face * (1.0 + 2.0 * max(0.0, pad))))
+    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    left = min(max(0, int(round(cx - side / 2.0))), max(0, src_w - side))
+    top = min(max(0, int(round(cy - side / 2.0))), max(0, src_h - side))
+    return (left, top, min(src_w, left + side), min(src_h, top + side))
+
+
+def render_face_crop(
+    jpeg: bytes, bbox: tuple[float, float, float, float], *, pad: float, max_edge: int
+) -> bytes | None:
+    """JPEG bytes of the padded face crop, or None if the frame won't decode."""
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(jpeg)) as im:
+            box = crop_box(bbox, im.size[0], im.size[1], pad=pad)
+            if box is None:
+                return None
+            face = im.convert("RGB").crop(box)
+        if max(face.size) > max_edge:
+            face.thumbnail((max_edge, max_edge))
+        buf = io.BytesIO()
+        face.save(buf, format="JPEG", quality=_CROP_JPEG_QUALITY)
+        return buf.getvalue()
+    except Exception:  # noqa: BLE001 - a bad frame costs its crop, not the event
+        logger.warning("face_enrich: crop render failed", exc_info=True)
+        return None
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    """Publish a file atomically (mkstemp + os.replace), as crosscam does."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".publish-")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def store_crop(
+    event_id: str, face: DetectedFace, jpeg: bytes, *, cfg: Any
+) -> str | None:
+    """Render and save the event's best-face crop; its relative path or None.
+
+    Never raises: the crop is for display, and losing it must not turn an
+    enriched event into an error that gets retried.
+    """
+    data = render_face_crop(jpeg, face.bbox, pad=cfg.crop_pad, max_edge=cfg.crop_max_edge)
+    if data is None:
+        return None
+    rel = crop_relative_path(event_id, face.frame_ts)
+    try:
+        _write_atomic(Path(cfg.crops_dir) / rel, data)
+    except OSError:
+        logger.warning("face_enrich: could not write crop for %s", event_id, exc_info=True)
+        return None
+    return rel
+
+
+def drop_crops(conn: sqlite3.Connection, crops_dir: Path, event_ids: list[str]) -> int:
+    """Delete these events' crop files and clear their paths; returns files removed.
+
+    Rows first, then files: a crash between the two leaves an orphan file,
+    never a row pointing at nothing.
+    """
+    removed = 0
+    for eid in event_ids:
+        row = conn.execute(
+            "SELECT best_crop_path FROM face_enrichments WHERE event_id = ?", (eid,)
+        ).fetchone()
+        if row is None or not row["best_crop_path"]:
+            continue
+        conn.execute(
+            "UPDATE face_enrichments SET best_crop_path = NULL WHERE event_id = ?", (eid,)
+        )
+        with contextlib.suppress(OSError):
+            (Path(crops_dir) / str(row["best_crop_path"])).unlink()
+            removed += 1
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +441,18 @@ def reap_stale_clusters(conn: sqlite3.Connection, *, cfg: Any, now: float) -> in
             (cid,),
         )
         conn.execute("DELETE FROM face_clusters WHERE cluster_id = ?", (cid,))
+    # Crops of clusterless sightings past the TTL: the reaped clusters' events
+    # (a stale cluster's last sighting is older than the cutoff, so all of its
+    # events are) plus sightings a person detached and nothing re-claimed.
+    orphaned = [
+        str(r["event_id"])
+        for r in conn.execute(
+            "SELECT event_id FROM face_enrichments WHERE cluster_id IS NULL "
+            "AND best_crop_path IS NOT NULL AND event_start_ts < ?",
+            (cutoff,),
+        )
+    ]
+    drop_crops(conn, cfg.crops_dir, orphaned)
     return len(stale)
 
 
@@ -329,6 +468,8 @@ class DetectedFace:
     area_px: float
     quality: float
     embedding: list[float]
+    # Face box normalized to the frame, (x1, y1, x2, y2) in 0..1.
+    bbox: tuple[float, float, float, float]
 
 
 class _Engine:
@@ -391,6 +532,7 @@ class _Engine:
                     area_px=area,
                     quality=quality,
                     embedding=[float(v) for v in emb],
+                    bbox=(x1 / w, y1 / h, x2 / w, y2 / h),
                 )
             )
         return out
@@ -433,6 +575,8 @@ def _record(
     faces_found: int = 0,
     faces_used: int = 0,
     best_quality: float | None = None,
+    best: DetectedFace | None = None,
+    best_crop_path: str | None = None,
     embedding: list[float] | None = None,
     sub_label_written: str | None = None,
     detail: str | None = None,
@@ -440,15 +584,17 @@ def _record(
     conn.execute(
         "INSERT INTO face_enrichments "
         "(event_id, camera, event_start_ts, cluster_id, distance, faces_found, faces_used, "
-        " best_quality, embedding, sub_label_written, status, attempts, detail, processed_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " best_quality, embedding, sub_label_written, status, attempts, detail, processed_at, "
+        " best_frame_ts, best_bbox, best_crop_path) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(event_id) DO UPDATE SET "
         " cluster_id=excluded.cluster_id, distance=excluded.distance, "
         " faces_found=excluded.faces_found, faces_used=excluded.faces_used, "
         " best_quality=excluded.best_quality, embedding=excluded.embedding, "
         " sub_label_written=excluded.sub_label_written, status=excluded.status, "
         " attempts=excluded.attempts, detail=excluded.detail, "
-        " processed_at=excluded.processed_at",
+        " processed_at=excluded.processed_at, best_frame_ts=excluded.best_frame_ts, "
+        " best_bbox=excluded.best_bbox, best_crop_path=excluded.best_crop_path",
         (
             cand.event_id,
             cand.camera,
@@ -464,6 +610,9 @@ def _record(
             cand.attempts + 1,
             detail,
             _now_iso(),
+            best.frame_ts if best is not None else None,
+            json.dumps([round(v, 5) for v in best.bbox]) if best is not None else None,
+            best_crop_path,
         ),
     )
 
@@ -475,6 +624,8 @@ def process_event(
     engine = _engine(str(cfg.model_dir))
     faces: list[DetectedFace] = []
     frames_ok = 0
+    # Only the frame holding the best face so far is kept, not all ~40.
+    best_jpeg: bytes | None = None
     for ts in sample_times(
         cand.start_time, cand.end_time, max_frames=cfg.max_frames, min_gap_s=cfg.min_sample_gap_s
     ):
@@ -482,7 +633,10 @@ def process_event(
         if jpeg is None:
             continue  # routine: no committed segment covers this instant
         frames_ok += 1
-        faces.extend(engine.faces_in_jpeg(jpeg, frame_ts=ts, min_face_area_px=cfg.min_face_area_px))
+        found = engine.faces_in_jpeg(jpeg, frame_ts=ts, min_face_area_px=cfg.min_face_area_px)
+        if found and (not faces or max(f.quality for f in found) > max(f.quality for f in faces)):
+            best_jpeg = jpeg
+        faces.extend(found)
 
     if frames_ok == 0:
         _record(conn, cand, status="no_frames")
@@ -493,6 +647,10 @@ def process_event(
     if not usable:
         _record(conn, cand, status="no_faces", faces_found=len(faces))
         return "no_faces"
+    # usable[0] is the first face at the top quality, which is the face whose
+    # frame best_jpeg holds (both resolve ties to the earliest).
+    best = usable[0]
+    crop_path = store_crop(cand.event_id, best, best_jpeg, cfg=cfg) if best_jpeg else None
 
     event_emb = aggregate([f.embedding for f in usable], [f.quality for f in usable])
     cluster_id, name, dist = match_or_cluster(conn, event_emb, cfg=cfg, seen_ts=cand.end_time)
@@ -512,7 +670,9 @@ def process_event(
         distance=dist,
         faces_found=len(faces),
         faces_used=len(usable),
-        best_quality=usable[0].quality,
+        best_quality=best.quality,
+        best=best,
+        best_crop_path=crop_path,
         embedding=event_emb,
         sub_label_written=sub_label,
     )

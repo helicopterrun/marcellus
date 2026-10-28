@@ -76,6 +76,13 @@ sidecar is the sole author of `sub_label`, and two writers would fight.
   an unnamed cluster (default 0.55).
 - `model_dir` — where the insightface model pack is cached, ~300MB on
   first download.
+- `crops_dir` — where the best-face crop of each enriched event is saved;
+  must be writable by the service user. Crops are deleted with their
+  cluster (stale unnamed clusters are reaped after `cluster_ttl_days`).
+- `crop_pad` — margin on each side of the face box, as a fraction of it (default 0.4),
+  so the crop shows hair and chin.
+- `crop_max_edge` — longest edge of a stored crop in pixels (default 384);
+  smaller faces are never upscaled.
 - `max_events_per_cycle` — bound on events processed per cycle (default
   10).
 - `max_attempts` — cap on retries for a transport/inference failure

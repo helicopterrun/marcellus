@@ -3,6 +3,8 @@ stubbed engine — the orchestration paths minus actual inference."""
 
 from __future__ import annotations
 
+import io
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -56,7 +58,7 @@ def client(frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path) -> Test
         sidecar=SidecarSection(
             db_path=sidecar_db_path, bind_port=5001, require_frigate_auth=False
         ),
-        face_enrich=FaceEnrichSection(cameras=["gate-face"]),
+        face_enrich=FaceEnrichSection(cameras=["gate-face"], crops_dir=tmp_path / "crops"),
     )
     _seed_clusters(settings)
     return TestClient(create_app(settings))
@@ -255,19 +257,27 @@ def test_hard_remove_still_works_alongside_soft_exclude(client: TestClient) -> N
 
 
 class _StubEngine:
-    """Yields one good face per frame along a fixed embedding."""
+    """Yields one good face per frame along a fixed embedding.
+
+    `peak_ts`, when set, makes the face in that frame the event's best one,
+    in its own place in the frame, so a test can tell which frame was cropped.
+    """
 
     def __init__(self, embedding: list[float], quality: float = 0.8) -> None:
         self.embedding = embedding
         self.quality = quality
+        self.peak_ts: float | None = None
 
     def faces_in_jpeg(
         self, jpeg: bytes, *, frame_ts: float, min_face_area_px: int
     ) -> list[enrich.DetectedFace]:
+        peak = self.peak_ts is not None and abs(frame_ts - self.peak_ts) < 1e-6
         return [
             enrich.DetectedFace(
-                frame_ts=frame_ts, area_px=8000.0, quality=self.quality,
+                frame_ts=frame_ts, area_px=8000.0,
+                quality=0.95 if peak else self.quality,
                 embedding=list(self.embedding),
+                bbox=(0.6, 0.2, 0.65, 0.3) if peak else (0.1, 0.1, 0.15, 0.2),
             )
         ]
 
@@ -361,6 +371,87 @@ def test_process_event_no_frames_and_low_quality(
         assert statuses == {"e-nf": "no_frames", "e-lq": "no_faces"}
     finally:
         conn.close()
+
+
+def _frame_jpeg() -> bytes:
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (640, 360), (40, 80, 120)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def test_process_event_stores_the_best_face_crop(
+    tmp_path: Path, stub_engine: _StubEngine
+) -> None:
+    cfg = FaceEnrichSection(cameras=["gate-face"], crops_dir=tmp_path / "crops")
+    stub_engine.peak_ts = 105.0  # the middle of _cand()'s 100..110 window
+    conn = _joined(tmp_path)
+    try:
+        status = enrich.process_event(conn, _StubClient(jpeg=_frame_jpeg()), _cand(), cfg=cfg)  # type: ignore[arg-type]
+        assert status == "enriched"
+        row = conn.execute("SELECT * FROM face_enrichments WHERE event_id = 'ev1'").fetchone()
+        assert row["best_quality"] == pytest.approx(0.95)
+        assert row["best_frame_ts"] == pytest.approx(105.0)
+        assert json.loads(row["best_bbox"]) == [0.6, 0.2, 0.65, 0.3]
+        assert row["best_crop_path"] == "1970-01-01/ev1.jpg"
+        assert (tmp_path / "crops" / row["best_crop_path"]).stat().st_size > 0
+    finally:
+        conn.close()
+
+
+def test_process_event_survives_an_undecodable_best_frame(
+    tmp_path: Path, stub_engine: _StubEngine
+) -> None:
+    cfg = FaceEnrichSection(cameras=["gate-face"], crops_dir=tmp_path / "crops")
+    conn = _joined(tmp_path)
+    try:
+        assert enrich.process_event(conn, _StubClient(), _cand(), cfg=cfg) == "enriched"  # type: ignore[arg-type]
+        row = conn.execute("SELECT * FROM face_enrichments WHERE event_id = 'ev1'").fetchone()
+        assert row["best_crop_path"] is None and row["best_frame_ts"] is not None
+    finally:
+        conn.close()
+
+
+def _set_crop(settings: Settings, event_id: str, rel: str) -> None:
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        conn.execute(
+            "UPDATE face_enrichments SET best_crop_path = ? WHERE event_id = ?", (rel, event_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_face_route_serves_the_crop_and_404s_otherwise(client: TestClient) -> None:
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    crops = Path(settings.face_enrich.crops_dir)
+    (crops / "d").mkdir(parents=True)
+    (crops / "d" / "ev-a.jpg").write_bytes(b"\xff\xd8crop")
+    _set_crop(settings, "ev-a", "d/ev-a.jpg")
+    r = client.get("/enrich/face/ev-a.jpg")
+    assert r.status_code == 200 and r.content == b"\xff\xd8crop"
+    assert r.headers["content-type"] == "image/jpeg"
+    assert client.get("/enrich/face/ev-b.jpg").status_code == 404  # no crop stored
+    assert client.get("/enrich/face/nope.jpg").status_code == 404  # not enriched
+    # A row pointing outside crops_dir is refused, not read.
+    (crops.parent / "secret.jpg").write_bytes(b"secret")
+    _set_crop(settings, "ev-b", "../secret.jpg")
+    assert client.get("/enrich/face/ev-b.jpg").status_code == 404
+
+
+def test_deleting_a_cluster_deletes_its_crops(client: TestClient) -> None:
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    crops = Path(settings.face_enrich.crops_dir)
+    (crops / "d").mkdir(parents=True)
+    for eid in ("ev-a", "ev-b"):
+        (crops / "d" / f"{eid}.jpg").write_bytes(b"x")
+        _set_crop(settings, eid, f"d/{eid}.jpg")
+    assert client.post("/enrich/clusters/2/delete").status_code == 200
+    assert not (crops / "d" / "ev-b.jpg").exists()
+    assert (crops / "d" / "ev-a.jpg").exists()  # other cluster untouched
+    assert client.get("/enrich/face/ev-b.jpg").status_code == 404
 
 
 def test_run_cycle_records_errors_and_retries_until_cap(

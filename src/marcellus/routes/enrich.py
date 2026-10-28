@@ -21,11 +21,12 @@ import logging
 import sqlite3
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from marcellus.config import Settings
@@ -207,6 +208,34 @@ async def cluster_thumb(event_id: str, request: Request) -> Response:
     )
 
 
+@router.get("/enrich/face/{event_id}.jpg")
+def event_face(event_id: str, request: Request) -> FileResponse:
+    """The event's saved best-face crop (faces/enrich.py store_crop)."""
+    s = _settings(request)
+    conn = open_sidecar(s.sidecar.db_path)
+    try:
+        row = conn.execute(
+            "SELECT best_crop_path FROM face_enrichments WHERE event_id = ?", (event_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    missing = HTTPException(status_code=404, detail=error_detail("not_found", "no face crop"))
+    if row is None or not row["best_crop_path"]:
+        raise missing
+    root = Path(s.face_enrich.crops_dir).resolve()
+    try:
+        path = (root / str(row["best_crop_path"])).resolve()
+    except OSError as exc:
+        raise missing from exc
+    # A hand-edited row must not become an arbitrary file read.
+    if root not in path.parents or not path.is_file():
+        raise missing
+    # Not immutable: an event retried after an error re-renders its crop.
+    return FileResponse(
+        path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"}
+    )
+
+
 def _retro_label(
     conn: sqlite3.Connection, settings: Settings, cluster_id: int, name: str
 ) -> int:
@@ -311,6 +340,14 @@ def cluster_delete(cluster_id: int, request: Request) -> JSONResponse:
     s = _settings(request)
     conn = open_sidecar(s.sidecar.db_path)
     try:
+        # Deleting an identity forgets its faces too, not just its embeddings.
+        event_ids = [
+            str(r["event_id"])
+            for r in conn.execute(
+                "SELECT event_id FROM face_enrichments WHERE cluster_id = ?", (cluster_id,)
+            )
+        ]
+        enrich.drop_crops(conn, s.face_enrich.crops_dir, event_ids)
         conn.execute(
             "UPDATE face_enrichments SET cluster_id = NULL, embedding = NULL "
             "WHERE cluster_id = ?",

@@ -7,6 +7,7 @@ are all plain Python (faces/enrich.py's module docstring has the split).
 
 from __future__ import annotations
 
+import io
 import math
 import sqlite3
 import time
@@ -36,6 +37,9 @@ def _cfg(**overrides: Any) -> SimpleNamespace:
         "cluster_threshold": 0.55,
         "cluster_ttl_days": 60,
         "model_dir": "/tmp/models",
+        "crops_dir": Path("/nonexistent/face-crops"),
+        "crop_pad": 0.4,
+        "crop_max_edge": 384,
         "max_events_per_cycle": 10,
         "max_attempts": 3,
         "http_timeout_s": 15.0,
@@ -303,6 +307,96 @@ def test_reap_stale_clusters_spares_named_and_fresh(tmp_path: Path) -> None:
         assert row["cluster_id"] is None and row["embedding"] is None
     finally:
         conn.close()
+
+
+def test_reap_drops_crops_of_reaped_and_detached_sightings(tmp_path: Path) -> None:
+    conn = _joined(tmp_path)
+    crops = tmp_path / "crops"
+    cfg = _cfg(cluster_ttl_days=60, crops_dir=crops)
+    now = time.time()
+    old = now - 61 * 86400
+    try:
+        for name, seen in (("alice", old), (None, old)):
+            conn.execute(
+                "INSERT INTO face_clusters (name, centroid, observation_count, created_at, "
+                "last_seen_at) VALUES (?, ?, 1, '', ?)",
+                (name, enrich.pack_embedding(_unit(2, 0)), seen),
+            )
+        # (event, cluster, start): named keeps its crop; the stale stranger and
+        # an old detached sighting lose theirs; a fresh detached one keeps it.
+        rows = (("named", 1, old), ("stranger", 2, old),
+                ("detached-old", None, old), ("detached-new", None, now))
+        for eid, cid, start in rows:
+            rel = f"d/{eid}.jpg"
+            (crops / "d").mkdir(parents=True, exist_ok=True)
+            (crops / rel).write_bytes(b"x")
+            conn.execute(
+                "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+                "status, processed_at, best_crop_path) VALUES (?, 'c', ?, ?, 'enriched', '', ?)",
+                (eid, start, cid, rel),
+            )
+        assert enrich.reap_stale_clusters(conn, cfg=cfg, now=now) == 1
+        kept = {
+            r["event_id"]
+            for r in conn.execute(
+                "SELECT event_id FROM face_enrichments WHERE best_crop_path IS NOT NULL"
+            )
+        }
+        assert kept == {"named", "detached-new"}
+        assert sorted(f.stem for f in (crops / "d").iterdir()) == ["detached-new", "named"]
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Best-face crop geometry and rendering
+
+
+def test_crop_box_pads_squares_and_stays_in_frame() -> None:
+    # 100x100 face centered in a 1000x1000 frame, 0.4 pad each side -> 180 square.
+    assert enrich.crop_box((0.45, 0.45, 0.55, 0.55), 1000, 1000, pad=0.4) == (
+        410, 410, 590, 590,
+    )
+    # A face at the top-left corner slides the square in rather than clipping it.
+    assert enrich.crop_box((0.0, 0.0, 0.1, 0.1), 1000, 1000, pad=0.4) == (0, 0, 180, 180)
+    # Bottom-right edge, non-square box: side follows the taller dimension.
+    left, top, right, bottom = enrich.crop_box((0.95, 0.9, 1.0, 1.0), 1000, 1000, pad=0.5)  # type: ignore[misc]
+    assert (right, bottom) == (1000, 1000) and right - left == bottom - top == 200
+    assert enrich.crop_box((0.5, 0.5, 0.5, 0.5), 1000, 1000, pad=0.4) is None
+
+
+def test_crop_relative_path_is_date_sharded_and_whitelisted() -> None:
+    ts = 1793147680.0  # 2026-10-28 UTC
+    assert enrich.crop_relative_path("1793147680.359-0jimtn", ts) == (
+        "2026-10-28/1793147680.359-0jimtn.jpg"
+    )
+    assert enrich.crop_relative_path("../../etc/passwd", ts) == "2026-10-28/_._etc_passwd.jpg"
+
+
+def _jpeg(w: int, h: int) -> bytes:
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), (120, 90, 60)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def test_render_face_crop_never_upscales_and_caps_the_edge() -> None:
+    from PIL import Image
+
+    # 64x72px face, 0.5 pad each side -> a 144px square at native size.
+    small = enrich.render_face_crop(
+        _jpeg(2560, 1440), (0.5, 0.5, 0.525, 0.55), pad=0.5, max_edge=384
+    )
+    assert small is not None
+    with Image.open(io.BytesIO(small)) as im:
+        assert im.size == (144, 144)
+    big = enrich.render_face_crop(_jpeg(2560, 1440), (0.3, 0.1, 0.5, 0.6), pad=0.4, max_edge=384)
+    assert big is not None
+    with Image.open(io.BytesIO(big)) as im:
+        assert max(im.size) == 384
+    bad = enrich.render_face_crop(b"not a jpeg", (0.1, 0.1, 0.2, 0.2), pad=0.4, max_edge=384)
+    assert bad is None
 
 
 # ---------------------------------------------------------------------------
