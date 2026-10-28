@@ -25,6 +25,18 @@
       {% if stats.cycle_age_s is not none %}<b>{{ stats.cycle_age_s }}s</b> ago
       {% else %}<b>not running</b>{% endif %}
     </span>
+    {% if backfill.queued or backfill.ready %}
+    {# Face-stack backfill for sightings enriched before stacks existed. #}
+    <span class="mode id-backfill" title="rebuild face stacks for older sightings, oldest first, one per idle worker cycle">
+      stacks:
+      <span class="id-backfill-text">
+      {%- if backfill.queued %} <b>{{ backfill.queued }}</b> queued · {{ backfill.done }} done
+      {%- else %} <b>{{ backfill.ready }}</b> older sightings without{% endif -%}
+      </span>
+      <button type="button" class="id-backfill-btn" data-run="{{ 0 if backfill.queued else 1 }}">
+        {{ 'pause' if backfill.queued else 'backfill stacks' }}</button>
+    </span>
+    {% endif %}
     <a href="/enrich/clusters?show_excluded={{ 0 if show_excluded else 1 }}" class="page-link">
       {{ 'Hide excluded' if show_excluded else 'Show excluded' }}</a>
     <a href="/faces/captures" class="page-link">Face captures →</a>

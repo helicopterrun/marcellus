@@ -195,3 +195,52 @@ document.querySelectorAll('.id-include').forEach(btn => {
     window.location.reload();
   });
 });
+
+// Face-stack backfill: the button only queues/un-queues; the enrichment
+// worker does the work in idle cycles. While queued, poll the counts.
+(function backfill() {
+  const btn = document.querySelector('.id-backfill-btn');
+  const text = document.querySelector('.id-backfill-text');
+  if (!btn || !text) return;
+  let timer = null;
+
+  function render(st) {
+    const running = st.queued > 0;
+    text.textContent = '';
+    if (running) {
+      text.append(' ', SC.el('b', { text: String(st.queued) }, []), ' queued · ' + st.done + ' done');
+    } else if (st.ready > 0) {
+      text.append(' ', SC.el('b', { text: String(st.ready) }, []), ' older sightings without');
+    } else {
+      text.textContent = ' ' + st.done + ' done' + (st.failed ? ' · ' + st.failed + ' unavailable' : '');
+    }
+    btn.dataset.run = running ? '0' : '1';
+    btn.textContent = running ? 'pause' : 'backfill stacks';
+    btn.hidden = !running && st.ready === 0;
+    if (running && !timer) {
+      timer = setInterval(async () => {
+        try { render(await SC.fetchJson('/enrich/backfill.json')); } catch (e) { /* next tick */ }
+      }, 30000);
+    } else if (!running && timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      const st = await post('/enrich/backfill', { run: btn.dataset.run === '1' });
+      render(st);
+      SC.toast(st.queued ? 'backfill queued: ' + st.queued + ' sightings' : 'backfill paused');
+    } catch (e) {
+      SC.toast('backfill failed: ' + e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  if (btn.dataset.run === '0') {
+    SC.fetchJson('/enrich/backfill.json').then(render).catch(() => {});
+  }
+})();
