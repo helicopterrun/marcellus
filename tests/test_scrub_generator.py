@@ -4062,3 +4062,261 @@ def test_cycle_stats_count_db_commits_and_expose_new_fields(env: Settings) -> No
         "db_commits=", "db_commit_s=", "pass3_aged=", "pass3_derived=", "derived_live_cells=",
     ):
         assert key in summary
+
+
+def test_aged_tier_skips_dead_spans_and_keeps_growing_one_bucket(
+    growing_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recent-tier row that decimates to nothing (here: a bucket row with no
+    sheets) sorts ahead of every live span. It used to be re-tried at the head
+    of every cycle's budget -- prod's street camera spent whole cycles on 116
+    of them, zero frames, for four days -- and `resume` was aimed at it, so it
+    never attached to last cycle's open bucket and each cycle opened a fresh
+    one (6 adjacent open buckets in 6 cycles).
+
+    Now the dead span is remembered and skipped, and the writer resumes at
+    the first span that yields frames: two passes grow ONE bucket/sheet.
+    """
+    base = 1_800_000_000.0
+    collapsed = growing_env.model_copy(
+        update={"scrub": growing_env.scrub.model_copy(update={"aged_after_h": 1_000_000.0})}
+    )
+    conn = db.open_joined(growing_env.frigate.db_path, growing_env.sidecar.db_path)
+    tried: list[tuple[float, float]] = []
+    inner = generator._decimate_source
+
+    async def _counting(*a: object, **kw: object) -> list[object]:
+        tried.append((float(kw["window_start"]), float(kw["window_end"])))  # type: ignore[arg-type]
+        return await inner(*a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(generator, "_decimate_source", _counting)
+    try:
+        # The dead span: a 1s bucket row well before the footage, no sheets.
+        db.upsert_scrub_bucket(
+            conn, camera="doorbell", start_ts=base - 100.0, end_ts=base - 70.0,
+            interval_s=1.0, width=320, height=180, generated_through=base - 71.0,
+            complete=True,
+        )
+        conn.commit()
+        dead = (base - 100.0, base - 70.0)
+        profile = generator.SourceProfile()
+        passes = []
+        for recent_through in (base + 30.0, base + 60.0):
+            asyncio.run(
+                generator.generate_camera(
+                    collapsed, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                    now=recent_through, profile=profile, sem=asyncio.Semaphore(3),
+                )
+            )
+            tried.clear()
+            passes.append(asyncio.run(
+                generator.generate_aged_tier(
+                    growing_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                    now=recent_through + 10.0, profile=profile,
+                )
+            ))
+            if recent_through == base + 30.0:
+                assert tried[0] == dead  # learned on the first pass...
+                assert dead in profile.dead_aged_spans["doorbell"]
+            else:
+                assert dead not in tried  # ...and skipped on the next
+        aged_buckets = [
+            b for b in db.list_scrub_buckets(conn, "doorbell", 0, 1_900_000_000)
+            if b["interval_s"] == 5.0
+        ]
+        aged_sheets = db.list_scrub_sheets(conn, "doorbell", 0, 1_900_000_000, interval=5.0)
+    finally:
+        conn.close()
+
+    assert all(not p["starved"] for p in passes)
+    assert len(aged_buckets) == 1, (
+        f"the second pass must extend the first bucket past the dead span: "
+        f"{[(b['start_ts'] - base, b['end_ts'] - base) for b in aged_buckets]}"
+    )
+    assert sorted({s["start_ts"] for s in aged_sheets}) == [base]
+    assert max(s["count"] for s in aged_sheets) == 12
+
+
+def test_dead_span_is_not_learned_when_the_deadline_emptied_it(
+    growing_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty result because the source scan ran out of time says nothing
+    about the span; marking it dead would lose real footage for the life of
+    the process. And a camera that got no span at all reports starved."""
+    base = 1_800_000_000.0
+    collapsed = growing_env.model_copy(
+        update={"scrub": growing_env.scrub.model_copy(update={"aged_after_h": 1_000_000.0})}
+    )
+    conn = db.open_joined(growing_env.frigate.db_path, growing_env.sidecar.db_path)
+    clock = _FakeClock()
+    try:
+        profile = generator.SourceProfile()
+        asyncio.run(
+            generator.generate_camera(
+                collapsed, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=base + 30.0, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
+
+        async def _out_of_time(*a: object, **kw: object) -> list[object]:
+            clock.t += 10.0  # the scan itself blows the deadline, returns nothing
+            return []
+
+        monkeypatch.setattr(generator, "_decimate_source", _out_of_time)
+        cut = asyncio.run(generator.generate_aged_tier(
+            growing_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+            now=base + 40.0, profile=profile, deadline=clock.t + 5.0,
+        ))
+        assert not profile.dead_aged_spans["doorbell"]
+        assert cut["starved"] is False  # it did get a span; time ran out inside it
+        starved = asyncio.run(generator.generate_aged_tier(
+            growing_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+            now=base + 40.0, profile=profile, deadline=clock.t - 1.0,
+        ))
+        assert starved["starved"] is True
+    finally:
+        conn.close()
+
+
+def test_pass3_starved_camera_leads_the_next_cycle(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A camera reached with no time left (aged tier `starved`) is not served:
+    the cursor stops on it so the next cycle starts there. Counting it rotated
+    it to the back behind whichever camera eats the budget -- prod's
+    gate-walkway and stairway-wide logged tried=0 behind street."""
+    env = _late_cycle_env(long_history_env, decimation_min_share_s=3.0)
+    _add_garden_segments(env)
+    clock = _FakeClock()
+    monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
+
+    async def _live(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "segments": 0, "new_frames": 0}
+
+    async def _noop_backfill(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "segments": 0, "new_frames": 0, "backfilled": False}
+
+    order: list[str] = []
+
+    async def _aged(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        order.append(camera)
+        if len(order) == 1:
+            clock.t = float(kw["deadline"]) - 0.001  # type: ignore[arg-type]  # eats it all
+            return {"camera": camera, "new_frames": 5, "starved": False}
+        clock.t = float(kw["deadline"])  # type: ignore[arg-type]
+        return {"camera": camera, "new_frames": 0, "starved": True}
+
+    async def _noop_derived(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "new_frames": 0, "tiers_touched": 0}
+
+    monkeypatch.setattr(generator, "generate_live_edge", _live)
+    monkeypatch.setattr(generator, "generate_backfill", _noop_backfill)
+    monkeypatch.setattr(generator, "generate_aged_tier", _aged)
+    monkeypatch.setattr(generator, "generate_derived", _noop_derived)
+    monkeypatch.setattr(generator, "_retire_stale_recent_buckets", lambda *a, **k: None)
+
+    profile = generator.SourceProfile()
+    asyncio.run(generator.generate_cycle(
+        env, now=1_800_000_000.0 + 86400.0, profile=profile, backfill_deadline=clock.t + 20.0,
+    ))
+    assert len(order) == 2, order
+    starved_camera = order[1]
+    order.clear()
+    asyncio.run(generator.generate_cycle(
+        env, now=1_800_000_000.0 + 86400.0, profile=profile, backfill_deadline=clock.t + 20.0,
+    ))
+    assert order[0] == starved_camera, order
+
+
+def test_read_error_never_marks_a_span_dead(
+    growing_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_decimate_source` swallows an OSError per sheet (truncated file, a
+    brief lock, EMFILE) and can then return nothing. Marking that span dead
+    would drop real footage from the aged tier until restart -- and keep its
+    1s rows from ever retiring, since retirement waits on aged coverage."""
+    base = 1_800_000_000.0
+    collapsed = growing_env.model_copy(
+        update={"scrub": growing_env.scrub.model_copy(update={"aged_after_h": 1_000_000.0})}
+    )
+    conn = db.open_joined(growing_env.frigate.db_path, growing_env.sidecar.db_path)
+    try:
+        profile = generator.SourceProfile()
+        asyncio.run(
+            generator.generate_camera(
+                collapsed, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=base + 30.0, profile=profile, sem=asyncio.Semaphore(3),
+            )
+        )
+        real_open = generator.Image.open
+
+        def _emfile(*a: object, **kw: object) -> object:
+            raise OSError(24, "Too many open files")
+
+        monkeypatch.setattr(generator.Image, "open", _emfile)
+        failed = asyncio.run(generator.generate_aged_tier(
+            growing_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+            now=base + 40.0, profile=profile,
+        ))
+        assert failed["new_frames"] == 0
+        assert not profile.dead_aged_spans["doorbell"]
+
+        monkeypatch.setattr(generator.Image, "open", real_open)
+        healed = asyncio.run(generator.generate_aged_tier(
+            growing_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+            now=base + 40.0, profile=profile,
+        ))
+        assert healed["new_frames"] > 0
+    finally:
+        conn.close()
+
+
+def test_dead_marks_expire_and_match_by_containment(
+    growing_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mark covers any span inside it -- the oldest span's start is the
+    retention cutoff, which moves every cycle, so exact tuples never match
+    again -- and expires after `_DEAD_SPAN_TTL_S`, capping a wrong mark at
+    hours instead of until restart."""
+    base = 1_800_000_000.0
+    conn = db.open_joined(growing_env.frigate.db_path, growing_env.sidecar.db_path)
+    tried: list[tuple[float, float]] = []
+    inner = generator._decimate_source
+
+    async def _counting(*a: object, **kw: object) -> list[object]:
+        tried.append((float(kw["window_start"]), float(kw["window_end"])))  # type: ignore[arg-type]
+        return await inner(*a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(generator, "_decimate_source", _counting)
+    clock = _FakeClock()
+    monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
+    try:
+        db.upsert_scrub_bucket(
+            conn, camera="doorbell", start_ts=base - 100.0, end_ts=base - 70.0,
+            interval_s=1.0, width=320, height=180, generated_through=base - 71.0,
+            complete=True,
+        )
+        conn.commit()
+        span = (base - 100.0, base - 70.0)
+        profile = generator.SourceProfile()
+
+        def _pass() -> None:
+            tried.clear()
+            asyncio.run(generator.generate_aged_tier(
+                growing_env, "doorbell", frigate_conn=conn, sidecar_conn=conn,
+                now=base + 10.0, profile=profile,
+            ))
+
+        # A wider, older mark (as last cycle's cutoff-anchored span would be)
+        # still covers today's narrower span.
+        profile.dead_aged_spans["doorbell"] = {(base - 110.0, base - 70.0): clock.t}
+        _pass()
+        assert span not in tried
+
+        clock.t += generator._DEAD_SPAN_TTL_S  # the mark has expired...
+        _pass()
+        assert span in tried  # ...so it is retried, and re-learned
+        assert profile.dead_aged_spans["doorbell"] == {span: clock.t}
+    finally:
+        conn.close()
