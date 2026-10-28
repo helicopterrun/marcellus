@@ -1648,6 +1648,87 @@ def test_retire_removes_a_span_the_aged_tier_already_covers(env: Settings) -> No
     )
 
 
+def _aged_rows(*spans: tuple[float, float]) -> list[dict[str, float]]:
+    return [{"start_ts": a, "end_ts": b} for a, b in spans]
+
+
+def test_aged_gate_tolerates_a_gap_of_one_interval_but_not_two() -> None:
+    rows = _aged_rows((0.0, 10.0), (15.0, 50.0))
+    for cov in (
+        lambda a, b: generator._AgedCoverage(rows, tolerance_s=5.0).covers(a, b),
+        lambda a, b: generator._span_covered_by_aged(rows, a, b, tolerance_s=5.0),  # type: ignore[arg-type]
+    ):
+        assert cov(11.0, 50.0)
+        assert cov(0.0, 50.0)
+    wide = _aged_rows((0.0, 10.0), (20.0, 50.0))  # 10 s gap
+    assert not generator._AgedCoverage(wide, tolerance_s=5.0).covers(0.0, 50.0)
+    assert not generator._span_covered_by_aged(wide, 0.0, 50.0, tolerance_s=5.0)  # type: ignore[arg-type]
+    # Strict (tolerance 0) is unchanged.
+    assert not generator._AgedCoverage(rows).covers(0.0, 50.0)
+    # No aged data anywhere near a tiny span is never "covered".
+    assert not generator._AgedCoverage([], tolerance_s=5.0).covers(0.0, 3.0)
+
+
+def test_aged_gate_accepts_what_uncovered_spans_would_not_report(env: Settings) -> None:
+    """The retire gate and `uncovered_spans` must share one hole rule."""
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        for a, b in ((0.0, 100.0), (105.0, 200.0)):
+            db.upsert_scrub_bucket(
+                conn, camera="doorbell", start_ts=a, end_ts=b, interval_s=5.0,
+                width=320, height=180, generated_through=b, complete=True,
+            )
+        conn.commit()
+        assert generator.uncovered_spans(conn, "doorbell", 5.0, 0.0, 200.0) == []
+        rows = conn.execute(
+            "SELECT start_ts, end_ts FROM scrub_buckets WHERE interval_s = 5.0 ORDER BY start_ts"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert generator._AgedCoverage(rows, tolerance_s=5.0).covers(0.0, 200.0)
+
+
+def test_retire_removes_buckets_across_an_aged_seam_hole(env: Settings) -> None:
+    """1 s buckets [0,100) and [101,200) with the aged tier's ~5 s seam hole
+    (100-105): both buckets and all their sheets retire once past the boundary."""
+    cache = env.scrub.cache_dir
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        for a, b in ((0.0, 100.0), (101.0, 200.0)):
+            db.upsert_scrub_bucket(
+                conn, camera="doorbell", start_ts=a, end_ts=b, interval_s=1.0,
+                width=320, height=180, generated_through=b, complete=True,
+            )
+        for a, b in ((0.0, 100.0), (105.0, 200.0)):
+            db.upsert_scrub_bucket(
+                conn, camera="doorbell", start_ts=a, end_ts=b, interval_s=5.0,
+                width=320, height=180, generated_through=b, complete=True,
+            )
+        paths = []
+        for start in (0.0, 50.0, 101.0, 150.0):
+            rel = f"doorbell/1.0/{int(start)}.webp"
+            (cache / rel).parent.mkdir(parents=True, exist_ok=True)
+            (cache / rel).write_bytes(b"x")
+            paths.append(cache / rel)
+            db.upsert_scrub_sheet(
+                conn, camera="doorbell", start_ts=start, interval_s=1.0, cols=10, rows=10,
+                cell_w=320, cell_h=180, count=50, path=rel, complete=True,
+            )
+        conn.commit()
+
+        generator._retire_stale_recent_buckets(
+            conn, cache, "doorbell", recent_interval_s=1.0,
+            boundary=300.0, aged_interval_s=5.0,
+        )
+        left_b = conn.execute("SELECT 1 FROM scrub_buckets WHERE interval_s = 1.0").fetchall()
+        left_s = conn.execute("SELECT 1 FROM scrub_sheets WHERE interval_s = 1.0").fetchall()
+    finally:
+        conn.close()
+    assert left_b == []
+    assert left_s == []
+    assert not any(p.exists() for p in paths)
+
+
 # ----- Cadence matching: don't full-decode what the source can't provide -----
 
 

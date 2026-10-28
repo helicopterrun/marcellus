@@ -141,13 +141,8 @@ def _require_series(start: float, end: float, scale: float) -> None:
         )
 
 
-def _require_known_camera(request: Request, camera: str) -> None:
-    settings = request.app.state.settings
-    conn = db.open_frigate_ro(settings.frigate.db_path)
-    try:
-        known = _known_cameras(request.app.state, conn)
-    finally:
-        conn.close()
+async def _require_known_camera(request: Request, camera: str) -> None:
+    known = await known_cameras_async(request.app.state, request.app.state.settings)
     if camera not in known:
         raise HTTPException(
             status_code=404,
@@ -301,16 +296,21 @@ async def coverage(camera: str, start: float, end: float, request: Request) -> A
     settings = request.app.state.settings
     _require_window(start, end)
 
-    conn = db.open_frigate_ro(settings.frigate.db_path)
-    try:
-        if camera not in _known_cameras(request.app.state, conn):
-            raise HTTPException(
-                status_code=404,
-                detail={"error": _ERR_CAMERA_UNKNOWN, "message": f"no such camera: {camera}"},
-            )
-        result = db.recording_coverage(conn, camera, start, end, now=time.time())
-    finally:
-        conn.close()
+    def _read() -> dict[str, Any] | None:
+        conn = db.open_frigate_ro(settings.frigate.db_path)
+        try:
+            if camera not in _known_cameras(request.app.state, conn):
+                return None
+            return db.recording_coverage(conn, camera, start, end, now=time.time())
+        finally:
+            conn.close()
+
+    result = await asyncio.to_thread(_read)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": _ERR_CAMERA_UNKNOWN, "message": f"no such camera: {camera}"},
+        )
 
     # Named for what it is. `retention_days` here was the *scrub cache's*
     # horizon on an endpoint otherwise entirely about what Frigate recorded, and
@@ -347,7 +347,7 @@ async def scrub_coverage(camera: str, start: float, end: float, request: Request
     """
     settings = request.app.state.settings
     _require_window(start, end)
-    _require_known_camera(request, camera)
+    await _require_known_camera(request, camera)
 
     # Derived tiers (settings.scrub.derived_intervals_s) deliberately overlap
     # the recent/aged decode tiers in time, and each other. `list_scrub_buckets`
@@ -397,7 +397,7 @@ async def scrub_sheets(
     """
     settings = request.app.state.settings
     _require_window(start, end)
-    _require_known_camera(request, camera)
+    await _require_known_camera(request, camera)
 
     sheet_rows = await db.with_sidecar(
         settings.sidecar.db_path,
@@ -439,7 +439,7 @@ async def _resolve_sheet(request: Request, camera: str, spec: str) -> tuple[dict
     """Shared lookup for the whole-sheet and single-cell routes: camera check,
     spec parse, DB row, on-disk path. Raises 404 for anything unknown/missing."""
     settings = request.app.state.settings
-    _require_known_camera(request, camera)
+    await _require_known_camera(request, camera)
     try:
         start, interval, count = grid.parse_sheet_spec(spec)
     except ValueError as exc:
@@ -669,7 +669,7 @@ async def motion(camera: str, start: float, end: float, scale: float, request: R
     Frigate's two measured cliffs (all-zero wide scale, short-window
     truncation) by fetching at a safe scale and aggregating ourselves."""
     _require_series(start, end, scale)
-    _require_known_camera(request, camera)
+    await _require_known_camera(request, camera)
     values, unavailable = await _fetch_and_aggregate_motion(request, camera, start, end, scale)
     body: dict[str, Any] = {"start": start, "interval": scale, "values": values}
     if unavailable:
