@@ -19,6 +19,7 @@ failed with EXDEV and were silently swallowed, leaving black sheets.
 from __future__ import annotations
 
 import asyncio
+import bisect
 import contextlib
 import logging
 import os
@@ -548,20 +549,79 @@ def _reap_orphaned_publish_temp(cache_dir: Path, *, now: float, max_age_s: float
 
 
 def _span_covered_by_aged(
-    aged_rows: list[sqlite3.Row], start_ts: float, end_ts: float
+    aged_rows: list[sqlite3.Row],
+    start_ts: float,
+    end_ts: float,
+    tolerance_s: float = 0.0,
 ) -> bool:
-    """Whether `aged_rows` (sorted by `start_ts`) together cover `[start_ts,
-    end_ts)` with no gap. Adjacent/overlapping rows merge; a gap anywhere in
-    the span, or no aged coverage at all, means the span is not covered.
+    """Reference (brute-force) coverage check: whether `aged_rows` (sorted by
+    `start_ts`) together cover `[start_ts, end_ts)`.
+
+    Adjacent/overlapping rows merge. With `tolerance_s == 0` any gap, or no
+    aged coverage at all, means not covered. With `tolerance_s > 0` (the aged
+    interval -- the same "a hole narrower than one interval can't hold a
+    frame" rule `uncovered_spans` applies) a gap breaks coverage only when
+    `next.start > covered_through + tolerance_s`, the span's end is satisfied
+    at `covered_through >= end - tolerance_s`, and at least one aged row must
+    touch the span's tolerance-widened neighbourhood (so a span narrower than
+    the tolerance is never "covered" by nothing at all).
     """
     covered_through = start_ts
     for row in aged_rows:
-        if row["start_ts"] > covered_through:
+        if row["start_ts"] > covered_through + tolerance_s:
             break
         covered_through = max(covered_through, row["end_ts"])
-        if covered_through >= end_ts:
-            return True
-    return covered_through >= end_ts
+    if covered_through < end_ts - tolerance_s:
+        return False
+    if tolerance_s > 0 and start_ts < end_ts:
+        return any(
+            r["end_ts"] > start_ts - tolerance_s and r["start_ts"] < end_ts + tolerance_s
+            for r in aged_rows
+        )
+    return True
+
+
+class _AgedCoverage:
+    """`aged_rows` merged once into sorted disjoint intervals, so "is this span
+    fully covered" is a `bisect` instead of a scan from the first aged row.
+
+    Same semantics as `_span_covered_by_aged`, including `tolerance_s`: rows
+    whose gap is at most the tolerance merge, and the span's end is satisfied
+    within the tolerance.
+    """
+
+    def __init__(self, aged_rows: Sequence[Any], tolerance_s: float = 0.0) -> None:
+        self._tol = tolerance_s
+        spans = sorted((r["start_ts"], r["end_ts"]) for r in aged_rows)
+        starts: list[float] = []
+        ends: list[float] = []
+        for s, e in spans:
+            if ends and s <= ends[-1] + tolerance_s:
+                if e > ends[-1]:
+                    ends[-1] = e
+            else:
+                starts.append(s)
+                ends.append(e)
+        # Raw (unmerged) extents, for the tolerance>0 "something touches" test.
+        self._starts = starts
+        self._ends = ends
+
+    def covers(self, start_ts: float, end_ts: float) -> bool:
+        tol = self._tol
+        i = bisect.bisect_right(self._starts, start_ts + tol) - 1
+        covered = start_ts
+        if i >= 0:
+            covered = max(covered, self._ends[i])
+        if covered < end_ts - tol:
+            return False
+        if tol > 0 and start_ts < end_ts:
+            # Some aged data must touch the span's neighbourhood. Merged
+            # intervals can be wider than raw rows by up to `tol` only at their
+            # joins, which are themselves inside the data's extent, so testing
+            # the merged intervals is equivalent to testing the rows.
+            j = bisect.bisect_right(self._ends, start_ts - tol)
+            return j < len(self._starts) and self._starts[j] < end_ts + tol
+        return True
 
 
 def _retire_stale_recent_buckets(
@@ -588,7 +648,12 @@ def _retire_stale_recent_buckets(
     are still on disk within retention.
 
     `aged_interval_s`, when given, gates retirement on the aged tier already
-    covering the stale bucket's exact span: backfill runs on its own budget
+    covering the stale bucket's span -- allowing a gap of at most one aged
+    interval, the same tolerance `uncovered_spans` applies (the 5 s tier has a
+    ~5 s hole at nearly every 1 s bucket seam because `_decimate_source` keeps
+    only the cell exactly on the aged grid; a strict gate never opened: 0 of
+    thousands of buckets retirable). Nothing looser than one interval, so the
+    original protection holds: backfill runs on its own budget
     and can lag behind the boundary by cycles, and retiring the recent-tier
     data before the aged tier has regenerated it erases that span with
     nothing to refill it from at the finer cadence -- measured live as a
@@ -610,10 +675,11 @@ def _retire_stale_recent_buckets(
             "WHERE camera = ? AND interval_s = ? ORDER BY start_ts",
             (camera, aged_interval_s),
         ).fetchall()
+        coverage = _AgedCoverage(aged_rows, tolerance_s=aged_interval_s)
         retirable_ranges = [
             (r["start_ts"], r["end_ts"])
             for r in stale
-            if _span_covered_by_aged(aged_rows, r["start_ts"], r["end_ts"])
+            if coverage.covers(r["start_ts"], r["end_ts"])
         ]
     else:
         retirable_ranges = [(r["start_ts"], r["end_ts"]) for r in stale]
@@ -2125,6 +2191,7 @@ async def generate_aged_tier(
     holes = uncovered_spans(sidecar_conn, camera, aged_interval_s, retention_cutoff, boundary)
     if not holes:
         return {"camera": camera, "new_frames": 0}
+    hole_desc = f"{len(holes)} hole(s) first={holes[0][0]:.2f}-{holes[0][1]:.2f}"
 
     # Not filtered on the bucket-row `complete` flag: that marks a bucket as
     # sealed (never receiving more frames), which the live-edge's own
@@ -2138,6 +2205,10 @@ async def generate_aged_tier(
         (camera, recent_interval_s),
     ).fetchall()
     if not recent_rows:
+        logger.info(
+            "scrub: aged tier %s: %s but no %gs recent-tier buckets to decimate from",
+            camera, hole_desc, recent_interval_s,
+        )
         return {"camera": camera, "new_frames": 0}
 
     cell_w, cell_h = await camera_cell_size(
@@ -2164,6 +2235,12 @@ async def generate_aged_tier(
         if min(h_end, r_end) > max(h_start, r_start)
     )
     if not spans:
+        logger.info(
+            "scrub: aged tier %s: %s but none overlap a %gs recent-tier bucket "
+            "(%d recent rows, first=%.2f last_end=%.2f)",
+            camera, hole_desc, recent_interval_s, len(recent_rows),
+            recent_rows[0]["start_ts"], recent_rows[-1]["end_ts"],
+        )
         return {"camera": camera, "new_frames": 0}
 
     # Window is the whole aged tier, not one span: this writer outlives each
@@ -2178,13 +2255,19 @@ async def generate_aged_tier(
     # Resume at the first span's start -- that is where last cycle's open
     # bucket ends, which is the bucket this pass has to keep growing.
     writer.resume(spans[0][0])
+    resume_before = writer._generated_through
+    attached = writer._bucket_start is not None
 
     new_frames = 0
+    spans_tried = spans_with_frames = frames_in = accepted_total = 0
+    deadline_hit = False
     with tempfile.TemporaryDirectory(prefix="age-", dir=_work_root(scrub.cache_dir)) as td:
         work_dir = Path(td)
         for span_start, span_end in spans:
             if deadline is not None and time.monotonic() >= deadline:
+                deadline_hit = True
                 break
+            spans_tried += 1
             frames = await _decimate_source(
                 sidecar_conn, scrub.cache_dir, camera,
                 finer_interval_s=recent_interval_s, derived_interval_s=aged_interval_s,
@@ -2193,12 +2276,27 @@ async def generate_aged_tier(
             )
             if not frames:
                 continue
-            await writer.feed(frames)
+            spans_with_frames += 1
+            frames_in += len(frames)
+            accepted_total += await writer.feed(frames)
             new_frames += len(frames)
     # Publishes the still-filling sheet and leaves its bucket open, including
     # when the loop stopped on the deadline: cells live under `cache_dir`, not
     # `work_dir`, so this is safe outside the temp directory.
     await writer.flush()
+    # One line per camera per cycle that had aged-tier work (a non-empty span
+    # list), which is also every cycle a tier is stuck: `frames_in` > 0 with
+    # `accepted` == 0 means `feed` is rejecting what the source returns
+    # (resume slot / window), `frames_in` == 0 means the source sheets are
+    # missing or off the grid.
+    logger.info(
+        "scrub: aged tier %s: %s spans=%d first=%.2f-%.2f tried=%d with_frames=%d "
+        "source_frames=%d fed_accepted=%d resume_attached=%s resume_before=%.2f "
+        "resume_after=%.2f%s",
+        camera, hole_desc, len(spans), spans[0][0], spans[0][1], spans_tried,
+        spans_with_frames, frames_in, accepted_total, attached, resume_before,
+        writer._generated_through, " deadline" if deadline_hit else "",
+    )
     return {"camera": camera, "new_frames": new_frames}
 
 

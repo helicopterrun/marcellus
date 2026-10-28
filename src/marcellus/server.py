@@ -8,9 +8,9 @@ import logging
 import os
 import shutil
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -101,6 +101,8 @@ class _CachedStaticFiles(StaticFiles):
 # owns and therefore gates behind a Frigate session (auth.py).
 _PROXY_CATCH_ALL = "/{path:path}"
 
+T = TypeVar("T")
+
 logger = logging.getLogger(__name__)
 
 # Rate-limit for the low-disk-space skip warning below -- a full disk would
@@ -136,6 +138,49 @@ def _below_free_space_floor(cache_dir: Path, min_free_bytes: int) -> bool:
                 cache_dir,
             )
         return False
+
+
+async def run_in_worker_loop(coro: Coroutine[Any, Any, T]) -> T:
+    """Run `coro` to completion on a private event loop in a worker thread.
+
+    The scrub generation cycle does a lot of synchronous sqlite/filesystem/CPU
+    work between its awaits (measured on prod: 5-13 s of loop-blocking CPU in
+    the Pass 3 retire step). Awaited on uvicorn's loop it starves every
+    request for that long; on its own loop, only the cycle stalls. The
+    coroutine must not touch objects bound to the main loop -- `generate_cycle`
+    builds its own semaphore, sqlite connection and subprocesses, and shares
+    only the plain-data `SourceProfile`, which only the (sequential) cycles use.
+
+    Cancelling the awaiting task cancels the inner task on its own loop and
+    waits for the thread to unwind, so shutdown stays prompt and no ffmpeg
+    child is orphaned.
+    """
+    loop = asyncio.new_event_loop()
+    task = loop.create_task(coro)
+
+    def _run() -> T:
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(task)
+        finally:
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            finally:
+                asyncio.set_event_loop(None)
+                loop.close()
+
+    fut = asyncio.ensure_future(asyncio.to_thread(_run))
+    try:
+        return await asyncio.shield(fut)
+    except asyncio.CancelledError:
+        if not fut.done():
+            # We were cancelled from outside: stop the inner task on its own
+            # loop, then wait for the thread to unwind before propagating.
+            with contextlib.suppress(RuntimeError):  # loop already closed
+                loop.call_soon_threadsafe(task.cancel)
+            with contextlib.suppress(BaseException):
+                await fut
+        raise
 
 
 async def _scrub_generation_loop(app: FastAPI) -> None:
@@ -192,8 +237,10 @@ async def _scrub_generation_loop(app: FastAPI) -> None:
         else:
             app.state.scrub_low_disk = False
             try:
-                await generate_cycle(
-                    settings, now=time.time(), profile=profile, backfill_deadline=deadline
+                await run_in_worker_loop(
+                    generate_cycle(
+                        settings, now=time.time(), profile=profile, backfill_deadline=deadline
+                    )
                 )
             except Exception:
                 logger.exception("scrub: generation cycle failed")
