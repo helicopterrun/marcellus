@@ -1834,17 +1834,23 @@ def test_reel_late_motion_lands_in_cache_for_next_request(
     its result completes the next request for that window, even while
     Frigate is still slow."""
     import asyncio as _asyncio
+    import threading
 
     _skip_auth(monkeypatch)
     client.app.state.settings.scrub.reel_motion_deadline_s = 0.1  # type: ignore[attr-defined]
     calls = 0
+    # The fetch stays slow until the test says otherwise. A fixed sleep made
+    # "the second request joins the in-flight fetch" a race against how fast
+    # the box serves two requests -- lost on the shared 4-core NVR host.
+    release = threading.Event()
 
     async def _slow(
         request: object, camera: str, start: float, end: float, scale: float
     ) -> tuple[list[float], bool]:
         nonlocal calls
         calls += 1
-        await _asyncio.sleep(0.4)
+        while not release.is_set():
+            await _asyncio.sleep(0.01)
         return [7.0] * int((end - start) / scale), False
 
     monkeypatch.setattr(scrub_routes, "_fetch_and_aggregate_motion", _slow)
@@ -1861,6 +1867,7 @@ def test_reel_late_motion_lands_in_cache_for_next_request(
         assert joined["motion_unavailable"] is True
         assert calls == 1
 
+        release.set()
         flight = c.app.state.reel_motion_flight  # type: ignore[attr-defined]
         deadline = time.monotonic() + 3.0
         while flight.inflight_count() and time.monotonic() < deadline:
