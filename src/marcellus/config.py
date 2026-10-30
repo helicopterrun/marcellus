@@ -241,6 +241,22 @@ class FaceCaptureSection(BaseModel):
     min_face_score: float = 0.6
     face_pad: float = 0.4  # square face crop, padded by this fraction per side
 
+    # Event sampling (face gate on only): when the capture camera has its own
+    # person event within event_window_s of the trigger, sample up to
+    # event_max_samples frames spread across that event (at least
+    # event_min_gap_s apart) in addition to the offsets_s ladder, and keep the
+    # visit's keep_per_visit best faces (area x score); the other face frames
+    # settle as status='skipped'. No such event -> the ladder alone.
+    # Replayed 2026-10-30 against recordings for all 213 visits of the prior
+    # 30 days: 141 had a capture-camera event within 30s; event samples found
+    # a face in 89 visits vs 45 for the gated ladder (47 new, 3 the ladder
+    # caught on short events and the spread samples stepped over -- hence the
+    # union). ~7 samples per event visit; 98 of 141 hit the cap of 8.
+    event_window_s: float = 30.0
+    event_max_samples: int = 8
+    event_min_gap_s: float = 1.0
+    keep_per_visit: int = 3
+
     # Preview longest edge / quality. ~480px keeps a 60-card grid under ~2 MB
     # while staying big enough to recognise a face without opening the full frame.
     thumb_max_edge: int = 480

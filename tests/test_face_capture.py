@@ -397,7 +397,8 @@ def test_face_gate_drops_faceless_frames_without_writing_them(
     s = _settings(tmp_path, frigate_db_with_visit)
 
     out = crosscam.scan(s, now=1_000_000.0 + 2000, detector=lambda raw: [])
-    assert out["no_face"] == 6 and out["captured"] == 0
+    # d1: ladder (3) + 8 spread across c1; d2 has no capture-cam event (3)
+    assert out["no_face"] == 14 and out["captured"] == 0
     assert not list(Path(s.face_capture.output_dir).rglob("*.jpg"))
 
     # no_face is terminal: a re-run never refetches those samples
@@ -413,7 +414,7 @@ def test_face_gate_rejects_faces_under_min_score(
     s = _settings(tmp_path, frigate_db_with_visit)
     weak = [(_FACE[0], 0.55)]
     out = crosscam.scan(s, now=1_000_000.0 + 2000, detector=lambda raw: weak)
-    assert out["no_face"] == 6 and out["captured"] == 0
+    assert out["no_face"] == 14 and out["captured"] == 0
 
 
 def test_face_gate_crops_the_thumbnail_to_the_face(
@@ -424,7 +425,8 @@ def test_face_gate_crops_the_thumbnail_to_the_face(
     _patch_client(monkeypatch, lambda req: httpx.Response(200, content=_jpeg(2560, 1440)))
     s = _settings(tmp_path, frigate_db_with_visit)
     out = crosscam.scan(s, now=1_000_000.0 + 2000, detector=lambda raw: [_FACE])
-    assert out["captured"] == 6 and out["no_face"] == 0
+    # keep_per_visit (3) from each visit; d1's other 8 face frames are skipped
+    assert out["captured"] == 6 and out["no_face"] == 0 and out["skipped"] == 8
 
     conn = db.open_sidecar(s.sidecar.db_path)
     try:
@@ -451,7 +453,7 @@ def test_face_gate_survives_a_detector_that_raises(
         raise RuntimeError("bad frame")
 
     out = crosscam.scan(s, now=1_000_000.0 + 2000, detector=boom)
-    assert out["no_face"] == 6 and out["error"] == 0
+    assert out["no_face"] == 14 and out["error"] == 0
 
 
 def _seed_ungated(
@@ -534,3 +536,113 @@ def test_regate_refuses_without_a_detector(
     s = _seed_ungated(tmp_path, frigate_db_with_visit, monkeypatch)
     out = crosscam.regate(s)  # face_gate is off in _settings
     assert out.get("error") and out["checked"] == 0
+
+
+# --------------------------------------------------------------------------
+# Event sampling
+# --------------------------------------------------------------------------
+
+
+def test_event_samples_spread_across_the_span_keyed_to_the_trigger() -> None:
+    out = crosscam.event_samples(
+        1000.0, (995.0, 1009.0), annotation_offset_ms=0, max_samples=8, min_gap_s=1.0
+    )
+    assert len(out) == 8
+    assert out[0].frame_ts == pytest.approx(995.0)
+    assert out[-1].frame_ts == pytest.approx(1009.0)
+    assert out[0].offset_ms == -5000 and out[-1].offset_ms == 9000
+    assert len({s.offset_ms for s in out}) == 8
+
+
+def test_event_samples_short_span_is_one_frame_and_applies_offset() -> None:
+    out = crosscam.event_samples(
+        1000.0, (1002.0, 1002.5), annotation_offset_ms=-500, max_samples=8, min_gap_s=1.0
+    )
+    assert [s.offset_ms for s in out] == [1750]
+
+
+def _span_db(rows: list[tuple[str, str, float, float | None]]) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(_FRIGATE_SCHEMA)
+    for eid, cam, st, et in rows:
+        conn.execute(
+            "INSERT INTO event (id,label,camera,start_time,end_time) VALUES (?,?,?,?,?)",
+            (eid, "person", cam, st, et),
+        )
+    return conn
+
+
+def test_capture_event_span_unions_and_clips_to_the_window() -> None:
+    conn = _span_db([
+        ("a", "gate-face", 980.0, 1004.0),
+        ("b", "gate-face", 1010.0, 1100.0),
+        ("x", "doorbell", 900.0, 1200.0),  # other camera: ignored
+        ("far", "gate-face", 1200.0, 1210.0),  # outside the window
+    ])
+    span = crosscam.capture_event_span(
+        conn, camera="gate-face", labels=["person"], trigger_ts=1000.0, window_s=30.0
+    )
+    assert span == (980.0, 1030.0)
+
+
+def test_capture_event_span_open_event_runs_to_window_edge_and_none_when_absent() -> None:
+    conn = _span_db([("a", "gate-face", 1005.0, None)])
+    assert crosscam.capture_event_span(
+        conn, camera="gate-face", labels=["person"], trigger_ts=1000.0, window_s=30.0
+    ) == (1005.0, 1030.0)
+    assert crosscam.capture_event_span(
+        conn, camera="doorbell", labels=["person"], trigger_ts=1000.0, window_s=30.0
+    ) is None
+
+
+def test_event_sampling_keeps_the_biggest_faces(
+    tmp_path: Path, frigate_db_with_visit: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_client(monkeypatch, lambda req: httpx.Response(200, content=_jpeg(640, 360)))
+    s = _settings(tmp_path, frigate_db_with_visit)
+    s.face_capture.keep_per_visit = 2
+    sizes = iter([0.02, 0.10, 0.04, 0.08, 0.01, 0.03, 0.05, 0.06])
+
+    def det(raw: bytes) -> list[tuple[crosscam.NormBox, float]]:
+        w = next(sizes, 0.01)
+        return [((0.4, 0.2, 0.4 + w, 0.2 + w), 0.9)]
+
+    out = crosscam.scan(s, now=1_000_000.0 + 2000, detector=det)
+    assert out["event_sampled"] == 1  # d1 only; d2 has no capture-cam event
+    conn = db.open_sidecar(s.sidecar.db_path)
+    try:
+        widths = sorted(
+            round(json.loads(r["face_box"])[2] - json.loads(r["face_box"])[0], 2)
+            for r in conn.execute(
+                "SELECT face_box FROM face_captures "
+                " WHERE status = 'captured' AND trigger_event_id = 'd1'"
+            )
+        )
+    finally:
+        conn.close()
+    assert widths == [0.08, 0.10]
+
+
+def test_a_visit_is_never_half_sampled_across_runs(
+    tmp_path: Path, frigate_db_with_visit: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec = _patch_client(monkeypatch, lambda req: httpx.Response(200, content=_jpeg(640, 360)))
+    s = _settings(tmp_path, frigate_db_with_visit)
+    s.face_capture.max_captures_per_run = 12  # d1 needs 11, d2 needs 3
+    first = crosscam.scan(s, now=1_000_000.0 + 2000, detector=lambda raw: [_FACE])
+    assert rec.calls == 11 and first["captured"] == 3
+    second = crosscam.scan(s, now=1_000_000.0 + 2000, detector=lambda raw: [_FACE])
+    assert rec.calls == 14 and second["captured"] == 3
+
+
+def test_detector_is_not_built_when_there_is_nothing_to_capture(
+    tmp_path: Path, frigate_db_with_visit: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_client(monkeypatch, lambda req: httpx.Response(200, content=_jpeg(64, 36)))
+    s = _settings(tmp_path, frigate_db_with_visit)
+    s.face_capture.face_gate = True
+    built: list[int] = []
+    monkeypatch.setattr(crosscam, "face_detector", lambda settings: built.append(1))
+    out = crosscam.scan(s, now=1_000_000.0 - 5000)  # before every event
+    assert out["candidates"] == 0 and built == []
