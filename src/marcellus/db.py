@@ -417,6 +417,9 @@ CREATE TABLE IF NOT EXISTS push_card_track_aliases (
 -- asks once face_capture.capture_delay_s has elapsed, which is what makes a 404
 -- at that point genuinely terminal.
 --
+-- `no_face` is terminal too: the face gate (face_capture.face_gate) found no
+-- face in the frame, so no file was kept and the row only stops a refetch.
+--
 -- NOTE for future edits: these columns arrive via CREATE TABLE IF NOT EXISTS,
 -- which is enough for a brand-new table. Any column ADDED later must go in BOTH
 -- this literal and `_ADDED_COLUMNS` below, or it is a production bug on every
@@ -443,6 +446,8 @@ CREATE TABLE IF NOT EXISTS face_captures (
     bytes             INTEGER,
     crop_event_id     TEXT,
     crop_box          TEXT,
+    face_box          TEXT,
+    face_score        REAL,
     review            TEXT NOT NULL DEFAULT 'pending',
     reviewed_at       TEXT,
     created_at        TEXT NOT NULL
@@ -924,6 +929,13 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # task; see push/mqtt.py's _log_task_exception) dropping the activity
         # after the APNs send had already gone out.
         ("dwell_seconds", "INTEGER NOT NULL DEFAULT 0"),
+    ],
+    "face_captures": [
+        # Face gate (2026-10-30): the SCRFD box ([x1, y1, x2, y2], normalized)
+        # and det score of the face the thumbnail is cropped to. Also in the
+        # CREATE TABLE literal above for fresh installs.
+        ("face_box", "TEXT"),
+        ("face_score", "REAL"),
     ],
     "face_enrichments": [
         # Soft-exclude (Wave 6B-2): added after face_enrichments first shipped.

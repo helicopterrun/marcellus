@@ -32,6 +32,34 @@ from marcellus import db
 # existed (indexes on these tables are unaffected and are NOT duplicated
 # here -- they're left in place from the current SIDECAR_SCHEMA text).
 _OLD_TABLES: dict[str, str] = {
+    "face_captures": """
+CREATE TABLE IF NOT EXISTS face_captures (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    trigger_event_id  TEXT NOT NULL,
+    trigger_camera    TEXT NOT NULL,
+    trigger_label     TEXT NOT NULL,
+    trigger_start_ts  REAL NOT NULL,
+    trigger_score     REAL,
+    visit_key         TEXT NOT NULL,
+    capture_camera    TEXT NOT NULL,
+    offset_ms         INTEGER NOT NULL,
+    frame_ts          REAL NOT NULL,
+    status            TEXT NOT NULL,
+    attempts          INTEGER NOT NULL DEFAULT 0,
+    http_status       INTEGER,
+    detail            TEXT,
+    full_path         TEXT,
+    thumb_path        TEXT,
+    width             INTEGER,
+    height            INTEGER,
+    bytes             INTEGER,
+    crop_event_id     TEXT,
+    crop_box          TEXT,
+    review            TEXT NOT NULL DEFAULT 'pending',
+    reviewed_at       TEXT,
+    created_at        TEXT NOT NULL
+);
+""",
     "triage_labels": """
 CREATE TABLE IF NOT EXISTS triage_labels (
     event_id   TEXT PRIMARY KEY,

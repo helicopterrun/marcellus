@@ -339,6 +339,19 @@ def face_capture_scan() -> None:
         raise typer.Exit(code=2)
 
 
+@face_capture_app.command("regate")
+def face_capture_regate(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Count only; change nothing."),
+) -> None:
+    """Apply the face gate to stored captures: drop faceless frames, re-crop the rest."""
+    from marcellus.faces import crosscam
+
+    out = crosscam.regate(load_settings(), dry_run=dry_run)
+    typer.echo(json.dumps(out))
+    if out.get("error"):
+        raise typer.Exit(code=2)
+
+
 @face_capture_app.command("prune")
 def face_capture_prune() -> None:
     """Drop captures past face_capture.retention_days."""

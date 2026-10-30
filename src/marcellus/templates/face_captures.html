@@ -21,7 +21,8 @@
     </span>
     {% if last_run %}
     <span class="mode" title="heartbeat from the systemd oneshot (it runs in another process)">
-      last run: {{ last_run.captured }} captured · {{ last_run.no_recording }} no-rec
+      last run: {{ last_run.captured }} captured · {{ last_run.no_face or 0 }} no face
+      · {{ last_run.no_recording }} no-rec
       · {{ last_run.error }} err · {{ last_run.deduped }} dedup
     </span>
     {% else %}
@@ -55,7 +56,8 @@
         </a>
         <figcaption>
           {{ '%+.1f'|format(c.offset_ms / 1000) }}s
-          {%- if c.cropped %} · <span title="cropped to the capture camera's own person box">head</span>{% endif %}
+          {%- if c.face_score %} · <span title="cropped to the detected face (SCRFD score)">face {{ '%.2f'|format(c.face_score) }}</span>
+          {%- elif c.cropped %} · <span title="cropped to the capture camera's own person box">head</span>{% endif %}
           {%- if c.width %} · {{ c.width }}×{{ c.height }}{% endif %}
           <span class="actions">
             <button type="button" class="keep" data-id="{{ c.id }}">keep</button>
