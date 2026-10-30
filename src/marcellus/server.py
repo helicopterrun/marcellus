@@ -441,18 +441,21 @@ async def _proxy_watchdog_loop(app: FastAPI) -> None:
 
     Two jobs on a fixed cadence: close any upstream response that has been
     open past its maximum life (`proxy.reap_stale_upstreams`, a leak), and run
-    the stalled-pool check that recycles the stream client (`check_stream_pool`)
-    -- which used to run only inside `/healthz`, and nothing on the NVR polls
-    that (2026-10-17: 64/64 connections wedged for 40 minutes).
+    the stalled-pool checks that recycle a stream client (`check_stream_pool`,
+    `check_vod_stream_pool`) -- which used to run only inside `/healthz`, and
+    nothing on the NVR polls that (2026-10-17: 64/64 connections wedged for
+    40 minutes).
     """
     from marcellus.routes import proxy as proxy_routes
-    from marcellus.routes.health import check_stream_pool
+    from marcellus.routes.health import check_stream_pool, check_vod_stream_pool
 
     while True:
         await asyncio.sleep(_PROXY_WATCHDOG_INTERVAL_S)
         try:
             await proxy_routes.reap_stale_upstreams(app)
-            check_stream_pool(app, time.time())
+            now = time.time()
+            check_stream_pool(app, now)
+            check_vod_stream_pool(app, now)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -810,9 +813,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         client = getattr(app.state, "http_client", None)
         if client is not None:
             await client.aclose()
-        stream_client = getattr(app.state, "stream_http_client", None)
-        if stream_client is not None:
-            await stream_client.aclose()
+        for attr in ("stream_http_client", "vod_stream_http_client"):
+            stream_client = getattr(app.state, attr, None)
+            if stream_client is not None:
+                await stream_client.aclose()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
