@@ -21,8 +21,11 @@ hours **{{stat:faces_captured_24h}}** frames were captured.
 
 Only frames with a detected face are kept (the **face gate**): a trigger
 often fires when nobody is in front of the capture camera yet, and without
-the gate those frames are just the street. Each kept frame's thumbnail is
-cropped to the face; click it for the full frame.
+the gate those frames are just the street. When the capture camera tracks the
+person itself, frames are also sampled across its own sighting, not only at
+fixed offsets from the trigger, so a visitor who reaches the gate a while
+after (or before) the trigger fires is still caught. Each kept frame's
+thumbnail is cropped to the face; click it for the full frame.
 
 The captures page groups by visit for fast review: keep the sharp frontal
 shots, discard the rest. Kept captures are the raw material the
@@ -64,6 +67,14 @@ shots, discard the rest. Kept captures are the raw material the
   the gate.
 - `face_pad` (default 0.4) — padding around the face crop, as a fraction of
   the face size per side.
+- `event_window_s` (default 30) — with the gate on, if the capture camera has
+  its own person event within this many seconds of the trigger, frames are
+  also sampled across that event, not only at `offsets_s`.
+- `event_max_samples` (default 8) — most frames sampled across that event.
+- `event_min_gap_s` (default 1.0) — minimum spacing between those samples,
+  in seconds.
+- `keep_per_visit` (default 3) — how many face frames a visit keeps, biggest
+  and most confident first; the rest are recorded as skipped.
 - `crop_to_bbox` — when no face crop is available (gate off), crop the
   preview thumbnail to the capture camera's own concurrent event box
   (default on).
