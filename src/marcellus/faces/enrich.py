@@ -510,7 +510,7 @@ class DetectedFace:
 class _Engine:
     """Lazy insightface FaceAnalysis wrapper, CPU-only, one per process."""
 
-    def __init__(self, model_dir: str) -> None:
+    def __init__(self, model_dir: str, *, detect_only: bool = False) -> None:
         try:
             import cv2  # noqa: F401
             import numpy  # noqa: F401
@@ -524,7 +524,9 @@ class _Engine:
             name="buffalo_l",
             root=model_dir,
             providers=["CPUExecutionProvider"],
-            allowed_modules=["detection", "recognition"],
+            # detect_only skips the 174 MB ArcFace pack; faces_in_jpeg needs
+            # it, detect_in_jpeg does not.
+            allowed_modules=["detection"] if detect_only else ["detection", "recognition"],
         )
         self._app.prepare(ctx_id=-1, det_size=(640, 640))
 
@@ -572,8 +574,28 @@ class _Engine:
             )
         return out
 
+    def detect_in_jpeg(self, jpeg: bytes) -> list[tuple[tuple[float, float, float, float], float]]:
+        """``[(normalized (x1, y1, x2, y2), det_score)]`` — SCRFD only, no embedding.
+
+        For callers that need "is there a face, and where" (crosscam's face
+        gate) without paying for ArcFace on every frame.
+        """
+        import cv2
+        import numpy as np
+
+        img = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            return []
+        h, w = img.shape[:2]
+        bboxes, _kps = self._app.det_model.detect(img, max_num=0, metric="default")
+        return [
+            ((float(b[0]) / w, float(b[1]) / h, float(b[2]) / w, float(b[3]) / h), float(b[4]))
+            for b in bboxes
+        ]
+
 
 _ENGINE: _Engine | None = None
+_DETECTOR: _Engine | None = None
 
 
 def _engine(model_dir: str) -> _Engine:
@@ -581,6 +603,18 @@ def _engine(model_dir: str) -> _Engine:
     if _ENGINE is None:
         _ENGINE = _Engine(model_dir)
     return _ENGINE
+
+
+def _detector(model_dir: str) -> _Engine:
+    """SCRFD alone, for callers that only call detect_in_jpeg (crosscam's
+    face gate runs in its own timer process, where loading ArcFace too would
+    cost ~170 MB for nothing). Reuses the full engine if one is loaded."""
+    global _DETECTOR
+    if _ENGINE is not None:
+        return _ENGINE
+    if _DETECTOR is None:
+        _DETECTOR = _Engine(model_dir, detect_only=True)
+    return _DETECTOR
 
 
 def check_available() -> None:

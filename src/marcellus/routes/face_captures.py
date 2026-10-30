@@ -83,6 +83,7 @@ def _group_visits(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "height": r.get("height"),
                 "bytes": r.get("bytes"),
                 "cropped": bool(r.get("crop_event_id")),
+                "face_score": r.get("face_score"),
                 "has_thumb": bool(r.get("thumb_path")),
                 "review": r.get("review"),
             }

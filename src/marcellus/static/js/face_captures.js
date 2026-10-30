@@ -43,7 +43,7 @@ if (rescan) {
         return;
       }
       const s = data.summary || {};
-      SC.toast(`captured ${s.captured || 0}, no-rec ${s.no_recording || 0}, dedup ${s.deduped || 0}`);
+      SC.toast(`captured ${s.captured || 0}, no face ${s.no_face || 0}, no-rec ${s.no_recording || 0}, dedup ${s.deduped || 0}`);
       setTimeout(() => window.location.reload(), 900);
     } finally {
       rescan.disabled = false;

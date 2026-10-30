@@ -223,6 +223,24 @@ class FaceCaptureSection(BaseModel):
     head_fraction: float = 0.4
     crop_pad: float = 0.25  # expand the head box by this fraction of its own w/h
 
+    # Face gate: run SCRFD (face_enrich's detector, the `[enrich]` extra) on
+    # every fetched frame and keep only frames with a face. A frame without
+    # one is recorded as status='no_face' and its JPEG is never written. A
+    # frame with one gets its thumbnail cropped to the largest such face,
+    # which replaces the person-box head crop above (that box is the event's
+    # single best-snapshot box, so it drifts off the person at the -4s/+4s
+    # samples).
+    # Measured 2026-10-30 over all 638 stored captures: 469 were uncropped
+    # whole frames (street and parked cars, nobody in view) of which 26 held a
+    # face; overall 97 frames held one at SCRFD's default 0.5. Every false
+    # positive (a car grille, gravel, a bush, a scalp) scored < 0.6, which
+    # keeps 85 frames / 46 visits of 52.
+    # Without the extra installed the gate logs an error and capture runs
+    # ungated, as before.
+    face_gate: bool = True
+    min_face_score: float = 0.6
+    face_pad: float = 0.4  # square face crop, padded by this fraction per side
+
     # Preview longest edge / quality. ~480px keeps a 60-card grid under ~2 MB
     # while staying big enough to recognise a face without opening the full frame.
     thumb_max_edge: int = 480

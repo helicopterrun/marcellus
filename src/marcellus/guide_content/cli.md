@@ -39,6 +39,9 @@ settings/config as the server, run one-off or from cron/systemd timers.
 
 - `scan` -- capture the ID camera's full-res frame for every new trigger
   event.
+- `regate --dry-run` -- apply the face gate to captures stored before it
+  existed: frames with no face are dropped, the rest are re-cropped to the
+  face. Captures marked *kept* are left alone.
 - `prune` -- drop captures past `face_capture.retention_days`.
 - `stats --days` -- counts by status/review plus the last-run heartbeat.
 

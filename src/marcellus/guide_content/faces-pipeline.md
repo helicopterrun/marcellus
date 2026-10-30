@@ -19,6 +19,11 @@ full-resolution frames from a paired **capture camera** (e.g. a
 doorbell-height camera aimed at the gate) during the visit. In the last 24
 hours **{{stat:faces_captured_24h}}** frames were captured.
 
+Only frames with a detected face are kept (the **face gate**): a trigger
+often fires when nobody is in front of the capture camera yet, and without
+the gate those frames are just the street. Each kept frame's thumbnail is
+cropped to the face; click it for the full frame.
+
 The captures page groups by visit for fast review: keep the sharp frontal
 shots, discard the rest. Kept captures are the raw material the
 [identity clustering](/guide/identities) stage feeds on.
@@ -52,8 +57,16 @@ shots, discard the rest. Kept captures are the raw material the
   up on (default 3).
 - `apply_annotation_offset` — fold the trigger camera's
   `detect.annotation_offset` into the sample timestamps (default on).
-- `crop_to_bbox` — crop the preview thumbnail to the capture camera's own
-  concurrent event box (default on).
+- `face_gate` (default on) — run the face detector on each frame and keep
+  only frames with a face, thumbnailed to that face. Needs the `[enrich]`
+  extra; without it, capture runs ungated and logs an error.
+- `min_face_score` (default 0.6) — detector score a face must reach to pass
+  the gate.
+- `face_pad` (default 0.4) — padding around the face crop, as a fraction of
+  the face size per side.
+- `crop_to_bbox` — when no face crop is available (gate off), crop the
+  preview thumbnail to the capture camera's own concurrent event box
+  (default on).
 - `head_fraction` — fraction of the person box's height, from its top,
   taken as the head crop (default 0.4).
 - `crop_pad` — expand the head crop box by this fraction of its own

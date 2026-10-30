@@ -207,6 +207,9 @@ def _settings(tmp_path: Path, frigate_db: Path) -> Settings:
     s.face_capture.capture_camera = "gate-face"
     s.face_capture.output_dir = tmp_path / "out"
     s.face_capture.apply_annotation_offset = False
+    # Never build the real SCRFD engine in tests: face-gate tests inject a
+    # fake detector, everything else runs ungated.
+    s.face_capture.face_gate = False
     return s
 
 
@@ -369,3 +372,165 @@ def test_prune_drops_old_rows_files_and_day_dirs(
         assert conn.execute("SELECT COUNT(*) c FROM face_captures").fetchone()["c"] == 0
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------
+# Face gate
+# --------------------------------------------------------------------------
+
+_FACE = ((0.40, 0.20, 0.46, 0.31), 0.83)
+
+
+def test_pick_face_takes_the_largest_face_above_the_floor() -> None:
+    small = ((0.1, 0.1, 0.12, 0.12), 0.95)
+    big = ((0.5, 0.5, 0.6, 0.65), 0.70)
+    big_but_weak = ((0.0, 0.0, 0.5, 0.5), 0.55)
+    assert crosscam.pick_face([small, big, big_but_weak], min_score=0.6) == big
+    assert crosscam.pick_face([big_but_weak], min_score=0.6) is None
+    assert crosscam.pick_face([], min_score=0.6) is None
+
+
+def test_face_gate_drops_faceless_frames_without_writing_them(
+    tmp_path: Path, frigate_db_with_visit: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec = _patch_client(monkeypatch, lambda req: httpx.Response(200, content=_jpeg(640, 360)))
+    s = _settings(tmp_path, frigate_db_with_visit)
+
+    out = crosscam.scan(s, now=1_000_000.0 + 2000, detector=lambda raw: [])
+    assert out["no_face"] == 6 and out["captured"] == 0
+    assert not list(Path(s.face_capture.output_dir).rglob("*.jpg"))
+
+    # no_face is terminal: a re-run never refetches those samples
+    first = rec.calls
+    crosscam.scan(s, now=1_000_000.0 + 2000, detector=lambda raw: [])
+    assert rec.calls == first
+
+
+def test_face_gate_rejects_faces_under_min_score(
+    tmp_path: Path, frigate_db_with_visit: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_client(monkeypatch, lambda req: httpx.Response(200, content=_jpeg(640, 360)))
+    s = _settings(tmp_path, frigate_db_with_visit)
+    weak = [(_FACE[0], 0.55)]
+    out = crosscam.scan(s, now=1_000_000.0 + 2000, detector=lambda raw: weak)
+    assert out["no_face"] == 6 and out["captured"] == 0
+
+
+def test_face_gate_crops_the_thumbnail_to_the_face(
+    tmp_path: Path, frigate_db_with_visit: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PIL import Image
+
+    _patch_client(monkeypatch, lambda req: httpx.Response(200, content=_jpeg(2560, 1440)))
+    s = _settings(tmp_path, frigate_db_with_visit)
+    out = crosscam.scan(s, now=1_000_000.0 + 2000, detector=lambda raw: [_FACE])
+    assert out["captured"] == 6 and out["no_face"] == 0
+
+    conn = db.open_sidecar(s.sidecar.db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM face_captures WHERE status = 'captured' LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert json.loads(row["face_box"]) == list(_FACE[0])
+    assert row["face_score"] == pytest.approx(0.83)
+    # the face crop, not the person-box head crop
+    assert row["crop_event_id"] is None
+    with Image.open(Path(s.face_capture.output_dir) / row["thumb_path"]) as im:
+        assert im.size[0] == im.size[1]
+
+
+def test_face_gate_survives_a_detector_that_raises(
+    tmp_path: Path, frigate_db_with_visit: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_client(monkeypatch, lambda req: httpx.Response(200, content=_jpeg(640, 360)))
+    s = _settings(tmp_path, frigate_db_with_visit)
+
+    def boom(raw: bytes) -> list[tuple[crosscam.NormBox, float]]:
+        raise RuntimeError("bad frame")
+
+    out = crosscam.scan(s, now=1_000_000.0 + 2000, detector=boom)
+    assert out["no_face"] == 6 and out["error"] == 0
+
+
+def _seed_ungated(
+    tmp_path: Path, frigate_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> Settings:
+    _patch_client(monkeypatch, lambda req: httpx.Response(200, content=_jpeg(2560, 1440)))
+    s = _settings(tmp_path, frigate_db)
+    assert crosscam.scan(s, now=1_000_000.0 + 2000)["captured"] == 6
+    return s
+
+
+def _alternating() -> crosscam.FaceDetector:
+    calls = {"n": 0}
+
+    def det(raw: bytes) -> list[tuple[crosscam.NormBox, float]]:
+        calls["n"] += 1
+        return [_FACE] if calls["n"] % 2 else []
+
+    return det
+
+
+def test_regate_drops_faceless_captures_and_recrops_the_rest(
+    tmp_path: Path, frigate_db_with_visit: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = _seed_ungated(tmp_path, frigate_db_with_visit, monkeypatch)
+    root = Path(s.face_capture.output_dir)
+    conn = db.open_sidecar(s.sidecar.db_path)
+    try:
+        kept_id = conn.execute(
+            "SELECT id FROM face_captures WHERE status = 'captured' ORDER BY id LIMIT 1"
+        ).fetchone()["id"]
+        conn.execute("UPDATE face_captures SET review = 'kept' WHERE id = ?", (kept_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    out = crosscam.regate(s, detector=_alternating())
+    assert out["checked"] == 5  # the kept capture is left alone
+    assert out["face"] == 3 and out["no_face"] == 2
+
+    conn = db.open_sidecar(s.sidecar.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM face_captures WHERE status IN ('captured', 'no_face')"
+        ).fetchall()
+    finally:
+        conn.close()
+    gone = [r for r in rows if r["status"] == "no_face"]
+    faced = [r for r in rows if r["face_score"] is not None]
+    assert len(gone) == 2 and all(r["full_path"] is None for r in gone)
+    assert len(faced) == 3
+    kept = next(r for r in rows if r["id"] == kept_id)
+    assert kept["status"] == "captured" and kept["face_score"] is None
+    # 4 surviving frames (3 faced + the kept one), each with its thumbnail
+    assert len([f for f in root.rglob("*.jpg") if not f.name.endswith(".thumb.jpg")]) == 4
+    assert len(list(root.rglob("*.thumb.jpg"))) == 4
+
+
+def test_regate_dry_run_changes_nothing(
+    tmp_path: Path, frigate_db_with_visit: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = _seed_ungated(tmp_path, frigate_db_with_visit, monkeypatch)
+    before = sorted(Path(s.face_capture.output_dir).rglob("*.jpg"))
+    out = crosscam.regate(s, detector=_alternating(), dry_run=True)
+    assert out["no_face"] == 3 and out["face"] == 3
+    assert sorted(Path(s.face_capture.output_dir).rglob("*.jpg")) == before
+    conn = db.open_sidecar(s.sidecar.db_path)
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) c FROM face_captures WHERE status = 'captured'"
+        ).fetchone()["c"]
+    finally:
+        conn.close()
+    assert n == 6
+
+
+def test_regate_refuses_without_a_detector(
+    tmp_path: Path, frigate_db_with_visit: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = _seed_ungated(tmp_path, frigate_db_with_visit, monkeypatch)
+    out = crosscam.regate(s)  # face_gate is off in _settings
+    assert out.get("error") and out["checked"] == 0

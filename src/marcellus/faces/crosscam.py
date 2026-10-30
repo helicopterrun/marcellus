@@ -26,8 +26,18 @@ seconds, so it belongs in a oneshot behind a systemd timer
 (contrib/marcellus-face-capture.*), not in an in-process asyncio task
 competing with the scrub generator for the single uvicorn worker's threadpool.
 
-Core deps only -- Pillow and httpx. Deliberately no cv2/numpy, so this runs
-without any optional extra installed.
+FACE GATE
+---------
+Most trigger events never put a face in front of the capture camera: a
+sidewalk passer-by on gate-walkway, or a visitor who hasn't reached the gate
+yet. Ungated, those were stored as whole frames of the street and parked cars
+(469 of 638 captures on 2026-10-30). With `face_capture.face_gate` on, every
+fetched frame goes through face_enrich's SCRFD detector first: no face means
+status='no_face' and nothing is written; a face means the thumbnail is
+cropped to it. The detector is the `[enrich]` extra and is imported lazily;
+without it the gate logs an error and capture runs ungated.
+
+Core deps only otherwise -- Pillow and httpx.
 """
 
 from __future__ import annotations
@@ -42,7 +52,7 @@ import shutil
 import sqlite3
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,7 +67,11 @@ _SAFE_STEM = re.compile(r"[^A-Za-z0-9._-]")
 _LAST_RUN = ".last-run.json"
 
 # Statuses that mean "settled, do not reconsider this sample".
-_TERMINAL = ("captured", "no_recording", "deduped", "skipped")
+_TERMINAL = ("captured", "no_recording", "deduped", "skipped", "no_face")
+
+NormBox = tuple[float, float, float, float]
+# jpeg bytes -> [(normalized (x1, y1, x2, y2), det_score)]
+FaceDetector = Callable[[bytes], list[tuple[NormBox, float]]]
 
 
 @dataclass(frozen=True)
@@ -267,6 +281,26 @@ def render_preview(
         return None
 
 
+def pick_face(
+    faces: Sequence[tuple[NormBox, float]], *, min_score: float
+) -> tuple[NormBox, float] | None:
+    """The largest face scoring at least `min_score`, or None.
+
+    Largest, not highest-scoring: in a two-person frame the nearer face is
+    the one worth a thumbnail, and above the floor SCRFD's score says little
+    about which face is more useful.
+    """
+    best: tuple[NormBox, float] | None = None
+    best_area = -1.0
+    for box, score in faces:
+        if score < min_score:
+            continue
+        area = max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+        if area > best_area:
+            best, best_area = (box, score), area
+    return best
+
+
 def aspect_ok(detect_aspect_v: float | None, frame_w: int, frame_h: int) -> bool:
     """Is the fetched frame the same aspect as the capture camera's detect stream?
 
@@ -467,6 +501,37 @@ def crop_box_for(
     return (str(row["id"]), [float(v) for v in box[:4]])
 
 
+def face_detector(settings: Settings) -> FaceDetector | None:
+    """face_enrich's SCRFD as a FaceDetector, or None (gate off / extra missing).
+
+    A missing extra is logged as an error, not raised: ungated capture still
+    works, and the error is what tells you the page has gone back to cars.
+    """
+    if not settings.face_capture.face_gate:
+        return None
+    from marcellus.faces import enrich
+
+    try:
+        engine = enrich._detector(str(settings.face_enrich.model_dir))
+    except enrich.EnrichUnavailable:
+        logger.error(
+            "face-capture: face_gate is on but the [enrich] extra is not installed "
+            "-- capturing UNGATED"
+        )
+        return None
+    return engine.detect_in_jpeg
+
+
+def _detect(
+    detector: FaceDetector, raw: bytes, *, min_score: float
+) -> tuple[NormBox, float] | None:
+    try:
+        return pick_face(detector(raw), min_score=min_score)
+    except Exception:  # noqa: BLE001 - a frame the detector chokes on has no usable face
+        logger.warning("face-capture: face detection failed", exc_info=True)
+        return None
+
+
 def _write_atomic(path: Path, data: bytes) -> None:
     """Publish a file atomically (mkstemp + os.replace), as scrub does."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -481,8 +546,14 @@ def _write_atomic(path: Path, data: bytes) -> None:
         raise
 
 
-def scan(settings: Settings, *, now: float | None = None) -> dict[str, Any]:
-    """One capture pass. Idempotent; safe to run on any cadence."""
+def scan(
+    settings: Settings, *, now: float | None = None, detector: FaceDetector | None = None
+) -> dict[str, Any]:
+    """One capture pass. Idempotent; safe to run on any cadence.
+
+    `detector` overrides the face gate's detector (tests); None builds it from
+    config via face_detector().
+    """
     cfg = settings.face_capture
     now = time.time() if now is None else now
     summary: dict[str, Any] = {
@@ -492,6 +563,7 @@ def scan(settings: Settings, *, now: float | None = None) -> dict[str, Any]:
         "no_recording": 0,
         "error": 0,
         "deduped": 0,
+        "no_face": 0,
         "bytes": 0,
         "pruned": 0,
     }
@@ -510,6 +582,8 @@ def scan(settings: Settings, *, now: float | None = None) -> dict[str, Any]:
         for cam in cfg.trigger_cameras:
             ann_ms[cam] = annotation_offset_ms(settings.frigate.config_path, cam)
     cap_aspect = detect_aspect(settings.frigate.config_path, cfg.capture_camera)
+    if detector is None:
+        detector = face_detector(settings)
 
     conn = db.open_joined(settings.frigate.db_path, settings.sidecar.db_path)
     client = FrigateClient(settings.frigate.base_url, timeout=cfg.http_timeout_s)
@@ -571,10 +645,20 @@ def scan(settings: Settings, *, now: float | None = None) -> dict[str, Any]:
                     summary["no_recording"] += 1
                     continue
 
+                face = None
+                if detector is not None:
+                    face = _detect(detector, raw, min_score=cfg.min_face_score)
+                    if face is None:
+                        _upsert(conn, cand, visit_key, cfg.capture_camera, smp.offset_ms,
+                                smp.frame_ts, status="no_face", http_status=http_status,
+                                nbytes=len(raw))
+                        summary["no_face"] += 1
+                        continue
+
                 crop = None
                 crop_event_id = None
                 crop_box_json = None
-                if cfg.crop_to_bbox:
+                if cfg.crop_to_bbox and face is None:
                     got = crop_box_for(
                         conn, camera=cfg.capture_camera, frame_ts=smp.frame_ts,
                         labels=cfg.trigger_labels,
@@ -611,21 +695,27 @@ def scan(settings: Settings, *, now: float | None = None) -> dict[str, Any]:
                         aspect_warned = True
                     crop = None
 
-                thumb = render_preview(
-                    raw, crop=crop, max_edge=cfg.thumb_max_edge, quality=cfg.thumb_quality
-                )
-                if thumb:
+                thumb_bytes = _face_thumb(raw, face, cfg) if face else None
+                if thumb_bytes is None:
+                    thumb = render_preview(
+                        raw, crop=crop, max_edge=cfg.thumb_max_edge, quality=cfg.thumb_quality
+                    )
+                    thumb_bytes = thumb[0] if thumb else None
+                if thumb_bytes:
                     try:
-                        _write_atomic(thumb_path, thumb[0])
+                        _write_atomic(thumb_path, thumb_bytes)
                     except OSError:
                         logger.warning("face-capture: thumb write failed for %s", thumb_path)
+                        thumb_bytes = None
 
                 _upsert(
                     conn, cand, visit_key, cfg.capture_camera, smp.offset_ms, smp.frame_ts,
                     status="captured", http_status=http_status,
-                    full_path=rel_full, thumb_path=rel_thumb if thumb else None,
+                    full_path=rel_full, thumb_path=rel_thumb if thumb_bytes else None,
                     width=fw or None, height=fh or None, nbytes=len(raw),
                     crop_event_id=crop_event_id, crop_box=crop_box_json,
+                    face_box=json.dumps(face[0]) if face else None,
+                    face_score=face[1] if face else None,
                 )
                 summary["captured"] += 1
                 summary["bytes"] += len(raw)
@@ -638,12 +728,95 @@ def scan(settings: Settings, *, now: float | None = None) -> dict[str, Any]:
     summary["pruned"] = prune(settings, now=now).get("rows", 0)
     _write_last_run(cfg.output_dir, summary, now)
     logger.info(
-        "face-capture: %d candidate(s), %d captured, %d no_recording, "
+        "face-capture: %d candidate(s), %d captured, %d no_face, %d no_recording, "
         "%d error, %d deduped, %.1f MB",
-        summary["candidates"], summary["captured"], summary["no_recording"],
-        summary["error"], summary["deduped"], summary["bytes"] / 1e6,
+        summary["candidates"], summary["captured"], summary["no_face"],
+        summary["no_recording"], summary["error"], summary["deduped"],
+        summary["bytes"] / 1e6,
     )
     return summary
+
+
+def _face_thumb(raw: bytes, face: tuple[NormBox, float], cfg: Any) -> bytes | None:
+    from marcellus.faces.enrich import render_face_crop
+
+    return render_face_crop(raw, face[0], pad=cfg.face_pad, max_edge=cfg.thumb_max_edge)
+
+
+def regate(
+    settings: Settings, *, detector: FaceDetector | None = None, dry_run: bool = False
+) -> dict[str, Any]:
+    """Apply the face gate to captures stored before it existed.
+
+    For each `captured` row not marked `kept`: no face -> status='no_face' and
+    both files deleted; a face -> thumbnail re-cut to the face. Rows a person
+    marked `kept` are left alone -- that is a human verdict on the frame.
+    Idempotent: a re-run re-detects and re-cuts the same thumbnails.
+    """
+    cfg = settings.face_capture
+    out: dict[str, Any] = {"checked": 0, "face": 0, "no_face": 0, "missing": 0, "dry_run": dry_run}
+    if detector is None:
+        detector = face_detector(settings)
+    if detector is None:
+        out["error"] = "face gate unavailable (face_gate off or [enrich] extra missing)"
+        return out
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, full_path, thumb_path FROM face_captures "
+            " WHERE status = 'captured' AND review <> 'kept' AND full_path IS NOT NULL "
+            " ORDER BY trigger_start_ts"
+        ).fetchall()
+        for r in rows:
+            full = cfg.output_dir / str(r["full_path"])
+            try:
+                raw = full.read_bytes()
+            except OSError:
+                out["missing"] += 1
+                continue
+            out["checked"] += 1
+            face = _detect(detector, raw, min_score=cfg.min_face_score)
+            if face is None:
+                out["no_face"] += 1
+                if dry_run:
+                    continue
+                conn.execute(
+                    "UPDATE face_captures SET status = 'no_face', detail = 'regate', "
+                    "       full_path = NULL, thumb_path = NULL WHERE id = ?",
+                    (r["id"],),
+                )
+                conn.commit()
+                for rel in (r["full_path"], r["thumb_path"]):
+                    if rel:
+                        with contextlib.suppress(OSError):
+                            (cfg.output_dir / str(rel)).unlink()
+                continue
+            out["face"] += 1
+            if dry_run:
+                continue
+            thumb = _face_thumb(raw, face, cfg)
+            rel_thumb = r["thumb_path"] or str(r["full_path"]).replace(".jpg", ".thumb.jpg")
+            if thumb is not None:
+                try:
+                    _write_atomic(cfg.output_dir / rel_thumb, thumb)
+                except OSError:
+                    logger.warning("face-capture: regate thumb write failed for %s", rel_thumb)
+                    thumb = None
+            conn.execute(
+                "UPDATE face_captures SET face_box = ?, face_score = ?, "
+                "       thumb_path = COALESCE(?, thumb_path) WHERE id = ?",
+                (json.dumps(face[0]), face[1], rel_thumb if thumb else None, r["id"]),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+    logger.info(
+        "face-capture regate: %d checked, %d face, %d no_face, %d missing%s",
+        out["checked"], out["face"], out["no_face"], out["missing"],
+        " (dry run)" if dry_run else "",
+    )
+    return out
 
 
 def _upsert(
@@ -664,6 +837,8 @@ def _upsert(
     nbytes: int | None = None,
     crop_event_id: str | None = None,
     crop_box: str | None = None,
+    face_box: str | None = None,
+    face_score: float | None = None,
     bump_attempts: bool = False,
 ) -> None:
     conn.execute(
@@ -672,8 +847,9 @@ def _upsert(
             trigger_event_id, trigger_camera, trigger_label, trigger_start_ts,
             trigger_score, visit_key, capture_camera, offset_ms, frame_ts,
             status, attempts, http_status, detail, full_path, thumb_path,
-            width, height, bytes, crop_event_id, crop_box, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            width, height, bytes, crop_event_id, crop_box, face_box, face_score,
+            created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(trigger_event_id, offset_ms) DO UPDATE SET
             status = excluded.status,
             attempts = face_captures.attempts + ?,
@@ -685,13 +861,16 @@ def _upsert(
             height = COALESCE(excluded.height, face_captures.height),
             bytes = COALESCE(excluded.bytes, face_captures.bytes),
             crop_event_id = COALESCE(excluded.crop_event_id, face_captures.crop_event_id),
-            crop_box = COALESCE(excluded.crop_box, face_captures.crop_box)
+            crop_box = COALESCE(excluded.crop_box, face_captures.crop_box),
+            face_box = COALESCE(excluded.face_box, face_captures.face_box),
+            face_score = COALESCE(excluded.face_score, face_captures.face_score)
         """,
         (
             cand.event_id, cand.camera, cand.label, cand.start_time, cand.top_score,
             visit_key, capture_camera, offset_ms, frame_ts, status,
             1 if bump_attempts else 0, http_status, detail, full_path, thumb_path,
-            width, height, nbytes, crop_event_id, crop_box, _now_iso(),
+            width, height, nbytes, crop_event_id, crop_box, face_box, face_score,
+            _now_iso(),
             1 if bump_attempts else 0,
         ),
     )
