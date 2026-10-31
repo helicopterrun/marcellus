@@ -269,13 +269,29 @@ def find_segments(
 
 
 def is_scenery(
-    conn: sqlite3.Connection, camera: str, det: Detection, frame_ts: float, cfg: WildlifeSection
+    conn: sqlite3.Connection,
+    camera: str,
+    det: Detection,
+    frame_ts: float,
+    cfg: WildlifeSection,
+    pending: Sequence[tuple[float, tuple[float, float, float, float]]] = (),
 ) -> bool:
-    """Has this spot been classified blank often enough recently to skip it?"""
+    """Has this spot been classified blank often enough recently to skip it?
+
+    `pending` holds (frame_ts, box) blanks found earlier in the segment being
+    processed, which are not written yet.
+    """
     if cfg.scenery_min_blanks <= 0:
         return False
     box = (det.x1, det.y1, det.x2, det.y2)
     hits = 0
+    for ts, other in pending:
+        if frame_ts - cfg.scenery_memory_h * 3600.0 <= ts <= frame_ts and (
+            iou(box, other) >= cfg.scenery_iou
+        ):
+            hits += 1
+            if hits >= cfg.scenery_min_blanks:
+                return True
     for r in conn.execute(
         "SELECT x1, y1, x2, y2 FROM sidecar.wildlife_boxes "
         " WHERE camera = ? AND verdict = 'blank' AND frame_ts >= ? AND frame_ts <= ?",
@@ -344,6 +360,18 @@ class SegmentResult:
     verdicts: dict[str, int] = field(default_factory=dict)
 
 
+@dataclass
+class _PendingBox:
+    """One box decided during inference, written after it."""
+
+    frame_ts: float
+    det: Detection
+    verdict: str
+    v: taxonomy.Verdict | None = None
+    # Rendered crop and outlined frame, for animal hits only.
+    images: tuple[bytes, bytes] | None = None
+
+
 def process_segment(
     conn: sqlite3.Connection,
     models: Models,
@@ -351,16 +379,25 @@ def process_segment(
     frames: list[Frame],
     cfg: WildlifeSection,
 ) -> SegmentResult:
-    """Detect, filter, classify and record every box in one segment's frames."""
+    """Detect, filter, classify and record every box in one segment's frames.
+
+    Two phases, so the sidecar DB's write lock is held for milliseconds, not
+    for the whole inference run: all model work first with reads only, then
+    every write. Writing as it went held the lock from the segment's first
+    box to its commit, seconds of CPU inference, and every other writer
+    (the scrub generator above all) hit "database is locked" behind it.
+    """
     res = SegmentResult(frames=len(frames))
+    pending: list[_PendingBox] = []
+    blanks: list[tuple[float, tuple[float, float, float, float]]] = []
     for frame in frames:
         frame_ts = seg.start_ts + frame.pts
         dets = models.detect(frame, size=cfg.frame_width, min_score=cfg.min_detector_score)
         res.boxes += len(dets)
         todo: list[Detection] = []
         for d in dets:
-            if is_scenery(conn, seg.camera, d, frame_ts, cfg):
-                _insert_box(conn, seg, frame_ts, d, verdict="scenery")
+            if is_scenery(conn, seg.camera, d, frame_ts, cfg, pending=blanks):
+                pending.append(_PendingBox(frame_ts, d, "scenery"))
                 res.verdicts["scenery"] = res.verdicts.get("scenery", 0) + 1
             else:
                 todo.append(d)
@@ -373,32 +410,39 @@ def process_segment(
             verdict = v.verdict
             if verdict == "animal" and v.suggestion in cfg.exclude_suggestions:
                 verdict = "excluded"
-            visit_id = None
-            if verdict == "animal":
-                visit_id = assign_visit(conn, seg.camera, frame_ts, cfg)
-            box_id = _insert_box(conn, seg, frame_ts, d, verdict=verdict, v=v, visit_id=visit_id)
             res.verdicts[verdict] = res.verdicts.get(verdict, 0) + 1
-            if verdict != "animal":
-                continue
-            res.animals += 1
-            rel_crop, rel_frame = relative_paths(box_id, frame_ts)
-            box = (d.x1, d.y1, d.x2, d.y2)
-            try:
-                _write_atomic(
-                    cfg.output_dir / rel_crop,
+            images = None
+            if verdict == "animal":
+                res.animals += 1
+                box = (d.x1, d.y1, d.x2, d.y2)
+                images = (
                     render_jpeg(frame, crop=box, pad=0.5, max_edge=320, quality=85),
-                )
-                _write_atomic(
-                    cfg.output_dir / rel_frame,
                     render_jpeg(frame, outline=box, max_edge=960, quality=78),
                 )
-            except OSError:
-                logger.warning("wildlife: image write failed for box %s", box_id, exc_info=True)
-                continue
-            conn.execute(
-                "UPDATE sidecar.wildlife_boxes SET crop_path = ?, frame_path = ? WHERE id = ?",
-                (rel_crop, rel_frame, box_id),
-            )
+            elif verdict == "blank":
+                blanks.append((frame_ts, (d.x1, d.y1, d.x2, d.y2)))
+            pending.append(_PendingBox(frame_ts, d, verdict, v, images))
+
+    for pb in pending:
+        visit_id = (
+            assign_visit(conn, seg.camera, pb.frame_ts, cfg) if pb.verdict == "animal" else None
+        )
+        box_id = _insert_box(
+            conn, seg, pb.frame_ts, pb.det, verdict=pb.verdict, v=pb.v, visit_id=visit_id
+        )
+        if pb.images is None:
+            continue
+        rel_crop, rel_frame = relative_paths(box_id, pb.frame_ts)
+        try:
+            _write_atomic(cfg.output_dir / rel_crop, pb.images[0])
+            _write_atomic(cfg.output_dir / rel_frame, pb.images[1])
+        except OSError:
+            logger.warning("wildlife: image write failed for box %s", box_id, exc_info=True)
+            continue
+        conn.execute(
+            "UPDATE sidecar.wildlife_boxes SET crop_path = ?, frame_path = ? WHERE id = ?",
+            (rel_crop, rel_frame, box_id),
+        )
     return res
 
 
