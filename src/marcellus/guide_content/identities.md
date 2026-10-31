@@ -87,6 +87,10 @@ sidecar is the sole author of `sub_label`, and two writers would fight.
   frame, to be considered (default 4000).
 - `min_quality` — minimum quality score (sharpness × size × frontality) for
   a sampled face (default 0.15).
+- `min_det_score` — face detector confidence a box needs (default 0.6) to
+  count as a face at all. Quality can't keep junk out on its own: leaves and
+  wheel spokes are very sharp. `fsc face-enrich regate` applies it to older
+  sightings.
 - `match_threshold` — cosine-distance threshold for matching a face to a
   NAMED cluster (default 0.45).
 - `cluster_threshold` — cosine-distance threshold for folding a face into

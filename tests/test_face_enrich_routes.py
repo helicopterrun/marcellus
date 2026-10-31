@@ -415,15 +415,17 @@ class _StubEngine:
         self.embedding = embedding
         self.quality = quality
         self.by_ts: dict[float, float] = {}
+        self.det_floors: list[float] = []
 
     def faces_in_jpeg(
-        self, jpeg: bytes, *, frame_ts: float, min_face_area_px: int
+        self, jpeg: bytes, *, frame_ts: float, min_face_area_px: int, min_det_score: float = 0.0
     ) -> list[enrich.DetectedFace]:
+        self.det_floors.append(min_det_score)
         q = next((v for t, v in self.by_ts.items() if abs(t - frame_ts) < 1e-6), self.quality)
         return [
             enrich.DetectedFace(
                 frame_ts=frame_ts, area_px=8000.0, quality=q,
-                embedding=list(self.embedding), bbox=(0.1, 0.1, 0.15, 0.2),
+                embedding=list(self.embedding), bbox=(0.1, 0.1, 0.15, 0.2), det_score=0.8,
             )
         ]
 
@@ -836,3 +838,164 @@ def test_run_cycle_records_errors_and_retries_until_cap(
         assert row["status"] == "error" and row["attempts"] == expected_attempts
     # Attempts exhausted: the event is no longer a candidate.
     assert enrich.run_cycle(settings, now=now)["candidates"] == 0
+
+
+# ---------------------------------------------------------------------------
+# min_det_score gate and regate.
+
+
+def test_scan_passes_the_det_floor_and_stack_keeps_det_score(
+    tmp_path: Path, stub_engine: _StubEngine
+) -> None:
+    cfg = FaceEnrichSection(cameras=["gate-face"], crops_dir=tmp_path / "crops",
+                            min_det_score=0.65)
+    conn = _joined(tmp_path)
+    try:
+        enrich.process_event(conn, _StubClient(jpeg=_frame_jpeg()), _cand(), cfg=cfg)  # type: ignore[arg-type]
+        assert stub_engine.det_floors and set(stub_engine.det_floors) == {0.65}
+        dets = [r[0] for r in conn.execute("SELECT det_score FROM face_crops")]
+        assert dets and dets == pytest.approx([0.8] * len(dets))
+    finally:
+        conn.close()
+
+
+class _RegateClient:
+    """recording_snapshot keyed by frame ts; None = the recording is gone."""
+
+    def __init__(self, frames: dict[float, bytes | None]) -> None:
+        self.frames = frames
+        self.sub_labels: list[tuple[str, str]] = []
+
+    def recording_snapshot(
+        self, camera: str, ts: float, *, timeout: float = 15.0
+    ) -> tuple[bytes | None, int]:
+        jpeg = self.frames.get(ts)
+        return (jpeg, 200 if jpeg else 404)
+
+    def set_sub_label(self, event_id: str, sub_label: str, *, score: float | None = None) -> None:
+        self.sub_labels.append((event_id, sub_label))
+
+
+class _RegateDetector:
+    """detect_in_jpeg answers from a table keyed by the frame bytes."""
+
+    def __init__(self, dets: dict[bytes, list[tuple[tuple[float, float, float, float], float]]]):
+        self.dets = dets
+
+    def detect_in_jpeg(self, jpeg: bytes) -> list[tuple[tuple[float, float, float, float], float]]:
+        return self.dets.get(jpeg, [])
+
+
+_BOX = [0.1, 0.1, 0.2, 0.3]
+
+
+def _regate_settings(tmp_path: Path) -> Settings:
+    settings = Settings(
+        frigate=FrigateSection(base_url="http://frigate.test:5000", db_path=tmp_path / "f.db"),
+        sidecar=SidecarSection(db_path=tmp_path / "s.db"),
+        face_enrich=FaceEnrichSection(cameras=["gate-face"], crops_dir=tmp_path / "crops"),
+    )
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        # Cluster 1 (named) holds a face, a leaf, a sighting whose recording
+        # is gone and one never cropped; cluster 2 holds only a wheel.
+        for name in ("alice", None):
+            conn.execute(
+                "INSERT INTO face_clusters (name, centroid, observation_count, created_at, "
+                "last_seen_at) VALUES (?, ?, 1, '', 0)",
+                (name, enrich.pack_embedding([1.0, 0.0])),
+            )
+        for eid, cid, ts, emb, label in (
+            ("face", 1, 1.0, [1.0, 0.0], "alice"),
+            ("leaf", 1, 2.0, [0.0, 1.0], "alice"),
+            ("gone", 1, 3.0, [1.0, 0.0], None),
+            ("nobox", 1, None, [1.0, 0.0], None),
+            ("wheel", 2, 4.0, [1.0, 0.0], None),
+        ):
+            conn.execute(
+                "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+                "embedding, sub_label_written, status, processed_at, best_frame_ts, best_bbox) "
+                "VALUES (?, 'gate-face', ?, ?, ?, ?, 'enriched', '', ?, ?)",
+                (eid, ts or 0.0, cid, enrich.pack_embedding(emb), label, ts,
+                 json.dumps(_BOX) if ts else None),
+            )
+            if ts:
+                (tmp_path / "crops").mkdir(exist_ok=True)
+                (tmp_path / "crops" / f"{eid}.jpg").write_bytes(b"x")
+                conn.execute(
+                    "INSERT INTO face_crops (event_id, rank, quality, frame_ts, bbox, used, "
+                    "crop_path) VALUES (?, 0, 0.9, ?, ?, 1, ?)",
+                    (eid, ts, json.dumps(_BOX), f"{eid}.jpg"),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+    return settings
+
+
+def _regate_fakes() -> tuple[_RegateClient, _RegateDetector]:
+    client = _RegateClient({1.0: b"f-face", 2.0: b"f-leaf", 3.0: None, 4.0: b"f-wheel"})
+    detector = _RegateDetector({
+        b"f-face": [((0.1, 0.1, 0.2, 0.3), 0.78), ((0.6, 0.6, 0.7, 0.8), 0.52)],
+        b"f-leaf": [((0.1, 0.1, 0.2, 0.3), 0.53)],
+        # The only face in this frame is elsewhere: nothing matches the stored box.
+        b"f-wheel": [((0.6, 0.6, 0.7, 0.8), 0.9)],
+    })
+    return client, detector
+
+
+def test_regate_detaches_junk_rebuilds_and_deletes_emptied_clusters(tmp_path: Path) -> None:
+    settings = _regate_settings(tmp_path)
+    client, detector = _regate_fakes()
+    out = enrich.regate(settings, client=client, detector=detector)
+    assert {k: out[k] for k in ("checked", "kept", "dropped", "missing", "no_box",
+                                "clusters_rebuilt", "clusters_deleted")} == {
+        "checked": 3, "kept": 1, "dropped": 2, "missing": 1, "no_box": 1,
+        "clusters_rebuilt": 1, "clusters_deleted": 1,
+    }
+    # The leaf had a sub_label written: it is cleared in Frigate.
+    assert client.sub_labels == [("leaf", "")]
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        rows = {r["event_id"]: r for r in conn.execute("SELECT * FROM face_enrichments")}
+        assert rows["leaf"]["cluster_id"] is None and rows["leaf"]["embedding"] is None
+        assert rows["leaf"]["status"] == "no_faces" and rows["leaf"]["sub_label_written"] is None
+        assert rows["leaf"]["detail"] == "regate: det 0.53"
+        assert rows["wheel"]["cluster_id"] is None
+        assert {e for e, r in rows.items() if r["cluster_id"] == 1} == {"face", "gone", "nobox"}
+        assert [r[0] for r in conn.execute("SELECT cluster_id FROM face_clusters")] == [1]
+        # Rebuilt without the leaf: 3 embeddings, all [1, 0].
+        c1 = conn.execute("SELECT centroid, observation_count FROM face_clusters").fetchone()
+        assert c1["observation_count"] == 3
+        assert enrich.unpack_embedding(c1["centroid"]) == pytest.approx([1.0, 0.0])
+        crops = {r[0]: r[1] for r in conn.execute("SELECT event_id, det_score FROM face_crops")}
+        assert crops == {"face": pytest.approx(0.78), "gone": None}
+    finally:
+        conn.close()
+    assert (tmp_path / "crops" / "face.jpg").exists()
+    assert not (tmp_path / "crops" / "leaf.jpg").exists()
+    assert not (tmp_path / "crops" / "wheel.jpg").exists()
+
+    # Idempotent: a second pass finds nothing more to drop.
+    again = enrich.regate(settings, client=client, detector=detector)
+    assert again["dropped"] == 0 and again["kept"] == 1
+
+
+def test_regate_dry_run_changes_nothing(tmp_path: Path) -> None:
+    settings = _regate_settings(tmp_path)
+    client, detector = _regate_fakes()
+    out = enrich.regate(settings, client=client, detector=detector, dry_run=True)
+    assert out["dropped"] == 2 and out["kept"] == 1 and out["dry_run"] is True
+    assert client.sub_labels == []
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM face_enrichments WHERE cluster_id IS NOT NULL"
+        ).fetchone()[0] == 5
+        assert conn.execute("SELECT COUNT(*) FROM face_clusters").fetchone()[0] == 2
+        assert conn.execute(
+            "SELECT COUNT(*) FROM face_crops WHERE det_score IS NOT NULL"
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
+    assert (tmp_path / "crops" / "leaf.jpg").exists()
