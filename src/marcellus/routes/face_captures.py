@@ -10,6 +10,7 @@ read.
 
 from __future__ import annotations
 
+import json
 import time
 from collections import OrderedDict
 from datetime import datetime, timezone
@@ -33,24 +34,37 @@ _REVIEWS = ("pending", "kept", "discarded")
 
 
 def _rows(settings: Settings, *, days: float, review: str, limit: int) -> list[dict[str, Any]]:
+    """Captured frames only. Filtering in SQL matters: the face gate settles
+    most sampled frames as no_face/skipped, and a LIMIT applied before that
+    filter left the page showing 5 of 43 pending visits (2026-10-31)."""
     since = time.time() - days * 86400
     conn = open_sidecar(settings.sidecar.db_path)
     try:
         if review == "all":
             sql = (
-                "SELECT * FROM face_captures WHERE trigger_start_ts >= ? "
+                "SELECT * FROM face_captures WHERE trigger_start_ts >= ? AND status = 'captured' "
                 "ORDER BY trigger_start_ts DESC, offset_ms LIMIT ?"
             )
             args: tuple[Any, ...] = (since, limit)
         else:
             sql = (
                 "SELECT * FROM face_captures WHERE trigger_start_ts >= ? AND review = ? "
+                "   AND status = 'captured' "
                 "ORDER BY trigger_start_ts DESC, offset_ms LIMIT ?"
             )
             args = (since, review, limit)
         return [dict(r) for r in conn.execute(sql, args)]
     finally:
         conn.close()
+
+
+def _box(raw: Any) -> list[float] | None:
+    """face_box column (JSON [x1, y1, x2, y2], normalized) or None."""
+    try:
+        box = json.loads(raw) if raw else None
+    except ValueError:
+        return None
+    return [float(v) for v in box] if isinstance(box, list) and len(box) == 4 else None
 
 
 def _group_visits(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -84,13 +98,80 @@ def _group_visits(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "bytes": r.get("bytes"),
                 "cropped": bool(r.get("crop_event_id")),
                 "face_score": r.get("face_score"),
+                "face_box": _box(r.get("face_box")),
                 "has_thumb": bool(r.get("thumb_path")),
                 "review": r.get("review"),
             }
         )
     for v in visits.values():
         v["captures"].sort(key=lambda c: c["offset_ms"] or 0)
+        # The card's hero: the most confident face (ungated rows have none).
+        v["best"] = max(v["captures"], key=lambda c: c["face_score"] or 0.0)
     return list(visits.values())
+
+
+def _attach_identities(
+    settings: Settings, visits: list[dict[str, Any]], *, window_s: float
+) -> None:
+    """Give each visit the identity clusters face_enrich put the same person in.
+
+    Captures and Identities see the same visitor through different events:
+    the capture is keyed by the TRIGGER camera's event (doorbell), while
+    face_enrich clusters the CAPTURE camera's own events (gate-face). On
+    2026-10-31, 35 of 44 captured visits had a clustered gate-face sighting
+    within 30s of the trigger. More than one cluster in the window usually
+    means two people, or one person split -- both worth seeing.
+    """
+    cams = list(settings.face_enrich.cameras)
+    if not visits or not cams:
+        for v in visits:
+            v["identities"] = []
+        return
+    cam_q = ",".join("?" * len(cams))
+    conn = open_sidecar(settings.sidecar.db_path)
+    try:
+        for v in visits:
+            t = v["start_ts"]
+            v["identities"] = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT c.cluster_id, c.name, c.observation_count, COUNT(*) AS hits "
+                    "  FROM face_enrichments e JOIN face_clusters c ON c.cluster_id = e.cluster_id "
+                    f" WHERE e.camera IN ({cam_q}) AND e.excluded_at IS NULL "
+                    "   AND e.event_start_ts BETWEEN ? AND ? "
+                    " GROUP BY c.cluster_id "
+                    " ORDER BY (c.name IS NULL), hits DESC, c.observation_count DESC",
+                    [*cams, t - window_s, t + window_s],
+                )
+            ]
+    finally:
+        conn.close()
+
+
+def _review_counts(settings: Settings, *, days: float) -> dict[str, int]:
+    """Visits per review state, for the filter tabs. A visit with frames in
+    more than one state counts under each."""
+    since = time.time() - days * 86400
+    conn = open_sidecar(settings.sidecar.db_path)
+    try:
+        counts = {
+            str(r["review"]): int(r["n"])
+            for r in conn.execute(
+                "SELECT review, COUNT(DISTINCT visit_key) AS n FROM face_captures "
+                " WHERE status = 'captured' AND trigger_start_ts >= ? GROUP BY review",
+                (since,),
+            )
+        }
+        counts["all"] = int(
+            conn.execute(
+                "SELECT COUNT(DISTINCT visit_key) FROM face_captures "
+                " WHERE status = 'captured' AND trigger_start_ts >= ?",
+                (since,),
+            ).fetchone()[0]
+        )
+    finally:
+        conn.close()
+    return counts
 
 
 def _resolve(settings: Settings, capture_id: int, column: str) -> Path:
@@ -135,17 +216,20 @@ def captures_view(
     if review not in (*_REVIEWS, "all"):
         review = "pending"
     visits = _group_visits(_rows(s, days=days, review=review, limit=limit))
+    _attach_identities(s, visits, window_s=s.face_capture.event_window_s)
     return _templates(request).TemplateResponse(
         request,
         "face_captures.html",
         {
             "visits": visits,
+            "counts": _review_counts(s, days=days),
             "days": days,
             "review": review,
             "enabled": s.face_capture.enabled,
             "capture_camera": s.face_capture.capture_camera,
             "trigger_cameras": s.face_capture.trigger_cameras,
             "last_run": crosscam.read_last_run(s),
+            "window_s": s.face_capture.event_window_s,
         },
     )
 
@@ -160,12 +244,9 @@ def captures_json(
     s = _settings(request)
     if review not in (*_REVIEWS, "all"):
         review = "pending"
-    return JSONResponse(
-        {
-            "visits": _group_visits(_rows(s, days=days, review=review, limit=limit)),
-            "last_run": crosscam.read_last_run(s),
-        }
-    )
+    visits = _group_visits(_rows(s, days=days, review=review, limit=limit))
+    _attach_identities(s, visits, window_s=s.face_capture.event_window_s)
+    return JSONResponse({"visits": visits, "last_run": crosscam.read_last_run(s)})
 
 
 @router.get("/faces/captures/{capture_id}/full.jpg")

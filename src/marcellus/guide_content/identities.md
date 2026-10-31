@@ -14,6 +14,20 @@ recurring people into **clusters** — no training, no photo upload.
 Right now there are **{{stat:clusters_total}}** clusters,
 **{{stat:clusters_named}}** of them named.
 
+## Reading the page
+
+The **People** tab lists everyone you've named, then every unknown seen at
+least twice, most-seen first: the top of the unknowns is who's worth naming
+next. **Seen once** holds the long tail of single sightings, mostly
+passers-by. Each card shows the identity's best face and a strip of its best
+sightings; tap a sighting to open it full size (arrow keys step through the
+strip), with links to the event and its snapshot. **+N more** (or **See more
+sightings** in the ⋯ menu) opens one identity on its own page with up to 32
+sightings. Times are in your own timezone.
+
+[Face captures](/faces/captures) links each visit to the identities seen at
+the same moment, so a sharp face capture is one tap from the cluster to name.
+
 ## How it becomes recognition
 
 A cluster starts **unknown**. The moment you give it a name, it becomes a
@@ -28,10 +42,10 @@ Unnamed clusters that stop appearing expire on their own after
 ```walkthrough
 - Wait until a cluster shows several sightings of the same person
 - Check the sighting strip is coherent — every thumbnail is the same person
-- Exclude any wrong sighting with its ✕ button
-- Type the person's name and tap "name"
+- Exclude any wrong sighting with its ✕ button (or "Not this person" in the viewer)
+- Type the person's name in "Who is this?" and tap "Name"
 - Watch the toast confirm how many past events were relabeled
-- If a second cluster of the same person exists, use "merge" to fold it in
+- If a second cluster of the same person exists, use ⋯ → "Merge into…" to fold it in
 ```
 
 ## Repair tools
@@ -39,16 +53,19 @@ Unnamed clusters that stop appearing expire on their own after
 - **✕ on a sighting** — soft-**excludes** it: the sighting stays in the
   cluster's history but no longer feeds its face signature (centroid),
   sub_label matching, or the pipeline stats. A toast offers **Undo**
-  right away, and the **Show excluded** link at the top of the page lists
+  right away, and the **Show excluded sightings** link at the top of the page lists
   everything you've excluded (dimmed, with an "include" action) if you
   change your mind later. This is different from the hard "remove" the
   API still exposes, which fully detaches a sighting and can empty (and
   delete) a cluster — that stays available for repairing a bad join, but
   the page no longer uses it directly.
-- **merge** — combine two clusters of the same person; the named one
-  survives. "Looks like…" hints appear when two clusters are suspiciously
-  similar.
-- **delete** — dissolve a cluster entirely (events keep their history).
+- **⋯ → Merge into…** — combine two clusters of the same person: search
+  by name or #number and pick the survivor. "Looks like…" hints appear when
+  two clusters are suspiciously similar; accepting one keeps the named (or
+  bigger) cluster.
+- **⋯ → Rename** — change a named identity's name (relabels again).
+- **⋯ → Delete identity** — dissolve a cluster entirely (events keep their
+  history).
 
 ## Configuration
 
@@ -96,13 +113,15 @@ sidecar is the sole author of `sub_label`, and two writers would fight.
 
 ## Face stacks
 
-Each sighting shows up to five face crops from that event, best on top and
-worst at the bottom, each with its quality score (sharpness × size ×
-frontality). Faces that didn't feed the identity embedding are dimmed. Older
-sightings from before stacks existed show Frigate's thumbnail until you press
-**backfill stacks** in the toolbar: the worker then rebuilds their stacks
+Each sighting keeps up to five face crops from that event. The strip shows
+the best one, with a count when there are more; opening the sighting shows
+them all, best first and framed, each with its quality score (sharpness ×
+size × frontality). Faces that didn't feed the identity embedding are
+dimmed. Older sightings from before stacks existed show Frigate's
+whole-person thumbnail (and the full snapshot when opened) until you press
+**Build face crops** in the banner: the worker then rebuilds their stacks
 oldest first, one event per idle cycle, without touching clusters or names.
-**pause** stops it; pressing it again picks up where it left off and retries
+**Pause** stops it; pressing it again picks up where it left off and retries
 failures. Events whose recordings have aged out can't be backfilled.
 
 ## If it goes wrong

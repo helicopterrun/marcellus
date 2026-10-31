@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
@@ -42,8 +42,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["enrich"])
 
 # Sightings shown per cluster. Eight is enough to judge coherence at a glance
-# and keeps the phone strip a single comfortable swipe.
+# and keeps the phone strip a single comfortable swipe. A single-cluster view
+# (?cluster=N) shows more.
 _SIGHTINGS_PER_CLUSTER = 8
+_SIGHTINGS_SINGLE = 32
+
+# Clusters per page. On 2026-10-31 there were 465 clusters, 332 of them seen
+# once; rendering them all made a page of ~3,700 tiles.
+_PAGE_SIZE = 40
+
+# Page views. "people" is everyone named plus every unknown seen at least
+# twice -- the clusters worth naming. "once" is the long tail of single
+# sightings, mostly passers-by. "all" is the JSON default (everything).
+_VIEWS = ("people", "once", "all")
 
 # Centroid cosine distance under which two clusters get a "looks like" merge
 # hint. Deliberately looser than face_enrich.cluster_threshold (0.55): the
@@ -51,21 +62,59 @@ _SIGHTINGS_PER_CLUSTER = 8
 _SUGGEST_THRESHOLD = 0.6
 
 
-def _clusters(conn: sqlite3.Connection, *, show_excluded: bool = False) -> list[dict[str, Any]]:
-    """Clusters (named first, then by recency) with their best sightings.
+def _view_where(view: str) -> str:
+    if view == "people":
+        return "WHERE name IS NOT NULL OR observation_count >= 2"
+    if view == "once":
+        return "WHERE name IS NULL AND observation_count < 2"
+    return ""
+
+
+def _view_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Cluster counts for the page's tabs."""
+    row = conn.execute(
+        "SELECT SUM(name IS NOT NULL) AS named, "
+        "       SUM(name IS NULL AND observation_count >= 2) AS unknown, "
+        "       SUM(name IS NULL AND observation_count < 2) AS once "
+        "  FROM face_clusters"
+    ).fetchone()
+    named, unknown, once = (int(row[k] or 0) for k in ("named", "unknown", "once"))
+    return {"named": named, "unknown": unknown, "people": named + unknown, "once": once}
+
+
+def _clusters(
+    conn: sqlite3.Connection,
+    *,
+    show_excluded: bool = False,
+    view: str = "all",
+    cluster_id: int | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Clusters with their best sightings: named first (most recently seen
+    first), then unknowns by sighting count, so the people seen most -- the
+    ones worth naming -- lead.
 
     Excluded sightings (`excluded_at IS NOT NULL`) are hidden by default —
     they stay in the cluster's history but a person marked them "not this
     identity". `show_excluded=True` surfaces them (dimmed, "Include" action)
-    for review/undo.
+    for review/undo. `cluster_id` selects one cluster (any view).
     """
-    rows = [
-        dict(r)
-        for r in conn.execute(
-            "SELECT cluster_id, name, observation_count, created_at, last_seen_at "
-            "  FROM face_clusters ORDER BY (name IS NULL), last_seen_at DESC"
-        )
-    ]
+    if cluster_id is not None:
+        where, args = "WHERE cluster_id = ?", [cluster_id]
+    else:
+        where, args = _view_where(view), []
+    sql = (
+        "SELECT cluster_id, name, observation_count, created_at, last_seen_at "
+        f"  FROM face_clusters {where} "
+        " ORDER BY (name IS NULL), "
+        "          CASE WHEN name IS NULL THEN observation_count END DESC, "
+        "          last_seen_at DESC"
+    )
+    if limit is not None:
+        sql += " LIMIT ?"
+        args.append(limit)
+    rows = [dict(r) for r in conn.execute(sql, args)]
+    per_cluster = _SIGHTINGS_SINGLE if cluster_id is not None else _SIGHTINGS_PER_CLUSTER
     excluded_clause = "" if show_excluded else "AND excluded_at IS NULL "
     for r in rows:
         r["sightings"] = [
@@ -74,7 +123,7 @@ def _clusters(conn: sqlite3.Connection, *, show_excluded: bool = False) -> list[
                 "SELECT event_id, event_start_ts, distance, best_quality, excluded_at "
                 "  FROM face_enrichments WHERE cluster_id = ? " + excluded_clause + ""
                 " ORDER BY best_quality DESC LIMIT ?",
-                (r["cluster_id"], _SIGHTINGS_PER_CLUSTER),
+                (r["cluster_id"], per_cluster),
             )
         ]
         for sight in r["sightings"]:
@@ -92,7 +141,44 @@ def _clusters(conn: sqlite3.Connection, *, show_excluded: bool = False) -> list[
             (s["event_id"] for s in r["sightings"] if not s["excluded_at"]),
             r["sightings"][0]["event_id"] if r["sightings"] else None,
         )
+        r["avatar"] = _avatar_url(r["sightings"])
     return rows
+
+
+def _avatar_url(sightings: list[dict[str, Any]]) -> str | None:
+    """Best face crop among the sightings, else the first one's Frigate thumbnail."""
+    live = [s for s in sightings if not s.get("excluded_at")] or sightings
+    for s in live:
+        if s.get("faces"):
+            return f"/enrich/face/{s['event_id']}/{s['faces'][0]['rank']}.jpg"
+    return f"/enrich/thumb/{live[0]['event_id']}" if live else None
+
+
+def _cluster_index(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every cluster with an avatar, for the merge picker (no sightings)."""
+    out = []
+    for r in conn.execute(
+        "SELECT c.cluster_id, c.name, c.observation_count, c.last_seen_at, "
+        "       (SELECT e.event_id FROM face_enrichments e "
+        "         WHERE e.cluster_id = c.cluster_id AND e.excluded_at IS NULL "
+        "         ORDER BY e.best_quality DESC LIMIT 1) AS sample_event_id, "
+        "       (SELECT e.event_id FROM face_enrichments e JOIN face_crops f "
+        "            ON f.event_id = e.event_id AND f.rank = 0 AND f.crop_path IS NOT NULL "
+        "         WHERE e.cluster_id = c.cluster_id AND e.excluded_at IS NULL "
+        "         ORDER BY e.best_quality DESC LIMIT 1) AS face_event_id "
+        "  FROM face_clusters c "
+        " ORDER BY (c.name IS NULL), c.observation_count DESC, c.last_seen_at DESC"
+    ):
+        d = dict(r)
+        face_eid = d.pop("face_event_id")
+        if face_eid:
+            d["avatar"] = f"/enrich/face/{face_eid}/0.jpg"
+        elif d["sample_event_id"]:
+            d["avatar"] = f"/enrich/thumb/{d['sample_event_id']}"
+        else:
+            d["avatar"] = None
+        out.append(d)
+    return out
 
 
 def _similar_pairs(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
@@ -146,16 +232,36 @@ def _stats(conn: sqlite3.Connection, request: Request) -> dict[str, Any]:
 
 
 @router.get("/enrich/clusters", response_class=HTMLResponse)
-def clusters_view(request: Request, show_excluded: int = 0) -> Any:
+def clusters_view(
+    request: Request,
+    show_excluded: int = 0,
+    view: str = "people",
+    cluster: int | None = None,
+    page: int = Query(1, ge=1),
+) -> Any:
     s = _settings(request)
+    if view not in _VIEWS:
+        view = "people"
     conn = open_sidecar(s.sidecar.db_path)
     try:
-        clusters = _clusters(conn, show_excluded=bool(show_excluded))
+        clusters = _clusters(
+            conn,
+            show_excluded=bool(show_excluded),
+            view=view,
+            cluster_id=cluster,
+            limit=None if cluster is not None else _PAGE_SIZE * page,
+        )
         similar = _similar_pairs(conn)
         stats = _stats(conn, request)
         backfill = enrich.backfill_status(conn)
+        counts = _view_counts(conn)
+        known_names = sorted(
+            str(r["name"])
+            for r in conn.execute("SELECT name FROM face_clusters WHERE name IS NOT NULL")
+        )
     finally:
         conn.close()
+    total = counts.get(view, counts["people"] + counts["once"])
     return _templates(request).TemplateResponse(
         request,
         "enrich.html",
@@ -164,12 +270,27 @@ def clusters_view(request: Request, show_excluded: int = 0) -> Any:
             "similar": similar,
             "stats": stats,
             "backfill": backfill,
-            "known_names": sorted({c["name"] for c in clusters if c["name"]}),
+            "counts": counts,
+            "view": view,
+            "single": cluster,
+            "page": page,
+            "has_more": cluster is None and total > len(clusters),
+            "known_names": known_names,
             "enabled": s.face_enrich.enabled,
             "cameras": s.face_enrich.cameras,
             "show_excluded": bool(show_excluded),
         },
     )
+
+
+@router.get("/enrich/clusters/index.json")
+def clusters_index(request: Request) -> JSONResponse:
+    """Every cluster, avatar + counts only: the merge picker searches this."""
+    conn = open_sidecar(_settings(request).sidecar.db_path)
+    try:
+        return JSONResponse({"clusters": _cluster_index(conn)})
+    finally:
+        conn.close()
 
 
 @router.get("/enrich/clusters.json")

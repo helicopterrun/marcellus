@@ -6,69 +6,112 @@
 
 {% block page_heading %}<h1 class="sr-only">Face captures</h1>{% endblock %}
 {% block body %}
-<main id="main-content">
-  <div class="faces-bar">
-    <button type="button" id="rescan-captures">Run capture now</button>
-    <span class="mode">
-      {{ capture_camera or '—' }} ← {{ trigger_cameras|join(', ') or 'no triggers' }}
-      · <b>{{ 'ON' if enabled else 'OFF' }}</b>
-    </span>
-    <span class="mode">
-      {% for r in ['pending', 'kept', 'discarded', 'all'] %}
-        <a href="?days={{ days }}&amp;review={{ r }}"
-           class="page-link{% if review == r %} active{% endif %}">{{ r }}</a>{% if not loop.last %} · {% endif %}
-      {% endfor %}
-    </span>
-    {% if last_run %}
-    <span class="mode" title="heartbeat from the systemd oneshot (it runs in another process)">
-      last run: {{ last_run.captured }} captured · {{ last_run.no_face or 0 }} no face
-      · {{ last_run.no_recording }} no-rec
-      · {{ last_run.error }} err · {{ last_run.deduped }} dedup
+<main id="main-content" class="pp">
+  {% include "_people_tabs.html" %}
+
+  <p class="pp-lede">
+    When {{ trigger_cameras|join(', ') or 'a trigger camera' }} sees someone,
+    {{ capture_camera or 'the capture camera' }}'s full-resolution recording is checked for a face, and the
+    best few from each visit land here.
+  </p>
+
+  <div class="pp-stats">
+    {% if not enabled %}
+    <span class="pp-stat pp-stat-bad"><span class="pp-dot"></span>capture <b>off</b> (face_capture.enabled is false)</span>
+    {% elif last_run %}
+    <span class="pp-stat{{ ' pp-stat-bad' if last_run.error }}"
+          title="heartbeat from the systemd timer job (it runs in another process). Last run: {{ last_run.candidates or 0 }} candidate visits · {{ last_run.captured }} captured · {{ last_run.no_face or 0 }} frames without a face · {{ last_run.skipped or 0 }} extra faces skipped · {{ last_run.no_recording }} no recording · {{ last_run.deduped }} same visit · {{ last_run.error }} errors">
+      <span class="pp-dot"></span>
+      checked <time data-ts="{{ last_run.ran_at }}" data-fmt="ago">{{ fmt_ts(last_run.ran_at) }}</time>
+      · {% if last_run.captured %}<b>{{ last_run.captured }}</b> new face{{ 's' if last_run.captured != 1 }}{% else %}nothing new{% endif %}
+      {%- if last_run.error %} · <b class="pp-err">{{ last_run.error }} errors</b>{% endif %}
     </span>
     {% else %}
-    <span class="mode">last run: <b>never</b></span>
+    <span class="pp-stat pp-stat-bad"><span class="pp-dot"></span>capture job has <b>never run</b></span>
+    {% endif %}
+    {% if enabled %}
+    <button type="button" class="btn btn-neutral pp-stat-btn" id="rescan-captures">Check now</button>
     {% endif %}
   </div>
 
-  {% if not visits %}
-    <p class="empty">
-      No captures in the last {{ days }} day(s) with review = {{ review }}.
-      {% if not enabled %}<br><b>face_capture.enabled is false.</b>{% endif %}
-    </p>
-  {% endif %}
-
-  {% for v in visits %}
-  <section class="capture-visit" data-visit="{{ v.visit_key }}">
-    <header>
-      <b>{{ v.trigger_camera }}</b> saw a {{ v.trigger_label }}
-      {% if v.trigger_score %}({{ '%.2f'|format(v.trigger_score) }}){% endif %}
-      · <time>{{ v.when }}</time>
-      · {{ v.captures|length }} frame{{ 's' if v.captures|length != 1 else '' }}
-      <button type="button" class="discard-visit" data-id="{{ v.captures[0].id }}">discard visit</button>
-    </header>
-    <div class="capture-strip">
-      {% for c in v.captures %}
-      <figure class="capture-card" data-id="{{ c.id }}">
-        <a href="/faces/captures/{{ c.id }}/full.jpg" target="_blank" rel="noopener">
-          <img loading="lazy"
-               src="/faces/captures/{{ c.id }}/{{ 'thumb' if c.has_thumb else 'full' }}.jpg"
-               alt="capture {{ c.offset_ms }}ms">
-        </a>
-        <figcaption>
-          {{ '%+.1f'|format(c.offset_ms / 1000) }}s
-          {%- if c.face_score %} · <span title="cropped to the detected face (SCRFD score)">face {{ '%.2f'|format(c.face_score) }}</span>
-          {%- elif c.cropped %} · <span title="cropped to the capture camera's own person box">head</span>{% endif %}
-          {%- if c.width %} · {{ c.width }}×{{ c.height }}{% endif %}
-          <span class="actions">
-            <button type="button" class="keep" data-id="{{ c.id }}">keep</button>
-            <button type="button" class="discard" data-id="{{ c.id }}">discard</button>
-          </span>
-        </figcaption>
-      </figure>
+  <div class="pp-toolbar">
+    <div class="viewseg pp-seg" role="tablist">
+      {% for r, label in [('pending', 'To review'), ('kept', 'Kept'), ('discarded', 'Discarded'), ('all', 'All')] %}
+      <a href="?days={{ days|int }}&amp;review={{ r }}" role="tab"
+         class="vbtn{{ ' active' if review == r }}">{{ label }} <span class="pp-n">{{ counts.get(r, 0) }}</span></a>
       {% endfor %}
     </div>
-  </section>
+    <div class="viewseg pp-seg pp-seg-sm" aria-label="Time range">
+      {% for d in [7, 30, 90] %}
+      <a href="?days={{ d }}&amp;review={{ review }}" class="vbtn{{ ' active' if days|int == d }}">{{ d }} days</a>
+      {% endfor %}
+    </div>
+  </div>
+
+  {% if not visits %}
+    <div class="pp-empty">
+      {% if review == 'pending' %}
+        Nothing to review from the last {{ days|int }} days.
+      {% else %}
+        No {{ '' if review == 'all' else review ~ ' ' }}captures from the last {{ days|int }} days.
+      {% endif %}
+      {% if not enabled %}<br><b>face_capture.enabled is false.</b>{% endif %}
+    </div>
+  {% endif %}
+
+  <div class="fc-grid">
+  {% for v in visits %}
+  {% set best = v.best %}
+  {% set reviews = v.captures|map(attribute='review')|unique|list %}
+  <article class="fc-card" data-visit="{{ v.visit_key }}" data-id="{{ v.captures[0].id }}">
+    <button type="button" class="fc-hero" data-id="{{ best.id }}" data-box="{{ best.face_box|tojson if best.face_box else '' }}"
+            aria-label="Open the full frame">
+      <img loading="lazy" src="/faces/captures/{{ best.id }}/{{ 'thumb' if best.has_thumb else 'full' }}.jpg" alt="">
+      {% if review == 'all' and reviews != ['pending'] %}
+      <span class="fc-flag">{{ reviews|reject('equalto', 'pending')|join(' · ') }}</span>
+      {% endif %}
+    </button>
+    {% if v.captures|length > 1 %}
+    <div class="fc-film" role="group" aria-label="Frames from this visit">
+      {% for c in v.captures %}
+      <button type="button" class="fc-frame{{ ' active' if c.id == best.id }}" data-id="{{ c.id }}"
+              data-src="/faces/captures/{{ c.id }}/{{ 'thumb' if c.has_thumb else 'full' }}.jpg"
+              data-offset="{{ c.offset_ms }}" data-score="{{ '%.2f'|format(c.face_score) if c.face_score else '' }}"
+              data-box="{{ c.face_box|tojson if c.face_box else '' }}"
+              aria-label="Frame at {{ '%+.1f'|format(c.offset_ms / 1000) }}s">
+        <img loading="lazy" src="/faces/captures/{{ c.id }}/{{ 'thumb' if c.has_thumb else 'full' }}.jpg" alt="">
+      </button>
+      {% endfor %}
+    </div>
+    {% endif %}
+    <div class="fc-body">
+      <div class="fc-title">
+        <time data-ts="{{ v.start_ts }}" data-fmt="when">{{ v.when }}</time>
+      </div>
+      <div class="fc-sub">
+        {{ v.trigger_camera }} saw a {{ v.trigger_label }}
+        · {{ v.captures|length }} face{{ 's' if v.captures|length != 1 }}
+        {%- if best.face_score %} · best <span title="face detector confidence">{{ '%.2f'|format(best.face_score) }}</span>{% endif %}
+      </div>
+      <div class="fc-ids">
+        {% for i in v.identities[:3] %}
+        <a class="fc-id{{ ' fc-id-named' if i.name }}" href="/enrich/clusters?cluster={{ i.cluster_id }}"
+           title="{{ i.observation_count }} sightings: face_enrich put {{ capture_camera }}'s view of this visit in this identity">
+          {{ i.name or 'Unknown #' ~ i.cluster_id }}
+          {%- if not i.name %} <span>· {{ i.observation_count }} seen</span>{% endif %}</a>
+        {% else %}
+        <span class="fc-noid" title="no clustered {{ capture_camera }} sighting within {{ '%d'|format(window_s) }}s of this visit">no identity match</span>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="fc-actions">
+      <button type="button" class="btn fc-keep" data-id="{{ v.captures[0].id }}"
+              title="Mark as a good capture. Kept frames are skipped by regate; every capture still ages out after retention_days.">Keep</button>
+      <button type="button" class="btn fc-discard" data-id="{{ v.captures[0].id }}">Discard</button>
+    </div>
+  </article>
   {% endfor %}
+  </div>
 </main>
 {% endblock %}
 

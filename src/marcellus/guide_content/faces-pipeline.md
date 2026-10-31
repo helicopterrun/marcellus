@@ -25,11 +25,24 @@ the gate those frames are just the street. When the capture camera tracks the
 person itself, frames are also sampled across its own sighting, not only at
 fixed offsets from the trigger, so a visitor who reaches the gate a while
 after (or before) the trigger fires is still caught. Each kept frame's
-thumbnail is cropped to the face; click it for the full frame.
+thumbnail is cropped to the face.
 
-The captures page groups by visit for fast review: keep the sharp frontal
-shots, discard the rest. Kept captures are the raw material the
-[identity clustering](/guide/identities) stage feeds on.
+The captures page shows one card per visit: the most confident face large,
+the visit's other faces in a strip below it (tap one to swap it in), and
+**To review / Kept / Discarded / All** tabs with counts over the last 7, 30
+or 90 days. Tap the face to open the full frame with the detected face
+outlined; arrow keys step through the visit's frames, and a single bad frame
+can be discarded there. **Keep** and **Discard** act on the whole visit and
+offer **Undo**. Kept frames are skipped by `face-capture regate`, but every
+capture, kept or not, is deleted after `retention_days`. Discarding only
+hides a visit from review.
+
+Each card also names the [identities](/guide/identities) clustered from the
+capture camera's own sightings within `event_window_s` of the trigger, and
+links straight to them. Identity clustering runs on those sightings, not on
+these captures, so this is where a sharp capture meets the cluster to name.
+The status pill shows when the capture job last ran (hover it for the full
+counts), and **Check now** runs it immediately.
 
 ## Configuration
 
