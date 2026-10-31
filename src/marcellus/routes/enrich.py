@@ -43,9 +43,14 @@ router = APIRouter(tags=["enrich"])
 
 # Sightings shown per cluster. Eight is enough to judge coherence at a glance
 # and keeps the phone strip a single comfortable swipe. A single-cluster view
-# (?cluster=N) shows more.
+# (?cluster=N) shows every sighting: it is where wrong joins get cleaned out,
+# and those are usually the low-quality ones a best-first cap would hide (on
+# 2026-10-31 the largest cluster had 237).
 _SIGHTINGS_PER_CLUSTER = 8
-_SIGHTINGS_SINGLE = 32
+
+# Single-cluster sort orders. "odd" puts the sightings furthest from the
+# cluster's current centroid first -- the likeliest wrong joins.
+_SORTS = ("best", "odd")
 
 # Clusters per page. On 2026-10-31 there were 465 clusters, 332 of them seen
 # once; rendering them all made a page of ~3,700 tiles.
@@ -89,6 +94,7 @@ def _clusters(
     view: str = "all",
     cluster_id: int | None = None,
     limit: int | None = None,
+    sort: str = "best",
 ) -> list[dict[str, Any]]:
     """Clusters with their best sightings: named first (most recently seen
     first), then unknowns by sighting count, so the people seen most -- the
@@ -97,14 +103,16 @@ def _clusters(
     Excluded sightings (`excluded_at IS NOT NULL`) are hidden by default —
     they stay in the cluster's history but a person marked them "not this
     identity". `show_excluded=True` surfaces them (dimmed, "Include" action)
-    for review/undo. `cluster_id` selects one cluster (any view).
+    for review/undo. `cluster_id` selects one cluster (any view) with all of
+    its sightings, each with `fit` (cosine distance to the current centroid);
+    `sort="odd"` orders them worst fit first.
     """
     if cluster_id is not None:
         where, args = "WHERE cluster_id = ?", [cluster_id]
     else:
         where, args = _view_where(view), []
     sql = (
-        "SELECT cluster_id, name, observation_count, created_at, last_seen_at "
+        "SELECT cluster_id, name, observation_count, created_at, last_seen_at, centroid "
         f"  FROM face_clusters {where} "
         " ORDER BY (name IS NULL), "
         "          CASE WHEN name IS NULL THEN observation_count END DESC, "
@@ -114,18 +122,26 @@ def _clusters(
         sql += " LIMIT ?"
         args.append(limit)
     rows = [dict(r) for r in conn.execute(sql, args)]
-    per_cluster = _SIGHTINGS_SINGLE if cluster_id is not None else _SIGHTINGS_PER_CLUSTER
+    single = cluster_id is not None
     excluded_clause = "" if show_excluded else "AND excluded_at IS NULL "
     for r in rows:
+        centroid = r.pop("centroid")
         r["sightings"] = [
             dict(s)
             for s in conn.execute(
-                "SELECT event_id, event_start_ts, distance, best_quality, excluded_at "
-                "  FROM face_enrichments WHERE cluster_id = ? " + excluded_clause + ""
+                "SELECT event_id, event_start_ts, distance, best_quality, excluded_at"
+                + (", embedding" if single else "")
+                + "  FROM face_enrichments WHERE cluster_id = ? " + excluded_clause + ""
                 " ORDER BY best_quality DESC LIMIT ?",
-                (r["cluster_id"], per_cluster),
+                (r["cluster_id"], -1 if single else _SIGHTINGS_PER_CLUSTER),
             )
         ]
+        if single:
+            _attach_fit(r["sightings"], centroid)
+            if sort == "odd":
+                r["sightings"].sort(
+                    key=lambda s: -1.0 if s["fit"] is None else s["fit"], reverse=True
+                )
         for sight in r["sightings"]:
             # Rendered crops only, best first; empty for events enriched
             # before stacks existed (the template falls back to the thumbnail).
@@ -143,6 +159,19 @@ def _clusters(
         )
         r["avatar"] = _avatar_url(r["sightings"])
     return rows
+
+
+def _attach_fit(sightings: list[dict[str, Any]], centroid: bytes) -> None:
+    """Set each sighting's `fit`: cosine distance from its embedding to the
+    cluster's current centroid (None when the embedding is gone)."""
+    cent = enrich.l2_normalize(enrich.unpack_embedding(centroid))
+    for s in sightings:
+        blob = s.pop("embedding")
+        if not blob:
+            s["fit"] = None
+            continue
+        emb = enrich.l2_normalize(enrich.unpack_embedding(blob))
+        s["fit"] = round(enrich.cosine_distance(emb, cent), 3)
 
 
 def _avatar_url(sightings: list[dict[str, Any]]) -> str | None:
@@ -184,16 +213,46 @@ def _cluster_index(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 def _similar_pairs(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
     """cluster_id -> its closest other cluster under the suggest threshold.
 
-    O(n²) over centroids is fine at this table's size (tens of clusters); the
-    UI wants at most one hint per cluster, so keep only the best partner.
+    All pairs, so O(n²): one matrix product with numpy (installed with the
+    `enrich` extra, which any instance producing clusters has). The pure-Python
+    fallback took 7.5s on the page at 482 clusters (2026-10-31); numpy takes
+    milliseconds. The UI wants at most one hint per cluster, so keep only the
+    best partner.
     """
-    cents = [
-        (
-            int(r["cluster_id"]),
-            r["name"],
-            enrich.l2_normalize(enrich.unpack_embedding(r["centroid"])),
-        )
+    rows = [
+        (int(r["cluster_id"]), r["name"], r["centroid"])
         for r in conn.execute("SELECT cluster_id, name, centroid FROM face_clusters")
+    ]
+    try:
+        import numpy as np
+    except ImportError:
+        return _similar_pairs_py(rows)
+    if len(rows) < 2:
+        return {}
+    m = np.stack([np.frombuffer(blob, dtype="<f4") for _, _, blob in rows]).astype(np.float64)
+    norms = np.linalg.norm(m, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    m /= norms
+    dist = 1.0 - m @ m.T
+    np.fill_diagonal(dist, np.inf)
+    nearest = dist.argmin(axis=1)
+    best: dict[int, dict[str, Any]] = {}
+    for i, j in enumerate(nearest):
+        d = float(dist[i, j])
+        if d <= _SUGGEST_THRESHOLD:
+            best[rows[i][0]] = {
+                "cluster_id": rows[j][0],
+                "name": rows[j][1],
+                "distance": round(d, 3),
+            }
+    return best
+
+
+def _similar_pairs_py(rows: list[tuple[int, Any, bytes]]) -> dict[int, dict[str, Any]]:
+    """`_similar_pairs` without numpy."""
+    cents = [
+        (cid, name, enrich.l2_normalize(enrich.unpack_embedding(blob)))
+        for cid, name, blob in rows
     ]
     best: dict[int, dict[str, Any]] = {}
     for i, (cid_a, _name_a, cent_a) in enumerate(cents):
@@ -238,10 +297,13 @@ def clusters_view(
     view: str = "people",
     cluster: int | None = None,
     page: int = Query(1, ge=1),
+    sort: str = "best",
 ) -> Any:
     s = _settings(request)
     if view not in _VIEWS:
         view = "people"
+    if sort not in _SORTS:
+        sort = "best"
     conn = open_sidecar(s.sidecar.db_path)
     try:
         clusters = _clusters(
@@ -250,6 +312,7 @@ def clusters_view(
             view=view,
             cluster_id=cluster,
             limit=None if cluster is not None else _PAGE_SIZE * page,
+            sort=sort,
         )
         similar = _similar_pairs(conn)
         stats = _stats(conn, request)
@@ -273,11 +336,13 @@ def clusters_view(
             "counts": counts,
             "view": view,
             "single": cluster,
+            "sort": sort,
             "page": page,
             "has_more": cluster is None and total > len(clusters),
             "known_names": known_names,
             "enabled": s.face_enrich.enabled,
             "cameras": s.face_enrich.cameras,
+            "join_threshold": s.face_enrich.cluster_threshold,
             "show_excluded": bool(show_excluded),
         },
     )

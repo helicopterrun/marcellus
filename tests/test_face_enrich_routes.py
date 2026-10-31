@@ -240,6 +240,75 @@ def test_similar_hint_appears_for_close_centroids(client: TestClient) -> None:
     assert sim["2"]["cluster_id"] == 1 and sim["2"]["name"] == "alice"
 
 
+def test_similar_pairs_numpy_matches_pure_python(sidecar_db_path: Path) -> None:
+    import random
+
+    rng = random.Random(7)
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        base = [rng.gauss(0, 1) for _ in range(16)]
+        for i in range(30):
+            # Every third cluster is a near-copy of `base`, so hints exist.
+            vec = [b + rng.gauss(0, 0.3) for b in base] if i % 3 == 0 else [
+                rng.gauss(0, 1) for _ in range(16)
+            ]
+            conn.execute(
+                "INSERT INTO face_clusters (name, centroid, observation_count, created_at, "
+                "last_seen_at) VALUES (?, ?, 1, '', 0)",
+                (f"n{i}" if i % 5 == 0 else None, enrich.pack_embedding(vec)),
+            )
+        conn.commit()
+        rows = [
+            (int(r["cluster_id"]), r["name"], r["centroid"])
+            for r in conn.execute("SELECT cluster_id, name, centroid FROM face_clusters")
+        ]
+        fast = enrich_routes._similar_pairs(conn)
+    finally:
+        conn.close()
+    slow = enrich_routes._similar_pairs_py(rows)
+    assert fast and fast.keys() == slow.keys()
+    for cid, hint in slow.items():
+        assert fast[cid]["cluster_id"] == hint["cluster_id"]
+        assert fast[cid]["name"] == hint["name"]
+        assert fast[cid]["distance"] == pytest.approx(hint["distance"], abs=1e-3)
+
+
+def test_single_cluster_shows_every_sighting_and_sorts_least_alike_first(
+    client: TestClient,
+) -> None:
+    conn = sqlite3.connect(client.app.state.settings.sidecar.db_path)  # type: ignore[attr-defined]
+    # Cluster 1 (centroid [1, 0]) gets 40 more sightings, more than any strip
+    # cap. ev-odd has the best quality but points the other way.
+    for i in range(40):
+        conn.execute(
+            "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+            "embedding, best_quality, status, processed_at) "
+            "VALUES (?, 'gate-face', 0, 1, ?, ?, 'enriched', '')",
+            (f"ev-{i:02d}", enrich.pack_embedding([1.0, 0.05 * i]), 0.1 + i / 100),
+        )
+    conn.execute(
+        "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+        "embedding, best_quality, status, processed_at) "
+        "VALUES ('ev-odd', 'gate-face', 0, 1, ?, 0.99, 'enriched', '')",
+        (enrich.pack_embedding([0.0, 1.0]),),
+    )
+    conn.commit()
+    conn.close()
+
+    best = client.get("/enrich/clusters?cluster=1").text
+    assert best.count('class="id-sighting') == 42
+    assert "Least alike first" in best and "id-fit-odd" in best
+
+    odd = client.get("/enrich/clusters?cluster=1&sort=odd").text
+    marker = '<figure class="id-sighting" data-event="'
+    order = [chunk.split('"', 1)[0] for chunk in odd.split(marker)[1:]]
+    assert order[0] == "ev-odd"
+    # ev-a and ev-00 sit exactly on the centroid direction: last.
+    assert set(order[-2:]) == {"ev-a", "ev-00"}
+    # Unknown sort values fall back to best-first.
+    assert client.get("/enrich/clusters?cluster=1&sort=bogus").status_code == 200
+
+
 def test_sighting_remove_detaches_and_deletes_empty_cluster(client: TestClient) -> None:
     # ev-b is cluster 2's only sighting: removing it deletes the cluster.
     r = client.post("/enrich/events/ev-b/remove")

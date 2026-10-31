@@ -44,6 +44,14 @@
   <div class="pp-toolbar">
     {% if single is not none %}
       <a href="/enrich/clusters" class="pp-back">← All identities</a>
+      <div class="viewseg pp-seg pp-seg-sm" role="tablist" aria-label="Sort sightings">
+        <a href="?cluster={{ single }}&amp;sort=best{{ '&show_excluded=1' if show_excluded }}" role="tab"
+           class="vbtn{{ ' active' if sort == 'best' }}"
+           title="clearest faces first">Best first</a>
+        <a href="?cluster={{ single }}&amp;sort=odd{{ '&show_excluded=1' if show_excluded }}" role="tab"
+           class="vbtn{{ ' active' if sort == 'odd' }}"
+           title="the sightings that look least like the rest of this identity first: likeliest wrong joins">Least alike first</a>
+      </div>
     {% else %}
     <div class="viewseg pp-seg" role="tablist">
       <a href="?view=people{{ '&show_excluded=1' if show_excluded }}" role="tab"
@@ -54,7 +62,7 @@
          title="unknowns seen only once -- mostly passers-by">Seen once <span class="pp-n">{{ counts.once }}</span></a>
     </div>
     {% endif %}
-    <a class="pp-toggle" href="?{{ 'cluster=' ~ single ~ '&' if single is not none else 'view=' ~ view ~ '&' }}show_excluded={{ 0 if show_excluded else 1 }}">
+    <a class="pp-toggle" href="?{{ 'cluster=' ~ single ~ '&sort=' ~ sort ~ '&' if single is not none else 'view=' ~ view ~ '&' }}show_excluded={{ 0 if show_excluded else 1 }}">
       {{ 'Hide excluded sightings' if show_excluded else 'Show excluded sightings' }}</a>
   </div>
 
@@ -162,6 +170,8 @@
         {% endif %}
         <figcaption>
           <time data-ts="{{ e.event_start_ts }}" data-fmt="short">{{ fmt_ts(e.event_start_ts) }}</time>
+          {%- if e.fit is defined and e.fit is not none %} · <span class="id-fit{{ ' id-fit-odd' if e.fit > join_threshold }}"
+            title="distance from this identity's average face (0 = identical; new sightings join under {{ join_threshold }})">{{ '%.2f'|format(e.fit) }}</span>{% endif %}
           {%- if e.excluded_at %} · excluded{% endif %}
         </figcaption>
       </figure>
