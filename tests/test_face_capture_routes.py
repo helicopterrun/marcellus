@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from marcellus import db
 from marcellus.config import (
     FaceCaptureSection,
+    FaceEnrichSection,
     FrigateSection,
     Settings,
     SidecarSection,
@@ -203,3 +204,101 @@ def test_routes_are_behind_the_auth_gate(
     client = TestClient(create_app(settings))
     for path in ("/faces/captures", "/faces/captures.json", "/faces/captures/1/full.jpg"):
         assert client.get(path).status_code in (401, 403), path
+
+
+def test_settled_rows_do_not_crowd_visits_out_of_the_limit(
+    env: tuple[TestClient, dict[str, int]],
+) -> None:
+    """The gate settles most sampled frames as no_face; a LIMIT applied before
+    filtering to 'captured' used to hide older visits (5 of 43 shown)."""
+    client, _ = env
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        for off in range(300):
+            conn.execute(
+                "INSERT INTO face_captures (trigger_event_id, trigger_camera, trigger_label, "
+                "trigger_start_ts, visit_key, capture_camera, offset_ms, frame_ts, status, "
+                "created_at) VALUES ('d2', 'doorbell', 'person', ?, 'd2', 'gate-face', ?, ?, "
+                "'no_face', 'now')",
+                (1_787_500_000.0, off, 1_787_500_000.0),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    visits = client.get("/faces/captures.json?days=365&limit=200").json()["visits"]
+    assert [v["visit_key"] for v in visits] == ["d1"]
+
+
+def test_face_box_and_best_frame(env: tuple[TestClient, dict[str, int]]) -> None:
+    client, ids = env
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        conn.execute(
+            "UPDATE face_captures SET face_box = '[0.1, 0.2, 0.3, 0.4]', face_score = 0.9 "
+            "WHERE id = ?", (ids["b"],),
+        )
+        conn.execute(
+            "UPDATE face_captures SET face_box = 'not json', face_score = 0.7 WHERE id = ?",
+            (ids["a"],),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    visit = client.get("/faces/captures.json?days=365").json()["visits"][0]
+    assert visit["best"]["id"] == ids["b"]
+    boxes = {c["id"]: c["face_box"] for c in visit["captures"]}
+    assert boxes[ids["b"]] == [0.1, 0.2, 0.3, 0.4] and boxes[ids["a"]] is None
+    html = client.get("/faces/captures?days=365").text
+    assert 'data-box="[0.1, 0.2, 0.3, 0.4]"' in html
+    # Filter tabs carry per-state visit counts.
+    assert "To review" in html and '<span class="pp-n">1</span>' in html
+
+
+def test_visit_links_to_identities_seen_on_the_capture_camera(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path
+) -> None:
+    cfg = tmp_path / "frigate-config.yml"
+    cfg.write_text("cameras: {}\n")
+    settings = Settings(
+        frigate=FrigateSection(config_path=cfg, db_path=frigate_db_path),
+        sidecar=SidecarSection(
+            db_path=sidecar_db_path, bind_port=5001, require_frigate_auth=False
+        ),
+        face_capture=FaceCaptureSection(
+            enabled=True, capture_camera="gate-face", trigger_cameras=["doorbell"],
+            output_dir=tmp_path / "captures", event_window_s=30.0,
+        ),
+        face_enrich=FaceEnrichSection(cameras=["gate-face"], crops_dir=tmp_path / "crops"),
+    )
+    _seed(settings)
+    t = 1_787_400_000.0
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        for name in ("bob", None, None):
+            conn.execute(
+                "INSERT INTO face_clusters (name, centroid, observation_count, created_at, "
+                "last_seen_at) VALUES (?, x'00', 5, '', 0)", (name,),
+            )
+        for eid, cid, ts, cam, excluded in (
+            ("in", 2, t + 10, "gate-face", None),       # unknown #2, in window
+            ("named", 1, t - 20, "gate-face", None),    # bob, in window
+            ("far", 3, t + 100, "gate-face", None),     # outside the window
+            ("other-cam", 3, t, "doorbell", None),      # not a capture camera
+            ("excl", 3, t, "gate-face", "2026-10-01"),  # excluded sighting
+        ):
+            conn.execute(
+                "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+                "status, processed_at, excluded_at) VALUES (?, ?, ?, ?, 'enriched', '', ?)",
+                (eid, cam, ts, cid, excluded),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    client = TestClient(create_app(settings))
+    visit = client.get("/faces/captures.json?days=365").json()["visits"][0]
+    assert [(i["cluster_id"], i["name"]) for i in visit["identities"]] == [(1, "bob"), (2, None)]
+    html = client.get("/faces/captures?days=365").text
+    assert "/enrich/clusters?cluster=1" in html and "Unknown #2" in html
+    assert "/enrich/clusters?cluster=3" not in html

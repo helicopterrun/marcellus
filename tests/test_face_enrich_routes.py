@@ -22,6 +22,7 @@ from marcellus.config import (
 )
 from marcellus.faces import enrich
 from marcellus.frigate_api import FrigateAPIError, FrigateClient
+from marcellus.routes import enrich as enrich_routes
 from marcellus.server import create_app
 from tests.conftest import FRIGATE_EVENT_SCHEMA
 
@@ -68,7 +69,7 @@ def test_clusters_page_renders(client: TestClient) -> None:
     r = client.get("/enrich/clusters")
     assert r.status_code == 200
     assert "alice" in r.text
-    assert "unknown #2" in r.text
+    assert "Unknown #2" in r.text
 
 
 def test_clusters_json_orders_named_first(client: TestClient) -> None:
@@ -130,6 +131,84 @@ def test_delete_clears_assignments(client: TestClient) -> None:
     assert client.post("/enrich/clusters/2/delete").status_code == 404
 
 
+def _add_cluster(settings: Settings, name: str | None, count: int, event_id: str) -> int:
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        cur = conn.execute(
+            "INSERT INTO face_clusters (name, centroid, observation_count, created_at, "
+            "last_seen_at) VALUES (?, ?, ?, '', ?)",
+            (name, enrich.pack_embedding([0.6, 0.8]), count, time.time()),
+        )
+        cid = int(cur.lastrowid or 0)
+        conn.execute(
+            "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+            "embedding, best_quality, status, processed_at) "
+            "VALUES (?, 'gate-face', 0, ?, ?, 0.5, 'enriched', '')",
+            (event_id, cid, enrich.pack_embedding([0.6, 0.8])),
+        )
+        conn.commit()
+        return cid
+    finally:
+        conn.close()
+
+
+def test_people_view_hides_single_sightings_and_once_view_shows_them(
+    client: TestClient,
+) -> None:
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    once = _add_cluster(settings, None, 1, "ev-once")
+    people = client.get("/enrich/clusters").text
+    assert f"Unknown #{once}" not in people and "Unknown #2" in people
+    # Tab counts: alice + unknown #2 under People, the new one under Seen once.
+    assert '<span class="pp-n">2</span>' in people and '<span class="pp-n">1</span>' in people
+    seen_once = client.get("/enrich/clusters?view=once").text
+    cards = seen_once.split("</datalist>", 1)[1]  # the name datalist lists alice
+    assert f"Unknown #{once}" in cards and "alice" not in cards
+    # A bogus view falls back to People rather than erroring.
+    assert "Unknown #2" in client.get("/enrich/clusters?view=nope").text
+
+
+def test_unknowns_sort_by_sightings_after_named(client: TestClient) -> None:
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    big = _add_cluster(settings, None, 9, "ev-big")
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        order = [c["cluster_id"] for c in enrich_routes._clusters(conn, view="people")]
+    finally:
+        conn.close()
+    assert order == [1, big, 2]  # named first, then the most-seen unknown
+
+
+def test_single_cluster_view_and_missing_cluster(client: TestClient) -> None:
+    html = client.get("/enrich/clusters?cluster=2").text
+    assert "Unknown #2" in html and "alice" not in html.split("<datalist", 1)[1].split(
+        "</datalist>", 1
+    )[1]
+    assert "All identities" in html
+    assert "no longer exists" in client.get("/enrich/clusters?cluster=999").text
+
+
+def test_pagination_offers_show_more(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(enrich_routes, "_PAGE_SIZE", 1)
+    assert "Show more" in client.get("/enrich/clusters").text
+    assert "Show more" not in client.get("/enrich/clusters?page=2").text
+
+
+def test_cluster_index_lists_every_cluster_with_an_avatar(client: TestClient) -> None:
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    _add_cluster(settings, None, 1, "ev-once")
+    rows = client.get("/enrich/clusters/index.json").json()["clusters"]
+    assert [r["cluster_id"] for r in rows][:1] == [1]  # named first
+    assert len(rows) == 3
+    by_id = {r["cluster_id"]: r for r in rows}
+    assert by_id[1]["avatar"] == "/enrich/thumb/ev-a"  # no crops: Frigate thumbnail
+    _set_stack(settings, "ev-a", [0.9])
+    rows = client.get("/enrich/clusters/index.json").json()["clusters"]
+    assert rows[0]["avatar"] == "/enrich/face/ev-a/0.jpg"  # a crop wins
+
+
 def test_thumb_rejects_unknown_event(client: TestClient) -> None:
     assert client.get("/enrich/thumb/not-ours").status_code == 404
 
@@ -137,13 +216,13 @@ def test_thumb_rejects_unknown_event(client: TestClient) -> None:
 def test_page_shows_sightings_stats_and_similar_hint(client: TestClient) -> None:
     r = client.get("/enrich/clusters")
     assert r.status_code == 200
-    # Sighting strip: both seeded events render thumbnails + snapshot links.
-    assert "/enrich/thumb/ev-a" in r.text
-    assert "/api/events/ev-a/snapshot.jpg" in r.text
+    # Sighting strip: both seeded events render thumbnails (the snapshot link
+    # and full frame live in the JS lightbox).
+    assert "/enrich/thumb/ev-a" in r.text and 'data-event="ev-b"' in r.text
     # Stats bar renders (both seeded rows have event_start_ts=0, outside 7d).
-    assert "enriched" in r.text and "worker:" in r.text
+    assert "enriched" in r.text and "this week:" in r.text
     # Seeded centroids are orthogonal — no similarity hint.
-    assert "looks like" not in r.text
+    assert "Looks like" not in r.text
 
 
 def test_similar_hint_appears_for_close_centroids(client: TestClient) -> None:
@@ -156,7 +235,7 @@ def test_similar_hint_appears_for_close_centroids(client: TestClient) -> None:
     conn.commit()
     conn.close()
     r = client.get("/enrich/clusters")
-    assert "looks like" in r.text
+    assert "Looks like" in r.text
     sim = client.get("/enrich/clusters.json").json()["similar"]
     assert sim["2"]["cluster_id"] == 1 and sim["2"]["name"] == "alice"
 
@@ -647,11 +726,11 @@ def test_backfill_yields_to_live_events(
 
 def test_backfill_routes_queue_pause_and_render(client: TestClient) -> None:
     html = client.get("/enrich/clusters").text
-    assert "backfill stacks" in html and "older sightings without" in html
+    assert "Build face crops" in html and "older sightings have no face crops" in html
     r = client.post("/enrich/backfill", json={"run": True})
     assert r.status_code == 200 and r.json()["queued"] == 2  # ev-a, ev-b
     assert client.get("/enrich/backfill.json").json()["queued"] == 2
-    assert "pause" in client.get("/enrich/clusters").text
+    assert "Pause" in client.get("/enrich/clusters").text
     assert client.post("/enrich/backfill", json={"run": False}).json()["queued"] == 0
 
 
