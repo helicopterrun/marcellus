@@ -45,6 +45,14 @@ settings/config as the server, run one-off or from cron/systemd timers.
 - `prune` -- drop captures past `face_capture.retention_days`.
 - `stats --days` -- counts by status/review plus the last-run heartbeat.
 
+## `fsc face-enrich`
+
+- `regate --dry-run` -- apply `face_enrich.min_det_score` to sightings
+  clustered before it existed: each sighting's best face is re-detected on
+  its original recording frame, and one under the floor is detached from its
+  identity (crops dropped). Identities left empty are deleted; the rest get
+  their average face rebuilt. Sightings whose recording is gone are left alone.
+
 ## `fsc analysis`
 
 - `score-histogram --days --camera --label --min-samples --json` -- score

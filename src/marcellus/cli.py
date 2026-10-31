@@ -29,11 +29,13 @@ wildlife_app = typer.Typer(
     help="Wildlife finder: MegaDetector + SpeciesNet over segments where Frigate "
     "tracked nothing."
 )
+face_enrich_app = typer.Typer(help="Face enrichment: the identities behind /enrich/clusters.")
 scrub_app = typer.Typer(help="Uniform-cadence scrub-cache generation (sprite sheets).")
 encounters_app = typer.Typer(help="Encounters: linked chains of Frigate review segments.")
 app.add_typer(triage_app, name="triage")
 app.add_typer(analysis_app, name="analysis")
 app.add_typer(face_capture_app, name="face-capture")
+app.add_typer(face_enrich_app, name="face-enrich")
 app.add_typer(wildlife_app, name="wildlife")
 app.add_typer(scrub_app, name="scrub")
 app.add_typer(encounters_app, name="encounters")
@@ -350,6 +352,16 @@ def face_capture_regate(
     typer.echo(json.dumps(out))
     if out.get("error"):
         raise typer.Exit(code=2)
+
+
+@face_enrich_app.command("regate")
+def face_enrich_regate(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Count only; change nothing."),
+) -> None:
+    """Apply min_det_score to clustered sightings: detach the ones whose face isn't one."""
+    from marcellus.faces import enrich
+
+    typer.echo(json.dumps(enrich.regate(load_settings(), dry_run=dry_run)))
 
 
 @face_capture_app.command("prune")

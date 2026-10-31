@@ -529,6 +529,8 @@ CREATE TABLE IF NOT EXISTS face_crops (
     bbox       TEXT NOT NULL,
     used       INTEGER NOT NULL,
     crop_path  TEXT,
+    -- SCRFD detection confidence. NULL for crops saved before it was kept.
+    det_score  REAL,
     PRIMARY KEY (event_id, rank)
 );
 CREATE INDEX IF NOT EXISTS idx_face_enrich_age     ON face_enrichments(event_start_ts);
@@ -946,6 +948,10 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("best_crop_path", "TEXT"),
         # Face-stack backfill queue. Also in the CREATE TABLE literal.
         ("stack_status", "TEXT"),
+    ],
+    "face_crops": [
+        # Detection confidence (min_det_score gate). Also in the CREATE TABLE literal.
+        ("det_score", "REAL"),
     ],
     "encounters": [
         # Notability stamp (encounters/notability.py). Also in the CREATE

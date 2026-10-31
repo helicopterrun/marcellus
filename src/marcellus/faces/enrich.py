@@ -49,7 +49,7 @@ from typing import Any
 
 from marcellus import db
 from marcellus.config import Settings
-from marcellus.frigate_api import FrigateClient
+from marcellus.frigate_api import FrigateAPIError, FrigateClient
 
 logger = logging.getLogger(__name__)
 
@@ -505,6 +505,8 @@ class DetectedFace:
     embedding: list[float]
     # Face box normalized to the frame, (x1, y1, x2, y2) in 0..1.
     bbox: tuple[float, float, float, float]
+    # SCRFD detection confidence.
+    det_score: float = 1.0
 
 
 class _Engine:
@@ -531,7 +533,7 @@ class _Engine:
         self._app.prepare(ctx_id=-1, det_size=(640, 640))
 
     def faces_in_jpeg(
-        self, jpeg: bytes, *, frame_ts: float, min_face_area_px: int
+        self, jpeg: bytes, *, frame_ts: float, min_face_area_px: int, min_det_score: float = 0.0
     ) -> list[DetectedFace]:
         import cv2
         import numpy as np
@@ -541,6 +543,9 @@ class _Engine:
             return []
         out: list[DetectedFace] = []
         for face in self._app.get(img):
+            det_score = float(face.det_score)
+            if det_score < min_det_score:
+                continue
             x1, y1, x2, y2 = (float(v) for v in face.bbox)
             area = max(0.0, x2 - x1) * max(0.0, y2 - y1)
             if area < min_face_area_px:
@@ -570,6 +575,7 @@ class _Engine:
                     quality=quality,
                     embedding=[float(v) for v in emb],
                     bbox=(x1 / w, y1 / h, x2 / w, y2 / h),
+                    det_score=det_score,
                 )
             )
         return out
@@ -702,7 +708,10 @@ def _scan(
         if jpeg is None:
             continue  # routine: no committed segment covers this instant
         frames_ok += 1
-        found = engine.faces_in_jpeg(jpeg, frame_ts=ts, min_face_area_px=cfg.min_face_area_px)
+        found = engine.faces_in_jpeg(
+            jpeg, frame_ts=ts, min_face_area_px=cfg.min_face_area_px,
+            min_det_score=cfg.min_det_score,
+        )
         if found:
             kept = keep_top(kept, found, jpeg, cfg.crop_keep)
         faces.extend(found)
@@ -732,13 +741,14 @@ def _write_stack(
     crop_paths = store_crops(event_id, kept, cfg=cfg)
     conn.execute("DELETE FROM face_crops WHERE event_id = ?", (event_id,))
     conn.executemany(
-        "INSERT INTO face_crops (event_id, rank, quality, frame_ts, bbox, used, crop_path) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO face_crops "
+        "(event_id, rank, quality, frame_ts, bbox, used, crop_path, det_score) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 event_id, rank, face.quality, face.frame_ts,
                 json.dumps([round(v, 5) for v in face.bbox]),
-                1 if rank < n_used else 0, path,
+                1 if rank < n_used else 0, path, round(face.det_score, 3),
             )
             for rank, ((face, _jpeg), path) in enumerate(zip(kept, crop_paths, strict=True))
         ],
@@ -957,3 +967,117 @@ def run_cycle(settings: Settings, *, now: float | None = None) -> dict[str, Any]
     if summary["candidates"] or summary["backfilled"]:
         logger.info("face_enrich cycle: %s", summary)
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Regate: min_det_score for sightings clustered before the gate existed.
+
+
+def _iou(a: Any, b: Any) -> float:
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def regate(
+    settings: Settings,
+    *,
+    client: Any = None,
+    detector: Any = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Re-score every clustered sighting's best face against min_det_score.
+
+    Refetches the recording frame the best face came from, re-runs SCRFD and
+    takes the score of the box over the stored one. Under the floor (or no
+    face there at all) the sighting is detached as /remove does -- cluster
+    and embedding cleared, crops dropped, any sub_label it wrote cleared --
+    and settled as 'no_faces'. Touched clusters get their centroid rebuilt;
+    one left with no sightings is deleted. A frame Frigate no longer has is
+    left alone (`missing`).
+
+    Only the best face is re-scored: it is the one the event was ranked by,
+    and for a junk sighting it is the junk. Idempotent.
+    """
+    cfg = settings.face_enrich
+    out: dict[str, Any] = {"checked": 0, "kept": 0, "dropped": 0, "missing": 0, "no_box": 0,
+                           "clusters_rebuilt": 0, "clusters_deleted": 0, "dry_run": dry_run}
+    if detector is None:
+        detector = _detector(str(cfg.model_dir))
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    touched: set[int] = set()
+    try:
+        rows = conn.execute(
+            "SELECT e.event_id, e.camera, e.cluster_id, e.sub_label_written, "
+            "       COALESCE(e.best_frame_ts, c.frame_ts) AS ts, "
+            "       COALESCE(e.best_bbox, c.bbox) AS bbox "
+            "  FROM face_enrichments e "
+            "  LEFT JOIN face_crops c ON c.event_id = e.event_id AND c.rank = 0 "
+            " WHERE e.cluster_id IS NOT NULL ORDER BY e.event_start_ts"
+        ).fetchall()
+        with contextlib.ExitStack() as stack:
+            if client is None:
+                client = stack.enter_context(
+                    FrigateClient(settings.frigate.base_url, timeout=cfg.http_timeout_s)
+                )
+            for n, r in enumerate(rows, 1):
+                if n % 100 == 0:
+                    logger.info("face_enrich regate: %d / %d", n, len(rows))
+                if r["ts"] is None or not r["bbox"]:
+                    out["no_box"] += 1
+                    continue
+                jpeg, _status = client.recording_snapshot(
+                    str(r["camera"]), float(r["ts"]), timeout=cfg.http_timeout_s
+                )
+                if jpeg is None:
+                    out["missing"] += 1
+                    continue
+                out["checked"] += 1
+                box = json.loads(r["bbox"])
+                match = max(detector.detect_in_jpeg(jpeg), key=lambda d: _iou(d[0], box),
+                            default=None)
+                score = float(match[1]) if match and _iou(match[0], box) >= 0.3 else 0.0
+                eid = str(r["event_id"])
+                if score >= cfg.min_det_score:
+                    out["kept"] += 1
+                    if not dry_run:
+                        conn.execute(
+                            "UPDATE face_crops SET det_score = ? WHERE event_id = ? AND rank = 0",
+                            (round(score, 3), eid),
+                        )
+                        conn.commit()
+                    continue
+                out["dropped"] += 1
+                if dry_run:
+                    continue
+                if r["sub_label_written"]:
+                    try:
+                        client.set_sub_label(eid, "")
+                    except FrigateAPIError:
+                        logger.info("face_enrich regate: sub_label clear failed for %s", eid)
+                drop_crops(conn, Path(cfg.crops_dir), [eid])
+                conn.execute(
+                    "UPDATE face_enrichments SET cluster_id = NULL, embedding = NULL, "
+                    "       sub_label_written = NULL, status = 'no_faces', detail = ? "
+                    " WHERE event_id = ?",
+                    (f"regate: det {score:.2f}", eid),
+                )
+                touched.add(int(r["cluster_id"]))
+                conn.commit()
+        for cid in sorted(touched):
+            remaining = conn.execute(
+                "SELECT COUNT(*) AS n FROM face_enrichments WHERE cluster_id = ?", (cid,)
+            ).fetchone()
+            if int(remaining["n"]) == 0:
+                conn.execute("DELETE FROM face_clusters WHERE cluster_id = ?", (cid,))
+                out["clusters_deleted"] += 1
+            else:
+                rebuild_centroid(conn, cid)
+                out["clusters_rebuilt"] += 1
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info("face_enrich regate: %s", out)
+    return out

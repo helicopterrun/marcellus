@@ -330,6 +330,13 @@ class FaceEnrichSection(BaseModel):
     # passers-by mostly fall below it.
     min_face_area_px: int = 4000
     min_quality: float = 0.15
+    # SCRFD detection confidence a face needs to count at all. quality alone
+    # can't keep junk out: it rewards sharpness, and leaves, wheel spokes and
+    # pine needles are sharp (they scored quality 0.8-0.98). Re-scoring the
+    # 232 sightings of the most polluted cluster on their original frames
+    # (2026-10-31): the junk sat at 0.50-0.58, nearly everything at 0.60+ was
+    # a real face. Same floor as face_capture.min_face_score.
+    min_det_score: float = 0.6
 
     # Cosine DISTANCE thresholds (1 - cosine similarity) on L2-normalized
     # ArcFace embeddings. Named clusters get the tighter bar: a wrong
