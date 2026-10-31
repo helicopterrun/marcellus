@@ -557,3 +557,58 @@ def test_submit_plus_frame_raises_on_missing_recording() -> None:
         c.submit_plus_frame("gate-walkway", 1.0)
     assert ei.value.status_code == 404
     assert "Recording not found" in str(ei.value)
+
+
+class _LockProbingModels(FakeModels):
+    """Tries to take the sidecar DB's write lock from another connection
+    during inference, as the scrub generator would; records any failure."""
+
+    def __init__(self, db_path: Path, *a: Any) -> None:
+        super().__init__(*a)
+        self.db_path = db_path
+        self.blocked = 0
+
+    def _probe(self) -> None:
+        other = sqlite3.connect(self.db_path, timeout=0)
+        try:
+            other.execute("BEGIN IMMEDIATE")
+            other.rollback()
+        except sqlite3.OperationalError:
+            self.blocked += 1
+        finally:
+            other.close()
+
+    def detect(self, frame: Frame, *, size: int, min_score: float) -> list[Detection]:
+        self._probe()
+        return super().detect(frame, size=size, min_score=min_score)
+
+    def classify(self, frame: Frame, boxes: list[Detection]) -> list[list[tuple[str, float]]]:
+        self._probe()
+        return super().classify(frame, boxes)
+
+
+def test_inference_runs_without_holding_the_write_lock(
+    tmp_path: Path, frigate_db_path: Path, sidecar_db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = _settings(tmp_path, frigate_db_path, sidecar_db_path)
+    _add_recordings(frigate_db_path, tmp_path, [("gate-walkway", T0, 30, 0)])
+    # Frame 0's squirrel is written before frames 1-3 are inferred.
+    models = _LockProbingModels(sidecar_db_path, [SQ], {SQ.x1: [(SQUIRREL, 0.9)]})
+    summary = _scan(s, models, monkeypatch, frames=4)
+    assert summary["animals"] == 4
+    assert models.blocked == 0
+
+
+def test_scenery_is_learned_within_one_segment(
+    tmp_path: Path, frigate_db_path: Path, sidecar_db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One segment, five frames: the blanks from its own first frames (not yet
+    # written) still make the spot scenery for the rest.
+    s = _settings(tmp_path, frigate_db_path, sidecar_db_path)
+    _add_recordings(frigate_db_path, tmp_path, [("gate-walkway", T0, 30, 0)])
+    models = FakeModels([PUMPKIN], {PUMPKIN.x1: [(BLANK, 0.97)]})
+    summary = _scan(s, models, monkeypatch, frames=5)
+    assert summary["verdicts"] == {"blank": 2, "scenery": 3}
+    assert models.classified == 2
