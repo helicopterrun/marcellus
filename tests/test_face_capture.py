@@ -646,3 +646,37 @@ def test_detector_is_not_built_when_there_is_nothing_to_capture(
     monkeypatch.setattr(crosscam, "face_detector", lambda settings: built.append(1))
     out = crosscam.scan(s, now=1_000_000.0 - 5000)  # before every event
     assert out["candidates"] == 0 and built == []
+
+
+def test_fetches_and_detection_run_without_holding_the_write_lock(
+    tmp_path: Path, frigate_db_with_visit: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = _settings(tmp_path, frigate_db_with_visit)
+    blocked: list[str] = []
+
+    def probe(where: str) -> None:
+        # Another writer, as the server's scrub generator would be.
+        other = sqlite3.connect(s.sidecar.db_path, timeout=0)
+        try:
+            other.execute("BEGIN IMMEDIATE")
+            other.rollback()
+        except sqlite3.OperationalError:
+            blocked.append(where)
+        finally:
+            other.close()
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        probe("fetch")
+        return httpx.Response(200, content=_jpeg(640, 360))
+
+    _patch_client(monkeypatch, handler)
+    # Every other frame has no face, so a no_face row is due before later fetches.
+    seen = iter(range(100))
+
+    def det(raw: bytes) -> list[tuple[crosscam.NormBox, float]]:
+        probe("detect")
+        return [_FACE] if next(seen) % 2 else []
+
+    out = crosscam.scan(s, now=1_000_000.0 + 2000, detector=det)
+    assert out["captured"] and out["no_face"] and out["deduped"]
+    assert blocked == []
