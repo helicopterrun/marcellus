@@ -186,6 +186,19 @@ CREATE TABLE IF NOT EXISTS encounter_members (
     joined_at       REAL NOT NULL
 );
 """,
+    # face_crops before det_score (min_det_score gate).
+    "face_crops": """
+CREATE TABLE IF NOT EXISTS face_crops (
+    event_id   TEXT NOT NULL,
+    rank       INTEGER NOT NULL,
+    quality    REAL NOT NULL,
+    frame_ts   REAL NOT NULL,
+    bbox       TEXT NOT NULL,
+    used       INTEGER NOT NULL,
+    crop_path  TEXT,
+    PRIMARY KEY (event_id, rank)
+);
+""",
 }
 
 
