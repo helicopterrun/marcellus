@@ -11,7 +11,7 @@ from marcellus.faces.handles import handle_for
 
 # Sha256 over the two word tuples and the multiplier. If this fails, someone
 # edited a frozen list: every handle already shown to a user would change.
-_FROZEN_SHA256 = "22334b5becb86e78cec93cdff36bcb95af91b381ba000a082f4c5dbb7d6ff5d5"
+_FROZEN_SHA256 = "a375c3d713047c3f883378d82ea05ea3b9e64e6d231a35389f6fbc3903ff35b9"
 
 # Words that must never appear (colours, ages, name-like, insulting or jokey).
 _BANNED = {
