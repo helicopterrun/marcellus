@@ -1,7 +1,7 @@
 {
   "people": [
     {
-      "avatar_path": "/v1/people/1/avatar.jpg",
+      "avatar_path": "/v1/faces/e1a/0.jpg",
       "days": 3,
       "familiarity": "named",
       "first_seen": 1785900000.0,
@@ -14,7 +14,7 @@
       "sightings": 3
     },
     {
-      "avatar_path": "/v1/people/2/avatar.jpg",
+      "avatar_path": "/v1/faces/e2a/0.jpg",
       "days": 2,
       "familiarity": "regular",
       "first_seen": 1785903600.0,
@@ -40,7 +40,7 @@
       "sightings": 1
     },
     {
-      "avatar_path": "/v1/people/4/avatar.jpg",
+      "avatar_path": "/v1/faces/e4a/0.jpg",
       "days": 1,
       "familiarity": "new",
       "first_seen": 1785900600.0,

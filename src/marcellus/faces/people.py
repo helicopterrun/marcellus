@@ -49,7 +49,9 @@ class Person:
     first_seen: float | None = None
     last_seen: float | None = None
     last_camera: str | None = None
-    has_crop: bool = False
+    #: (best_quality or -inf, start, -rank) of the chosen avatar crop, and the crop.
+    avatar_key: tuple[float, float, int] | None = None
+    avatar_crop: tuple[str, int] | None = None
     day_set: set[Any] = field(default_factory=set)
     rhythm: list[list[int]] | None = None
 
@@ -69,7 +71,13 @@ class Person:
             "first_seen": self.first_seen,
             "last_seen": self.last_seen,
             "last_camera": self.last_camera,
-            "avatar_path": f"/v1/people/{self.id}/avatar.jpg" if self.has_crop else None,
+            # The crop's own path, so it changes whenever the best crop does
+            # (clients cache images by path).
+            "avatar_path": (
+                f"/v1/faces/{self.avatar_crop[0]}/{self.avatar_crop[1]}.jpg"
+                if self.avatar_crop
+                else None
+            ),
         }
 
 
@@ -102,9 +110,10 @@ def load_people(
     people: dict[int, Person] = {}
     last_start: dict[int, float] = {}
     for r in conn.execute(
-        "SELECT e.cluster_id, e.event_start_ts, e.camera, c.name, c.note, c.followed_at, "
-        "       EXISTS (SELECT 1 FROM face_crops f "
-        "                WHERE f.event_id = e.event_id AND f.crop_path IS NOT NULL) AS has_crop "
+        "SELECT e.cluster_id, e.event_id, e.event_start_ts, e.camera, e.best_quality, "
+        "       c.name, c.note, c.followed_at, "
+        "       (SELECT MIN(f.rank) FROM face_crops f "
+        "         WHERE f.event_id = e.event_id AND f.crop_path IS NOT NULL) AS crop_rank "
         "  FROM face_enrichments e JOIN face_clusters c ON c.cluster_id = e.cluster_id "
         " WHERE e.excluded_at IS NULL " + where + "ORDER BY e.event_start_ts",
         args,
@@ -130,8 +139,14 @@ def load_people(
             last_start[cid] = ts
             p.last_seen = ts
             p.last_camera = r["camera"]
-        if r["has_crop"]:
-            p.has_crop = True
+        if r["crop_rank"] is not None:
+            # Same choice as the avatar route: best_quality (NULL last), then
+            # newest start, then lowest rank.
+            quality = r["best_quality"]
+            key = (float("-inf") if quality is None else float(quality), ts, -int(r["crop_rank"]))
+            if p.avatar_key is None or key > p.avatar_key:
+                p.avatar_key = key
+                p.avatar_crop = (str(r["event_id"]), int(r["crop_rank"]))
         if p.rhythm is not None:
             p.rhythm[local.weekday()][local.hour] += 1
     return people

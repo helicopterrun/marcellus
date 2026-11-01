@@ -213,7 +213,7 @@ def test_list_shape_and_sort_recent(world: World, client: TestClient) -> None:
         "avatar_path": None,
     }
     p1 = next(p for p in body["people"] if p["id"] == 1)
-    assert p1["avatar_path"] == "/v1/people/1/avatar.jpg"
+    assert p1["avatar_path"] == "/v1/faces/ev1/0.jpg"
     assert p1["familiarity"] == "named"
     assert isinstance(body["t"], float)
 
@@ -981,3 +981,35 @@ def test_delete_frigate_failure_still_succeeds(
     _label_recorder(monkeypatch, world, fail=True)
     assert client.delete("/v1/people/1").status_code == 200
     assert client.get("/v1/people/1").status_code == 404
+
+
+def test_avatar_path_tracks_the_best_crop(world: World, client: TestClient) -> None:
+    world.cluster(1)
+    world.sight(1, "2026-08-01 10:00", event_id="lo", crop=True, quality=0.2)
+    world.sight(1, "2026-08-02 10:00", event_id="hi", crop=True, quality=0.9)
+
+    def avatar() -> str | None:
+        got: str | None = client.get("/v1/people").json()["people"][0]["avatar_path"]
+        return got
+
+    assert avatar() == "/v1/faces/hi/0.jpg"
+    assert client.get("/v1/people/1").json()["avatar_path"] == "/v1/faces/hi/0.jpg"
+    client.patch("/v1/people/1/sightings/hi", json={"excluded": True})
+    assert avatar() == "/v1/faces/lo/0.jpg"
+    client.patch("/v1/people/1/sightings/hi", json={"excluded": False})
+    assert avatar() == "/v1/faces/hi/0.jpg"
+
+
+def test_avatar_path_null_quality_loses_and_newest_breaks_ties(
+    world: World, client: TestClient
+) -> None:
+    world.cluster(1)
+    world.sight(1, "2026-08-01 10:00", event_id="old", crop=True, quality=0.5)
+    world.sight(1, "2026-08-02 10:00", event_id="new", crop=True, quality=0.5)
+    world.sight(1, "2026-08-03 10:00", event_id="nul", crop=True)
+    c = world.conn()
+    c.execute("UPDATE face_enrichments SET best_quality = NULL WHERE event_id = 'nul'")
+    c.commit()
+    c.close()
+    assert client.get("/v1/people").json()["people"][0]["avatar_path"] == "/v1/faces/new/0.jpg"
+    assert client.get("/v1/people/1/avatar.jpg").content.endswith(b"new")
