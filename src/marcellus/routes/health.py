@@ -17,9 +17,9 @@ pool `routes/proxy.py` uses (frigate_api.get_stream_client) and reports
 the body. That day every Frigate-backed route hung/502'd for hours while
 `/healthz` stayed 200, because the probe used its own fresh connection
 against a different origin and never saw the wedged proxy. `checks
-["upstream_pool"]` and `checks["api_pool"]` additionally report pool stats
-for both pools and flip to degraded when a pool is at `max_connections` with
-nothing idle.
+["upstream_pool"]`, `checks["vod_pool"]` (once recorded playback has used it)
+and `checks["api_pool"]` additionally report pool stats and flip to degraded
+when a pool is at `max_connections` with nothing idle.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -38,7 +39,9 @@ from marcellus import __version__, db
 from marcellus.frigate_api import (
     _DEFAULT_LIMITS,
     _STREAM_LIMITS,
+    _VOD_STREAM_LIMITS,
     get_stream_client,
+    get_vod_stream_client,
     pool_stats,
 )
 
@@ -56,31 +59,53 @@ router = APIRouter(tags=["meta"])
 _STALLED_POOL_RECYCLE_S = 30.0
 
 
-def _note_stalled_pool(app: Any, now: float) -> None:
-    """Record when the stream pool was first observed saturated.
+@dataclass(frozen=True)
+class _StreamPool:
+    """One of the proxy's pools the watchdog keeps from wedging for good."""
+
+    name: str
+    client_attr: str
+    stalled_since_attr: str
+    limits: httpx.Limits
+
+
+_STREAM_POOL = _StreamPool("stream", "stream_http_client", "_stalled_pool_since", _STREAM_LIMITS)
+_VOD_POOL = _StreamPool(
+    "vod", "vod_stream_http_client", "_stalled_vod_pool_since", _VOD_STREAM_LIMITS
+)
+
+
+def _note_stalled_pool(app: Any, now: float, pool: _StreamPool = _STREAM_POOL) -> None:
+    """Record when the pool was first observed saturated.
 
     Idempotent across repeated saturated probes: only the first observation
     sets the timestamp, so `_STALLED_POOL_RECYCLE_S` measures how long the
     condition has *persisted*, not just that it was seen once.
     """
-    if getattr(app.state, "_stalled_pool_since", None) is None:
-        app.state._stalled_pool_since = now
+    if getattr(app.state, pool.stalled_since_attr, None) is None:
+        setattr(app.state, pool.stalled_since_attr, now)
 
 
-def _recycle_stream_client(app: Any) -> None:
-    """Swap in a fresh stream client and retire the wedged one in the background.
+def _recycle_stream_client(app: Any, pool: _StreamPool = _STREAM_POOL) -> None:
+    """Swap in a fresh client for `pool` and retire the wedged one in the background.
 
     The old client's transport may hang closing the wedged connections (that
     is the whole problem), so it must never be awaited inline here -- this
     function runs from inside the `/healthz` request path.
     """
-    old = getattr(app.state, "stream_http_client", None)
+    old = getattr(app.state, pool.client_attr, None)
     logger.warning(
-        "healthz: stream pool wedged for >=%.0fs, recycling stream client",
+        "healthz: %s pool wedged for >=%.0fs, recycling %s client",
+        pool.name,
         _STALLED_POOL_RECYCLE_S,
+        pool.name,
     )
-    get_stream_client_forced_fresh(app)
-    app.state._stalled_pool_since = None
+    if pool is _VOD_POOL:
+        app.state.vod_stream_http_client = None
+        get_vod_stream_client(app)
+    else:
+        get_stream_client_forced_fresh(app)
+    setattr(app.state, pool.stalled_since_attr, None)
     if old is not None:
 
         async def _close_old() -> None:
@@ -89,6 +114,29 @@ def _recycle_stream_client(app: Any) -> None:
                 await asyncio.wait_for(old.aclose(), timeout=30.0)
 
         asyncio.ensure_future(_close_old())
+
+
+def _check_pool(app: Any, now: float, pool: _StreamPool) -> tuple[dict[str, int], bool]:
+    client = getattr(app.state, pool.client_attr, None)
+    if client is None:
+        return {}, False
+    stats = pool_stats(client)
+    if not stats:
+        return {}, False
+    max_connections = pool.limits.max_connections
+    saturated = (
+        max_connections is not None
+        and stats.get("connections", 0) >= max_connections
+        and stats.get("idle", 0) == 0
+    )
+    if saturated:
+        _note_stalled_pool(app, now, pool)
+        since = getattr(app.state, pool.stalled_since_attr, None)
+        if since is not None and now - since >= _STALLED_POOL_RECYCLE_S:
+            _recycle_stream_client(app, pool)
+    else:
+        setattr(app.state, pool.stalled_since_attr, None)
+    return stats, saturated
 
 
 def check_stream_pool(app: Any, now: float) -> tuple[dict[str, int], bool]:
@@ -100,26 +148,12 @@ def check_stream_pool(app: Any, now: float) -> tuple[dict[str, int], bool]:
     recycle that only ran there never ran at all and the pool stayed wedged
     for 40 minutes until a manual restart.
     """
-    stream_client = getattr(app.state, "stream_http_client", None)
-    if stream_client is None:
-        return {}, False
-    stats = pool_stats(stream_client)
-    if not stats:
-        return {}, False
-    max_connections = _STREAM_LIMITS.max_connections
-    saturated = (
-        max_connections is not None
-        and stats.get("connections", 0) >= max_connections
-        and stats.get("idle", 0) == 0
-    )
-    if saturated:
-        _note_stalled_pool(app, now)
-        since = app.state._stalled_pool_since
-        if since is not None and now - since >= _STALLED_POOL_RECYCLE_S:
-            _recycle_stream_client(app)
-    else:
-        app.state._stalled_pool_since = None
-    return stats, saturated
+    return _check_pool(app, now, _STREAM_POOL)
+
+
+def check_vod_stream_pool(app: Any, now: float) -> tuple[dict[str, int], bool]:
+    """`check_stream_pool` for the `/vod/*` pool (`frigate_api._VOD_STREAM_LIMITS`)."""
+    return _check_pool(app, now, _VOD_POOL)
 
 
 def get_stream_client_forced_fresh(app: Any) -> httpx.AsyncClient:
@@ -247,6 +281,12 @@ async def healthz(request: Request) -> JSONResponse:
     if stream_stats:
         checks["upstream_pool"] = stream_stats
     if stream_saturated:
+        ok = False
+
+    vod_stats, vod_saturated = check_vod_stream_pool(app, now)
+    if vod_stats:
+        checks["vod_pool"] = vod_stats
+    if vod_saturated:
         ok = False
 
     http_client = getattr(app.state, "http_client", None)
