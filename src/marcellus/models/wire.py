@@ -83,6 +83,13 @@ class EncountersCapabilities(_Wire):
     filters: list[str]
 
 
+class PeopleCapabilities(_Wire):
+    #: Mirrors `face_enrich.enabled`; `filters`/`sorts` are empty while disabled.
+    enabled: bool
+    filters: list[str]
+    sorts: list[str]
+
+
 class ExternalSourceCapability(_Wire):
     id: str
     kind: str
@@ -109,6 +116,7 @@ class CapabilitiesResponse(_Wire):
     search: SearchCapabilities
     unifi_protect: UnifiProtectCapabilities
     encounters: EncountersCapabilities
+    people: PeopleCapabilities
     external_sources: ExternalSourcesCapabilities
 
 
@@ -604,3 +612,68 @@ class SightingDetail(SightingSummary):
     model: str | None
     streams: list[SightingStreamWire]
     boxes: list[SightingBoxWire]
+
+
+# --------------------------------------------------------------------------
+# /v1/people (handoff/sidecar-people-api.md): face clusters as "people".
+# --------------------------------------------------------------------------
+
+
+class Person(_Wire):
+    id: int
+    name: str | None
+    note: str | None
+    followed: bool
+    #: `named` | `regular` | `new`.
+    familiarity: str
+    sightings: int
+    #: Distinct local days (caller's `tz`) with a live sighting.
+    days: int
+    first_seen: float | None
+    last_seen: float | None
+    last_camera: str | None
+    avatar_path: str | None
+
+
+class PersonDetail(Person):
+    #: Sightings by local weekday (Monday first) x hour: 7 rows of 24.
+    rhythm: list[list[int]]
+
+
+class SimilarPerson(Person):
+    distance: float
+
+
+class PeopleResponse(_Wire):
+    t: float
+    total: int
+    people: list[Person]
+
+
+class SimilarPeopleResponse(_Wire):
+    t: float
+    people: list[SimilarPerson]
+
+
+class PersonSighting(_Wire):
+    event_id: str
+    camera: str
+    start: float
+    #: The moment of the best face (`best_frame_ts`); may be null.
+    face_time: float | None
+    distance: float | None
+    crop_paths: list[str]
+
+
+class PersonSightingsResponse(_Wire):
+    t: float
+    sightings: list[PersonSighting]
+
+
+class PersonSightingPatchResponse(_Wire):
+    #: Null when no live sightings remain.
+    person: Person | None
+
+
+class PeopleOkResponse(_Wire):
+    ok: bool

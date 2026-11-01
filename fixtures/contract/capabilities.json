@@ -33,6 +33,20 @@
       }
     ]
   },
+  "people": {
+    "enabled": true,
+    "filters": [
+      "all",
+      "named",
+      "regular",
+      "new",
+      "followed"
+    ],
+    "sorts": [
+      "recent",
+      "days"
+    ]
+  },
   "proxy": {
     "enabled": true
   },

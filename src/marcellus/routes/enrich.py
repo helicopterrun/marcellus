@@ -20,7 +20,6 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +32,7 @@ from marcellus.config import Settings
 from marcellus.db import open_sidecar
 from marcellus.errors import error_detail
 from marcellus.faces import enrich
-from marcellus.frigate_api import FrigateAPIError, FrigateClient, get_async_client
+from marcellus.frigate_api import get_async_client
 from marcellus.routes._deps import settings_of as _settings
 from marcellus.routes._deps import templates_of as _templates
 
@@ -61,10 +60,7 @@ _PAGE_SIZE = 40
 # sightings, mostly passers-by. "all" is the JSON default (everything).
 _VIEWS = ("people", "once", "all")
 
-# Centroid cosine distance under which two clusters get a "looks like" merge
-# hint. Deliberately looser than face_enrich.cluster_threshold (0.55): the
-# hint is a human-confirmed suggestion, not an automatic join.
-_SUGGEST_THRESHOLD = 0.6
+_SUGGEST_THRESHOLD = enrich.SUGGEST_THRESHOLD
 
 
 def _view_where(view: str) -> str:
@@ -451,39 +447,6 @@ def event_face_rank(event_id: str, rank: int, request: Request) -> FileResponse:
     )
 
 
-def _retro_label(
-    conn: sqlite3.Connection, settings: Settings, cluster_id: int, name: str
-) -> int:
-    """Write `name` as the sub_label onto the cluster's past events.
-
-    Best-effort per event: an event that has aged out of Frigate's retention
-    404s and is skipped — that must never fail the rename itself. Returns how
-    many events were actually labeled.
-    """
-    event_ids = [
-        str(r["event_id"])
-        for r in conn.execute(
-            "SELECT event_id FROM face_enrichments "
-            "WHERE cluster_id = ? AND excluded_at IS NULL",
-            (cluster_id,),
-        )
-    ]
-    labeled = 0
-    with FrigateClient(settings.frigate.base_url) as fc:
-        for eid in event_ids:
-            try:
-                fc.set_sub_label(eid, name)
-            except FrigateAPIError as exc:
-                logger.info("enrich: retro-label skipped for %s: %s", eid, exc)
-                continue
-            conn.execute(
-                "UPDATE face_enrichments SET sub_label_written = ? WHERE event_id = ?",
-                (name, eid),
-            )
-            labeled += 1
-    return labeled
-
-
 class BackfillPayload(BaseModel):
     run: bool
 
@@ -529,16 +492,12 @@ def cluster_name(cluster_id: int, payload: NamePayload, request: Request) -> JSO
     s = _settings(request)
     conn = open_sidecar(s.sidecar.db_path)
     try:
-        cur = conn.execute(
-            "UPDATE face_clusters SET name = ? WHERE cluster_id = ?", (name, cluster_id)
-        )
-        if not cur.rowcount:
+        if not enrich.rename_cluster(conn, cluster_id, name):
             raise HTTPException(
                 status_code=404,
                 detail=error_detail("cluster_not_found", "cluster not found"),
             )
-        enrich.rebuild_centroid(conn, cluster_id)
-        relabeled = _retro_label(conn, s, cluster_id, name)
+        relabeled = enrich.retro_label(conn, s, cluster_id, name)
         conn.commit()
         return JSONResponse({"ok": True, "relabeled": relabeled})
     finally:
@@ -569,13 +528,11 @@ def cluster_merge(cluster_id: int, payload: MergePayload, request: Request) -> J
                     status_code=404,
                     detail=error_detail("cluster_not_found", f"cluster {cid} not found"),
                 )
-        conn.execute(
-            "UPDATE face_enrichments SET cluster_id = ? WHERE cluster_id = ?",
-            (payload.into, cluster_id),
-        )
-        conn.execute("DELETE FROM face_clusters WHERE cluster_id = ?", (cluster_id,))
-        enrich.rebuild_centroid(conn, payload.into)
+        result = enrich.merge_clusters(conn, cluster_id, payload.into)
         conn.commit()
+        if result.carried_name:
+            enrich.retro_label(conn, s, payload.into, result.carried_name)
+            conn.commit()
         return JSONResponse({"ok": True})
     finally:
         conn.close()
@@ -587,21 +544,9 @@ def cluster_delete(cluster_id: int, request: Request) -> JSONResponse:
     conn = open_sidecar(s.sidecar.db_path)
     try:
         # Deleting an identity forgets its faces too, not just its embeddings.
-        event_ids = [
-            str(r["event_id"])
-            for r in conn.execute(
-                "SELECT event_id FROM face_enrichments WHERE cluster_id = ?", (cluster_id,)
-            )
-        ]
-        enrich.drop_crops(conn, s.face_enrich.crops_dir, event_ids)
-        conn.execute(
-            "UPDATE face_enrichments SET cluster_id = NULL, embedding = NULL "
-            "WHERE cluster_id = ?",
-            (cluster_id,),
-        )
-        cur = conn.execute("DELETE FROM face_clusters WHERE cluster_id = ?", (cluster_id,))
+        deleted = enrich.delete_cluster(conn, s.face_enrich.crops_dir, cluster_id)
         conn.commit()
-        if not cur.rowcount:
+        if not deleted:
             raise HTTPException(
                 status_code=404,
                 detail=error_detail("cluster_not_found", "cluster not found"),
@@ -629,23 +574,9 @@ def sighting_exclude(
     s = _settings(request)
     conn = open_sidecar(s.sidecar.db_path)
     try:
-        row = conn.execute(
-            "SELECT cluster_id FROM face_enrichments WHERE event_id = ?", (event_id,)
-        ).fetchone()
-        if row is None:
+        found, cluster_id = enrich.set_sighting_excluded(conn, event_id, payload.excluded)
+        if not found:
             raise HTTPException(status_code=404, detail="sighting not found")
-        excluded_at = (
-            datetime.now(timezone.utc).isoformat(timespec="seconds")
-            if payload.excluded
-            else None
-        )
-        conn.execute(
-            "UPDATE face_enrichments SET excluded_at = ? WHERE event_id = ?",
-            (excluded_at, event_id),
-        )
-        cluster_id = row["cluster_id"]
-        if cluster_id is not None:
-            enrich.rebuild_centroid(conn, int(cluster_id))
         conn.commit()
         return JSONResponse(
             {

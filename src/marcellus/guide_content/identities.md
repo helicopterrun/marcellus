@@ -2,7 +2,7 @@
 title: Identities
 section: people
 order: 2
-routes: ["/enrich/clusters"]
+routes: ["/enrich/clusters", "/v1/people", "/v1/people/{person_id}", "/v1/people/{person_id}/sightings", "/v1/people/{person_id}/similar", "/v1/people/{person_id}/avatar.jpg", "/v1/people/{person_id}/name", "/v1/people/{person_id}/merge", "/v1/people/{person_id}/follow", "/v1/people/{person_id}/note", "/v1/people/{person_id}/sightings/{event_id}", "/v1/faces/{event_id}/{rank}.jpg"]
 config: ["face_enrich"]
 ---
 
@@ -66,6 +66,25 @@ Unnamed clusters that stop appearing expire on their own after
 - **⋯ → Rename** — change a named identity's name (relabels again).
 - **⋯ → Delete identity** — dissolve a cluster entirely (events keep their
   history).
+
+## People in the app
+
+The Elsinore app's People view reads the same identities over `/v1/people`.
+Every cluster keeps a permanent number; a name is just an optional label on
+it, so you can follow, annotate, or correct a face without naming it. The app
+shows each person as **named**, **regular** (unnamed, seen on two or more
+days) or **new** (unnamed, seen on one day), counted in your own timezone.
+
+- **Follow** an unknown face and it is exempt from the `cluster_ttl_days`
+  expiry; unfollow and it goes back on the normal clock.
+- **Note** is a short free-text reminder ("probably the courier").
+- **Not this person** on a sighting is the same soft-exclude as the web page's
+  ✕, and can be undone.
+- **Merge** from the app is the same as **Merge into…** here, with one extra
+  guard: if both people already have different names the app is told to pick
+  one first. A merged-away number keeps pointing at the survivor, so the app
+  never ends up with a dead link. Deleting a person also removes the old
+  numbers that pointed at them.
 
 ## Configuration
 

@@ -1,0 +1,35 @@
+{
+  "sightings": [
+    {
+      "camera": "gate-face",
+      "crop_paths": [
+        "/v1/faces/e1c/0.jpg"
+      ],
+      "distance": 0.31,
+      "event_id": "e1c",
+      "face_time": 1786080004.5,
+      "start": 1786080000.0
+    },
+    {
+      "camera": "alley-wide",
+      "crop_paths": [
+        "/v1/faces/e1b/0.jpg"
+      ],
+      "distance": 0.31,
+      "event_id": "e1b",
+      "face_time": 1785986404.5,
+      "start": 1785986400.0
+    },
+    {
+      "camera": "gate-face",
+      "crop_paths": [
+        "/v1/faces/e1a/0.jpg"
+      ],
+      "distance": 0.31,
+      "event_id": "e1a",
+      "face_time": 1785900004.5,
+      "start": 1785900000.0
+    }
+  ],
+  "t": 1785952622.704
+}

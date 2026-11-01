@@ -34,6 +34,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from marcellus.config import (
+    FaceEnrichSection,
     FrigateSection,
     PushSection,
     ScrubSection,
@@ -148,6 +149,8 @@ def _make_client(tmp: Path, *, with_sources: bool = False) -> TestClient:
             enabled=False,
             push_settings_path=str(tmp / "push_settings.json"),
         ),
+        # On, so the capabilities golden carries a populated `people` block.
+        face_enrich=FaceEnrichSection(enabled=True),
     )
     if with_sources:
         from marcellus.config import BernardoSourceConfig, ExternalSourcesSection
@@ -1230,6 +1233,91 @@ def _build_v1_sighting_detail() -> dict[str, Any]:
     return out
 
 
+def _build_people_client(tmp: Path) -> TestClient:
+    """A `/v1/people` app over four canned clusters (fixed times, days counted in Los Angeles):
+    a named, followed, noted regular (3 days, one sighting excluded and so
+    invisible); an unnamed regular close to a fourth cluster; a single-day
+    unnamed `new`; and a near-duplicate of the second (the merge suggestion)."""
+    from marcellus import db as db_mod
+    from marcellus.faces import enrich
+
+    frigate_db = tmp / "frigate.db"
+    sqlite3.connect(frigate_db).close()
+    sidecar_db = tmp / "marcellus.db"
+    conn = db_mod.open_sidecar(sidecar_db)
+    try:
+        day = 86400.0
+        base = 1_785_900_000.0  # 2026-08-05 03:20 UTC; local days differ from UTC ones
+        vecs = {1: [1.0, 0.0], 2: [0.0, 1.0], 3: [-1.0, 0.0], 4: [0.05, 1.0]}
+        names = {1: "Horatio"}
+        for cid, vec in vecs.items():
+            conn.execute(
+                "INSERT INTO face_clusters (cluster_id, name, centroid, observation_count, "
+                "created_at, last_seen_at, followed_at, note) VALUES (?, ?, ?, 1, '', ?, ?, ?)",
+                (
+                    cid,
+                    names.get(cid),
+                    enrich.pack_embedding(vec),
+                    base,
+                    base - 3600.0 if cid == 1 else None,
+                    "the neighbour" if cid == 1 else None,
+                ),
+            )
+        # (event, cluster, camera, start, quality, excluded, has crop)
+        plan = [
+            ("e1a", 1, "gate-face", base, 0.9, False, True),
+            ("e1b", 1, "alley-wide", base + day, 0.7, False, True),
+            ("e1c", 1, "gate-face", base + 2 * day + 7200.0, 0.8, False, True),
+            ("e1x", 1, "gate-face", base + 3 * day, 0.5, True, True),
+            ("e2a", 2, "shed", base + 3600.0, 0.6, False, True),
+            ("e2b", 2, "shed", base + day + 3600.0, 0.5, False, False),
+            ("e3a", 3, "street", base + 7200.0, 0.4, False, False),
+            ("e4a", 4, "doorbell", base + 600.0, 0.3, False, True),
+        ]
+        for eid, cid, cam, start, q, excluded, crop in plan:
+            conn.execute(
+                "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+                "distance, best_quality, best_frame_ts, status, processed_at, excluded_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'enriched', '', ?)",
+                (eid, cam, start, cid, 0.31, q, start + 4.5, "x" if excluded else None),
+            )
+            if crop:
+                conn.execute(
+                    "INSERT INTO face_crops (event_id, rank, quality, frame_ts, bbox, used, "
+                    "crop_path) VALUES (?, 0, ?, ?, '[0,0,1,1]', 1, ?)",
+                    (eid, q, start + 4.5, f"{eid}/0.jpg"),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+    return _v1_client(tmp, frigate_db=frigate_db, sidecar_db=sidecar_db)
+
+
+_PEOPLE_TZ = "America/Los_Angeles"
+
+
+def _get_people(path: str, **params: Any) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory() as td:
+        client = _build_people_client(Path(td))
+        with mock.patch("time.time", return_value=SENT_AT):
+            resp = client.get(path, params={"tz": _PEOPLE_TZ, **params})
+        assert resp.status_code == 200, resp.text
+        body: dict[str, Any] = resp.json()
+        return body
+
+
+def _build_v1_people() -> dict[str, Any]:
+    return _get_people("/v1/people")
+
+
+def _build_v1_person() -> dict[str, Any]:
+    return _get_people("/v1/people/1")
+
+
+def _build_v1_person_sightings() -> dict[str, Any]:
+    return _get_people("/v1/people/1/sightings")
+
+
 #: fixture filename -> zero-arg builder. MANIFEST.json is derived, not built.
 FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "la_content_state.json": _build_la_content_state,
@@ -1258,6 +1346,9 @@ FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "v1_events_related.json": _build_v1_events_related,
     "v1_push_map_live.json": _build_v1_push_map_live,
     "v1_push_map_track.json": _build_v1_push_map_track,
+    "v1_people.json": _build_v1_people,
+    "v1_person.json": _build_v1_person,
+    "v1_person_sightings.json": _build_v1_person_sightings,
     "v1_sightings.json": _build_v1_sightings,
     "v1_sighting_detail.json": _build_v1_sighting_detail,
 }
