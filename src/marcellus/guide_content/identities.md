@@ -2,7 +2,7 @@
 title: Identities
 section: people
 order: 2
-routes: ["/enrich/clusters", "/v1/people", "/v1/people/{person_id}", "/v1/people/{person_id}/sightings", "/v1/people/{person_id}/similar", "/v1/people/{person_id}/avatar.jpg", "/v1/people/{person_id}/name", "/v1/people/{person_id}/merge", "/v1/people/{person_id}/follow", "/v1/people/{person_id}/note", "/v1/people/{person_id}/sightings/{event_id}", "/v1/faces/{event_id}/{rank}.jpg"]
+routes: ["/enrich/clusters", "/v1/people", "/v1/people/{person_id}", "/v1/people/{person_id}/sightings", "/v1/people/{person_id}/similar", "/v1/people/{person_id}/avatar.jpg", "/v1/people/{person_id}/name", "/v1/people/{person_id}/merge", "/v1/people/{person_id}/follow", "/v1/people/{person_id}/note", "/v1/people/{person_id}/sightings/{event_id}", "/v1/faces/{event_id}/{rank}.jpg", "/v1/people/for-event/{event_id}", "/enrich/merge-proposals.json"]
 config: ["face_enrich"]
 ---
 
@@ -91,6 +91,25 @@ Frigate, encounters or notifications. It stays the same for a number forever.
   never ends up with a dead link. Deleting a person also removes the old
   numbers that pointed at them.
 
+The app also shows **who was recognized** on each encounter and event. The
+encounter lists (`/v1/encounters`) carry a `people` list read live from the
+face data, so it stays right after a rename, merge, exclusion or delete, and
+`/v1/people/for-event/{event_id}` answers the same for a single event. Both are
+empty while `face_enrich` is off.
+
+## Proposed merges
+
+The **Proposed merges** section at the top of the Identities page lists groups
+of *unnamed* identities whose faces have drifted together since they were
+created, so they are probably one person. Nothing is merged automatically and
+nothing is written to compute them. Each group shows the faces, handles,
+sightings, days, the widest distance in the group, and a **same visit** tag when
+two of them were seen on the same camera minutes apart (the strongest hint).
+**Merge group** asks once, then merges the others into the one with the most
+sightings. Named identities are never proposed. From the host,
+`fsc face-enrich propose-merges` prints the group counts and cluster numbers
+(never names) without touching the running service.
+
 ## Configuration
 
 The `face_enrich:` section (needs the `enrich` install extra): `enabled`,
@@ -98,6 +117,8 @@ The `face_enrich:` section (needs the `enrich` install extra): `enabled`,
 Keep Frigate's own face recognition **disabled** on enrolled cameras — the
 sidecar is the sole author of `sub_label`, and two writers would fight.
 
+- `consolidate_threshold` — distance under which unnamed identities are proposed for merging (default 0.45).
+  Tighter than `cluster_threshold` on purpose: it folds whole identities together, which is harder to undo.
 - `interval_s` — worker cadence for the enrichment cycle (default 15s).
 - `process_delay_s` — how long after an event ends before it's processed,
   so its last segment has committed (default 45s).

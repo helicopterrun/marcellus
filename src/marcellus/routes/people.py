@@ -26,6 +26,7 @@ from marcellus.models.wire import (
     PeopleOkResponse,
     PeopleResponse,
     PersonDetail,
+    PersonForEventResponse,
     PersonSightingPatchResponse,
     PersonSightingsResponse,
     SimilarPeopleResponse,
@@ -98,6 +99,27 @@ async def list_people(
 
     total, page = await _run(request, _do)
     return {"t": time.time(), "total": total, "people": page}
+
+
+@v1_router.get("/people/for-event/{event_id}", response_model=PersonForEventResponse)
+async def person_for_event(event_id: str, request: Request, tz: str = "UTC") -> dict[str, Any]:
+    """The live person recognized on one event, else null (never a 404)."""
+    zone = _tz(tz)
+
+    def _do(conn: sqlite3.Connection) -> dict[str, Any]:
+        row = conn.execute(
+            "SELECT cluster_id FROM face_enrichments "
+            "WHERE event_id = ? AND cluster_id IS NOT NULL AND excluded_at IS NULL",
+            (event_id,),
+        ).fetchone()
+        if row is None:
+            return {"person": None}
+        found = people.load_people(conn, zone, person_id=int(row["cluster_id"])).get(
+            int(row["cluster_id"])
+        )
+        return {"person": found.wire() if found else None}
+
+    return await _run(request, _do)
 
 
 @v1_router.get("/people/{person_id}", response_model=PersonDetail)

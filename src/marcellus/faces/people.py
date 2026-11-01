@@ -9,6 +9,7 @@ reason about than SQL date arithmetic and avoids SQLite version differences.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, tzinfo
@@ -235,4 +236,53 @@ def sightings_page(
                 "crop_paths": [f"/v1/faces/{eid}/{k}.jpg" for k in ranks],
             }
         )
+    return out
+
+
+def sort_key(p: Person) -> tuple[int, int, int]:
+    """Named first, then most days first, then id."""
+    return (0 if p.name else 1, -p.days, p.id)
+
+
+def people_for_events(
+    conn: sqlite3.Connection, tz: tzinfo, members_by_encounter: dict[str, list[dict[str, Any]]]
+) -> dict[str, list[dict[str, Any]]]:
+    """encounter id -> the distinct live persons recognized on its member events.
+
+    Read from face data by event at request time (never from the encounter's
+    `identities` strings), so it is right after a rename, merge, exclusion or
+    delete. Two queries regardless of page size: `load_people` once, and one
+    chunked event -> cluster lookup for every member event on the page.
+    """
+    event_ids: set[str] = set()
+    per_encounter: dict[str, set[str]] = {}
+    for eid, members in members_by_encounter.items():
+        ids: set[str] = set()
+        for m in members:
+            try:
+                ids.update(str(e) for e in json.loads(m["event_ids_json"]))
+            except (ValueError, TypeError):
+                continue
+        per_encounter[eid] = ids
+        event_ids |= ids
+    out: dict[str, list[dict[str, Any]]] = {eid: [] for eid in members_by_encounter}
+    if not event_ids:
+        return out
+    cluster_of: dict[str, int] = {}
+    ids_list = sorted(event_ids)
+    for i in range(0, len(ids_list), 500):
+        chunk = ids_list[i : i + 500]
+        for r in conn.execute(
+            "SELECT event_id, cluster_id FROM face_enrichments WHERE cluster_id IS NOT NULL "
+            "AND excluded_at IS NULL AND event_id IN (" + ",".join("?" * len(chunk)) + ")",
+            chunk,
+        ):
+            cluster_of[str(r["event_id"])] = int(r["cluster_id"])
+    if not cluster_of:
+        return out
+    everyone = load_people(conn, tz)
+    for eid, ids in per_encounter.items():
+        found = {cluster_of[e] for e in ids if e in cluster_of}
+        persons = sorted((everyone[c] for c in found if c in everyone), key=sort_key)
+        out[eid] = [p.wire() for p in persons]
     return out

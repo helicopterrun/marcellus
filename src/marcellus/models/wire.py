@@ -679,3 +679,23 @@ class PersonSightingPatchResponse(_Wire):
 
 class PeopleOkResponse(_Wire):
     ok: bool
+
+
+class EncounterWithPeople(EncounterSummary):
+    #: Live persons recognized on the encounter's member events (named first,
+    #: then most days, then id); [] when none or face_enrich is off.
+    people: list[Person]
+
+
+class EncountersPeopleResponse(_Wire):
+    t: float
+    encounters: list[EncounterWithPeople]
+
+
+class EncounterPeopleResponse(_Wire):
+    encounter: EncounterWithPeople
+    members: list[EncounterMember]
+
+
+class PersonForEventResponse(_Wire):
+    person: Person | None

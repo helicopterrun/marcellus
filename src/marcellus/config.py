@@ -344,6 +344,16 @@ class FaceEnrichSection(BaseModel):
     match_threshold: float = 0.45
     cluster_threshold: float = 0.55
 
+    # Distance under which `faces/consolidate.py` PROPOSES merging two unnamed
+    # clusters (read-only; a person confirms each group). Tighter than
+    # cluster_threshold on purpose: that one decides where a single new
+    # embedding lands against a running mean, and a wrong join there is
+    # repairable one sighting at a time. This one proposes folding two whole
+    # identities (hundreds of sightings) into one, which is harder to unpick,
+    # and it is applied to centroids that have already absorbed their
+    # neighbours, so a looser bar chains unrelated people together.
+    consolidate_threshold: float = 0.45
+
     # Unnamed clusters not seen for this long are reaped (with their stored
     # embeddings). Named clusters never expire.
     cluster_ttl_days: int = 60

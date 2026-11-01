@@ -751,6 +751,7 @@ def _v1_client(tmp: Path, *, frigate_db: Path, sidecar_db: Path | None = None) -
         ),
         scrub=ScrubSection(enabled=False, retention_days=4, cache_dir=tmp / "scrub"),
         push=PushSection(enabled=False, push_settings_path=str(tmp / "push_settings.json")),
+        face_enrich=FaceEnrichSection(enabled=True),
     )
     return TestClient(create_app(settings))
 
@@ -888,6 +889,28 @@ def _build_v1_encounters() -> dict[str, Any]:
                 "UPDATE encounters SET sealed_at = ? WHERE id IN ('enc_walk', 'enc_delivery')",
                 (SENT_AT - 600.0,),
             )
+            # Faces: a named regular on the walk (r1, r3) and an unnamed new
+            # person on the yard camera (r2), so `people` is populated.
+            from marcellus.faces import enrich as enrich_mod
+
+            for cid, name, vec in ((1, "Horatio", [1.0, 0.0]), (2, None, [0.0, 1.0])):
+                sconn.execute(
+                    "INSERT INTO face_clusters (cluster_id, name, centroid, observation_count, "
+                    "created_at, last_seen_at) VALUES (?, ?, ?, 1, '', ?)",
+                    (cid, name, enrich_mod.pack_embedding(vec), base),
+                )
+            faces = [
+                (f"{base}-r1", 1, base),
+                (f"{base + 60}-r3", 1, base + 60),
+                (f"{base - 86400.0}-old", 1, base - 86400.0),
+                (f"{base + 30}-r2", 2, base + 30),
+            ]
+            for eid, cid, ts in faces:
+                sconn.execute(
+                    "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+                    "status, processed_at) VALUES (?, 'street-cam', ?, ?, 'enriched', '')",
+                    (eid, ts, cid),
+                )
             sconn.commit()
         finally:
             sconn.close()

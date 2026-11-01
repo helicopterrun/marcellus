@@ -443,3 +443,75 @@ document.querySelectorAll('.id-open').forEach(btn => {
     SC.fetchJson('/enrich/backfill.json').then(render).catch(() => {});
   }
 })();
+
+// ---- proposed merges ---------------------------------------------------
+// Read-only proposals from /enrich/merge-proposals.json (faces/consolidate.py).
+// "Merge group" is one human click per group: it confirms, then calls the
+// existing merge route once per non-survivor.
+
+function proposalMeta(m) {
+  return {
+    id: String(m.id),
+    title: m.handle + ' · #' + m.id,
+    thumb: m.avatar_path || null,
+    count: m.sightings,
+  };
+}
+
+async function mergeGroup(group) {
+  const losers = group.members.filter(m => m.id !== group.survivor);
+  try {
+    for (const m of losers) {
+      await post('/enrich/clusters/' + m.id + '/merge', { into: group.survivor });
+    }
+  } catch (e) {
+    SC.toast('merge failed: ' + e.message, true);
+    window.location.reload();
+    return;
+  }
+  SC.toast('merged ' + losers.length + ' into one');
+  window.location.reload();
+}
+
+function confirmGroup(group) {
+  const rows = group.members.map(m => clusterRow(
+    proposalMeta(m),
+    m.id === group.survivor ? 'keeps everything' : 'goes away',
+  ));
+  SC.dialog('Merge these ' + group.members.length + ' identities?', rows, [
+    { label: 'Cancel' },
+    { label: 'Merge group', kind: 'btn-primary', onclick: () => mergeGroup(group) },
+  ]);
+}
+
+function renderProposal(group) {
+  const members = SC.el('div', { class: 'id-prop-members' }, group.members.map(m => {
+    const meta = proposalMeta(m);
+    return clusterRow(meta, m.days + ' day' + (m.days === 1 ? '' : 's'));
+  }));
+  const bits = ['distance ' + group.max_distance.toFixed(2)];
+  const info = SC.el('div', { class: 'id-prop-meta' }, [
+    SC.el('span', { text: bits.join(' · ') }, []),
+    ...(group.same_visit
+      ? [SC.el('span', { class: 'id-prop-tag', text: 'same visit',
+          title: 'two of these were seen on the same camera within minutes of each other' }, [])]
+      : []),
+  ]);
+  const btn = SC.el('button', { type: 'button', class: 'btn btn-primary', text: 'Merge group' }, []);
+  btn.addEventListener('click', () => confirmGroup(group));
+  return SC.el('div', { class: 'id-prop' }, [members, info, btn]);
+}
+
+(async function loadProposals() {
+  const box = document.getElementById('merge-proposals');
+  if (!box) return;
+  let data;
+  try {
+    data = await SC.fetchJson(box.dataset.url || '/enrich/merge-proposals.json');
+  } catch (e) {
+    return;  // optional extra; the page works without it
+  }
+  const list = box.querySelector('.id-prop-list');
+  (data.proposals || []).forEach(g => list.appendChild(renderProposal(g)));
+  box.hidden = !(data.proposals || []).length;
+})();

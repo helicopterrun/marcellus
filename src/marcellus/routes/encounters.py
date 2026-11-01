@@ -21,10 +21,12 @@ from marcellus.encounters import notability, store, title, visits
 from marcellus.encounters.adjacency import Adjacency, build_adjacency
 from marcellus.encounters.notability import Stamper
 from marcellus.errors import error_detail
-from marcellus.models.wire import EncounterResponse, EncountersResponse
+from marcellus.faces import people
+from marcellus.models.wire import EncounterPeopleResponse, EncountersPeopleResponse
 from marcellus.push import policy_settings
 from marcellus.routes._deps import settings_of as _settings
 from marcellus.routes._deps import templates_of as _templates
+from marcellus.routes.people import _tz
 from marcellus.routes.sources import sightings_page_context
 
 router = APIRouter(tags=["encounters"])
@@ -257,7 +259,7 @@ async def encounters_adjacency(request: Request) -> dict[str, Any]:
     return _adjacency_for(request).to_json()
 
 
-@v1_router.get("/encounters", response_model=EncountersResponse)
+@v1_router.get("/encounters", response_model=EncountersPeopleResponse)
 async def encounters_list(
     request: Request,
     since: float | None = None,
@@ -268,12 +270,15 @@ async def encounters_list(
     tag: Literal["notable", "background"] | None = None,
     label: str | None = None,
     place: str | None = None,
+    tz: str = "UTC",
 ) -> dict[str, Any]:
     """Newest first. Page by passing the last row's `start` as `before`. The
     48 h default window applies only when neither `since` nor `before` is
     given; with `before` alone there is no lower bound. `camera`, `label`
     and `place` take comma-separated lists (any-of); all filters AND."""
     settings = _settings(request)
+    zone = _tz(tz)
+    with_people = bool(settings.face_enrich.enabled)
     cameras = _csv(camera)
     labels = _csv(label)
     places = _csv(place)
@@ -306,27 +311,47 @@ async def encounters_list(
             labels=labels,
             places=places,
         )
-        return summaries(conn, rows)
+        by_encounter = store.members_for(conn, [r["id"] for r in rows])
+        out = [_summary(r, by_encounter[r["id"]]) for r in rows]
+        found = (
+            people.people_for_events(conn, zone, by_encounter)
+            if with_people
+            else {}
+        )
+        for item in out:
+            item["people"] = found.get(item["id"], [])
+        return out
 
     out = await db.with_sidecar(settings.sidecar.db_path, _load)
     return {"t": time.time(), "encounters": out}
 
 
-@v1_router.get("/encounters/{encounter_id}", response_model=EncounterResponse)
-async def encounter_detail(encounter_id: str, request: Request) -> dict[str, Any]:
+@v1_router.get("/encounters/{encounter_id}", response_model=EncounterPeopleResponse)
+async def encounter_detail(
+    encounter_id: str, request: Request, tz: str = "UTC"
+) -> dict[str, Any]:
     settings = _settings(request)
+    zone = _tz(tz)
 
-    def _load(conn: Any) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    def _load(
+        conn: Any,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], list[dict[str, Any]]]:
         row = store.get(conn, encounter_id)
         if row is None:
-            return None, []
-        return row, store.members(conn, encounter_id)
+            return None, [], []
+        member_rows = store.members(conn, encounter_id)
+        found = (
+            people.people_for_events(conn, zone, {encounter_id: member_rows})
+            if settings.face_enrich.enabled
+            else {}
+        )
+        return row, member_rows, found.get(encounter_id, [])
 
-    row, member_rows = await db.with_sidecar(settings.sidecar.db_path, _load)
+    row, member_rows, who = await db.with_sidecar(settings.sidecar.db_path, _load)
     if row is None:
         raise HTTPException(status_code=404, detail=error_detail("not_found", "no such encounter"))
     return {
-        "encounter": _summary(row, member_rows),
+        "encounter": {**_summary(row, member_rows), "people": who},
         "members": [_member(m) for m in member_rows],
     }
 

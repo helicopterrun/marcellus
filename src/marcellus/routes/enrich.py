@@ -29,9 +29,9 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from marcellus.config import Settings
-from marcellus.db import open_sidecar
+from marcellus.db import open_sidecar, with_sidecar
 from marcellus.errors import error_detail
-from marcellus.faces import enrich
+from marcellus.faces import consolidate, enrich
 from marcellus.faces.handles import handle_for
 from marcellus.frigate_api import get_async_client
 from marcellus.routes._deps import settings_of as _settings
@@ -370,6 +370,20 @@ def clusters_json(request: Request, show_excluded: int = 0) -> JSONResponse:
         )
     finally:
         conn.close()
+
+
+@router.get("/enrich/merge-proposals.json")
+async def merge_proposals(request: Request) -> JSONResponse:
+    """Read-only: groups of unnamed identities that look like one person
+    (faces/consolidate.py). Computed on a worker thread; nothing is written."""
+    s = _settings(request)
+    threshold = s.face_enrich.consolidate_threshold
+
+    def _do(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+        return [p.wire() for p in consolidate.propose_merges(conn, threshold=threshold)]
+
+    proposals = await with_sidecar(s.sidecar.db_path, _do)
+    return JSONResponse({"threshold": threshold, "proposals": proposals})
 
 
 @router.get("/enrich/thumb/{event_id}")
