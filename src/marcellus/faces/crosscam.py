@@ -55,6 +55,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -763,6 +764,7 @@ def scan(
                     conn, cand, visit_key, cfg.capture_camera, 0, cand.start_time,
                     status="deduped", detail=f"same visit as {visit_key}",
                 )
+                conn.commit()
                 summary["deduped"] += 1
                 continue
 
@@ -799,6 +801,11 @@ def scan(
             if taken and taken + len(samples) > cfg.max_captures_per_run:
                 break
 
+            # Writes wait until the visit's fetches and face detection are done,
+            # then land in one short transaction: written as they came, the
+            # first one held the sidecar DB's write lock through every later
+            # fetch (~0.45s) and SCRFD pass, and other writers timed out.
+            writes: list[Callable[[], None]] = []
             hits: list[tuple[Sample, bytes, int, tuple[NormBox, float]]] = []
             for smp in samples:
                 taken += 1
@@ -811,9 +818,11 @@ def scan(
                         "face-capture: fetch failed for %s @ %.3f: %s",
                         cand.event_id, smp.frame_ts, exc,
                     )
-                    _upsert(conn, cand, visit_key, cfg.capture_camera, smp.offset_ms,
-                            smp.frame_ts, status="error", detail=str(exc)[:300],
-                            bump_attempts=True)
+                    writes.append(partial(
+                        _upsert, conn, cand, visit_key, cfg.capture_camera, smp.offset_ms,
+                        smp.frame_ts, status="error", detail=str(exc)[:300],
+                        bump_attempts=True,
+                    ))
                     summary["error"] += 1
                     continue
 
@@ -823,22 +832,29 @@ def scan(
                     logger.debug(
                         "face-capture: no recording for %s @ %.3f", cfg.capture_camera, smp.frame_ts
                     )
-                    _upsert(conn, cand, visit_key, cfg.capture_camera, smp.offset_ms,
-                            smp.frame_ts, status="no_recording", http_status=404)
+                    writes.append(partial(
+                        _upsert, conn, cand, visit_key, cfg.capture_camera, smp.offset_ms,
+                        smp.frame_ts, status="no_recording", http_status=404,
+                    ))
                     summary["no_recording"] += 1
                     continue
 
                 if detector is None:
-                    store(cand, visit_key, smp, raw, http_status, None)
+                    writes.append(partial(store, cand, visit_key, smp, raw, http_status, None))
                     continue
                 face = _detect(detector, raw, min_score=cfg.min_face_score)
                 if face is None:
-                    _upsert(conn, cand, visit_key, cfg.capture_camera, smp.offset_ms,
-                            smp.frame_ts, status="no_face", http_status=http_status,
-                            nbytes=len(raw))
+                    writes.append(partial(
+                        _upsert, conn, cand, visit_key, cfg.capture_camera, smp.offset_ms,
+                        smp.frame_ts, status="no_face", http_status=http_status,
+                        nbytes=len(raw),
+                    ))
                     summary["no_face"] += 1
                     continue
                 hits.append((smp, raw, http_status, face))
+
+            for write in writes:
+                write()
 
             # Biggest, most confident faces first; the rest of the visit's face
             # frames are near-duplicates and settle as 'skipped'.
@@ -851,6 +867,7 @@ def scan(
                         smp.frame_ts, status="skipped", http_status=http_status,
                         detail=f"face, not in the visit's top {keep}")
                 summary["skipped"] += 1
+            conn.commit()
 
         conn.commit()
     finally:
