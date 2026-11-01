@@ -296,10 +296,15 @@ def _fmt_elapsed(elapsed_s: float) -> str:
 
 def _copy(
     subject_kind: str, label: str, camera: str, zone_name: str, elapsed_s: float,
-    identity: str = "",
     story: str = "",
 ) -> tuple[str, str]:
     """Title + body (content design 2026-08-15).
+
+    **Never takes an identity.** A recognized person's text is exactly what an
+    unrecognized person's would be ("Person near ..."): names, handles and face
+    ids must not leave the sidecar through APNs or the relay, so this function
+    has no parameter a name could arrive through. Recognition may still relax a
+    card's tier (`handle_recognition_event`); it just doesn't change the words.
 
     Title: "{Who} in {zone display name}" when the event has a zone —
     the sidecar-edited `zone_names` map (or Frigate `friendly_name`) supplies
@@ -311,7 +316,7 @@ def _copy(
     used a zone) + friendly elapsed. A line with nothing new stays empty.
     """
     subject_text = _SUBJECT_COPY.get(subject_kind) or pretty_label(label) or "Motion"
-    who = identity or subject_text
+    who = subject_text
     camera_pretty = camera.replace("_", " ").title()
     if zone_name:
         friendly = policy_settings.zone_display_name(zone_name)
@@ -1566,11 +1571,6 @@ async def handle_delivery_event(
         elapsed = max(
             0.0, now - (card.created_at if mutation == RESOLVE else card.state_since_at)
         )
-        identity = event.sub_labels[0] if event.sub_labels else ""
-        if not identity and engine is not None:
-            identity = getattr(engine, "_sub_labels", {}).get(
-                (event.camera, track_id), ""
-            )
         # Notable verbs only (content design 2026-08-15): one story phrase
         # when something is actually happening, silence otherwise.
         if mutation == RESOLVE:
@@ -1588,7 +1588,7 @@ async def handle_delivery_event(
         primary, secondary = _copy(
             subject_kind, snapshot.label, owning_camera, zone_name,
             0.0 if mutation == RESOLVE else elapsed,
-            identity=identity, story=story,
+            story=story,
         )
         if len(cameras_path) >= 2:
             # An encounter (or any multi-camera story) reads as a path:
@@ -2157,7 +2157,7 @@ async def handle_recognition_event(
     owning_camera = context.get("camera", camera)
     elapsed = max(0.0, now - card.state_since_at)
     primary, secondary = _copy(
-        subject_kind, label, owning_camera, zone_name, elapsed, identity=sub_label,
+        subject_kind, label, owning_camera, zone_name, elapsed,
     )
     # The deescalated level may have dropped this card out of (or, in
     # principle, kept it in) LA eligibility -- re-derive rather than passing
@@ -2217,7 +2217,7 @@ async def handle_recognition_event(
     )
     conn.commit()
     logger.info(
-        "recognition: %s on %s:%s -> deescalate %s->%s (mode=%s)",
-        sub_label, camera, track_id, existing.level, target_level, mode,
+        "recognition: sub_label landed on %s:%s -> deescalate %s->%s (mode=%s)",
+        camera, track_id, existing.level, target_level, mode,
     )
     return 1
