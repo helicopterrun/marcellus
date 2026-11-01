@@ -16,6 +16,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from marcellus.faces import enrich
+from marcellus.faces.handles import handle_for
 
 FILTERS = ("all", "named", "regular", "new", "followed")
 SORTS = ("recent", "days")
@@ -62,6 +63,7 @@ class Person:
     def wire(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "handle": handle_for(self.id),
             "name": self.name,
             "note": self.note,
             "followed": self.followed,

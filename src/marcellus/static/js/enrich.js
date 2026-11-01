@@ -34,7 +34,7 @@ function clusterIndex() {
       .then(d => d.clusters.map(c => ({
         id: String(c.cluster_id),
         name: c.name || null,
-        title: c.name || 'Unknown #' + c.cluster_id,
+        title: c.name || (c.handle + ' · #' + c.cluster_id),
         thumb: c.avatar || null,
         count: c.observation_count,
       })))

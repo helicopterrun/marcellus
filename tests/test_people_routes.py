@@ -19,6 +19,7 @@ from marcellus.config import (
     SidecarSection,
 )
 from marcellus.faces import enrich
+from marcellus.faces.handles import handle_for
 from marcellus.frigate_api import FrigateClient
 from marcellus.server import create_app
 
@@ -201,6 +202,7 @@ def test_list_shape_and_sort_recent(world: World, client: TestClient) -> None:
     p2 = next(p for p in body["people"] if p["id"] == 2)
     assert p2 == {
         "id": 2,
+        "handle": handle_for(2),
         "name": None,
         "note": "courier",
         "followed": True,
@@ -1013,3 +1015,67 @@ def test_avatar_path_null_quality_loses_and_newest_breaks_ties(
     c.close()
     assert client.get("/v1/people").json()["people"][0]["avatar_path"] == "/v1/faces/new/0.jpg"
     assert client.get("/v1/people/1/avatar.jpg").content.endswith(b"new")
+
+
+# --------------------------------------------------------------------------
+# Generated handles
+# --------------------------------------------------------------------------
+
+
+def test_handle_present_on_every_person_shape(world: World, client: TestClient) -> None:
+    from marcellus.faces.handles import handle_for
+
+    world.cluster(1)
+    world.sight(1, "2026-08-01 10:00")
+    world.cluster(2, vec=[1.0, 0.01])
+    world.sight(2, "2026-08-02 10:00")
+    assert client.get("/v1/people").json()["people"][0]["handle"] in {
+        handle_for(1),
+        handle_for(2),
+    }
+    assert client.get("/v1/people/1").json()["handle"] == handle_for(1)
+    assert client.get("/v1/people/1/similar").json()["people"][0]["handle"] == handle_for(2)
+    r = client.put("/v1/people/1/note", json={"note": "x"})
+    assert r.json()["handle"] == handle_for(1)
+
+
+def test_handle_is_not_a_name_and_survives_naming_and_merge(
+    world: World, client: TestClient, labels: list[tuple[str, str]]
+) -> None:
+    from marcellus.faces.handles import handle_for
+
+    world.cluster(1)
+    a = world.sight(1, "2026-08-01 10:00")
+    world.cluster(2)
+    world.sight(2, "2026-08-02 10:00")
+    before = client.get("/v1/people/1").json()
+    assert before["name"] is None and before["familiarity"] == "new"
+    assert before["handle"] == handle_for(1)
+    # An unnamed sighting never records a label, and nothing was sent.
+    assert world.query("SELECT sub_label_written FROM face_enrichments WHERE event_id = ?", a)[
+        0
+    ][0] is None
+    assert labels == []
+    named = client.post("/v1/people/1/name", json={"name": "Horatio"}).json()
+    assert named["handle"] == handle_for(1) and named["familiarity"] == "named"
+    # Only the name ever reaches Frigate.
+    assert labels and {lbl for _, lbl in labels} == {"Horatio"}
+    # Merge: survivor keeps its own handle; merged-away ids show the survivor's.
+    merged = client.post("/v1/people/2/merge", json={"into": 1}).json()
+    assert merged["handle"] == handle_for(1)
+    assert client.get("/v1/people/2").json()["handle"] == handle_for(1)
+    assert client.get("/v1/people/2").json()["id"] == 1
+
+
+def test_web_page_shows_handle_for_unnamed_with_id(world: World, client: TestClient) -> None:
+    from marcellus.faces.handles import handle_for
+
+    world.cluster(1, name="Horatio")
+    world.sight(1, "2026-08-01 10:00")
+    world.sight(1, "2026-08-02 10:00")
+    world.cluster(2)
+    world.sight(2, "2026-08-01 10:00")
+    world.sight(2, "2026-08-02 10:00")
+    html = client.get("/enrich/clusters?view=all").text
+    assert f"{handle_for(2)} · #2" in html
+    assert handle_for(1) not in html  # named clusters show their name only

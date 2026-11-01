@@ -32,6 +32,7 @@ from marcellus.config import Settings
 from marcellus.db import open_sidecar
 from marcellus.errors import error_detail
 from marcellus.faces import enrich
+from marcellus.faces.handles import handle_for
 from marcellus.frigate_api import get_async_client
 from marcellus.routes._deps import settings_of as _settings
 from marcellus.routes._deps import templates_of as _templates
@@ -195,6 +196,7 @@ def _cluster_index(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         " ORDER BY (c.name IS NULL), c.observation_count DESC, c.last_seen_at DESC"
     ):
         d = dict(r)
+        d["handle"] = handle_for(int(d["cluster_id"]))
         face_eid = d.pop("face_event_id")
         if face_eid:
             d["avatar"] = f"/enrich/face/{face_eid}/0.jpg"

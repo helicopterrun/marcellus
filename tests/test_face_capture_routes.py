@@ -16,6 +16,7 @@ from marcellus.config import (
     Settings,
     SidecarSection,
 )
+from marcellus.faces.handles import handle_for
 from marcellus.server import create_app
 
 
@@ -300,5 +301,5 @@ def test_visit_links_to_identities_seen_on_the_capture_camera(
     visit = client.get("/faces/captures.json?days=365").json()["visits"][0]
     assert [(i["cluster_id"], i["name"]) for i in visit["identities"]] == [(1, "bob"), (2, None)]
     html = client.get("/faces/captures?days=365").text
-    assert "/enrich/clusters?cluster=1" in html and "Unknown #2" in html
+    assert "/enrich/clusters?cluster=1" in html and f"{handle_for(2)} · #2" in html
     assert "/enrich/clusters?cluster=3" not in html

@@ -97,7 +97,7 @@
         {% for i in v.identities[:3] %}
         <a class="fc-id{{ ' fc-id-named' if i.name }}" href="/enrich/clusters?cluster={{ i.cluster_id }}"
            title="{{ i.observation_count }} sightings: face_enrich put {{ capture_camera }}'s view of this visit in this identity">
-          {{ i.name or 'Unknown #' ~ i.cluster_id }}
+          {{ i.name or (handle_for(i.cluster_id) ~ ' · #' ~ i.cluster_id) }}
           {%- if not i.name %} <span>· {{ i.observation_count }} seen</span>{% endif %}</a>
         {% else %}
         <span class="fc-noid" title="no clustered {{ capture_camera }} sighting within {{ '%d'|format(window_s) }}s of this visit">no identity match</span>
