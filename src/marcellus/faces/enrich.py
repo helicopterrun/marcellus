@@ -566,7 +566,9 @@ def retro_label(conn: sqlite3.Connection, settings: Settings, cluster_id: int, n
             (cluster_id,),
         )
     ]
-    labeled = 0
+    # The network loop only collects; the DB write happens once, after it, so
+    # no write transaction is held open across Frigate calls.
+    labeled: list[str] = []
     with FrigateClient(settings.frigate.base_url) as fc:
         for eid in event_ids:
             try:
@@ -574,12 +576,57 @@ def retro_label(conn: sqlite3.Connection, settings: Settings, cluster_id: int, n
             except FrigateAPIError as exc:
                 logger.info("enrich: retro-label skipped for %s: %s", eid, exc)
                 continue
+            labeled.append(eid)
+    conn.executemany(
+        "UPDATE face_enrichments SET sub_label_written = ? WHERE event_id = ?",
+        [(name, eid) for eid in labeled],
+    )
+    return len(labeled)
+
+
+def write_sub_labels(settings: Settings, event_ids: list[str], label: str) -> list[str]:
+    """Best-effort `set_sub_label(event, label)` for each event ("" clears).
+    Returns the events that succeeded; never raises on a Frigate failure and
+    never logs the label. Call with no write transaction open."""
+    done: list[str] = []
+    if not event_ids:
+        return done
+    try:
+        with FrigateClient(settings.frigate.base_url) as fc:
+            for eid in event_ids:
+                try:
+                    fc.set_sub_label(eid, label)
+                except FrigateAPIError as exc:
+                    logger.info("enrich: sub_label write skipped for %s: %s", eid, exc)
+                    continue
+                done.append(eid)
+    except Exception:  # noqa: BLE001 - Frigate trouble must never fail the caller
+        logger.info("enrich: sub_label writes aborted")
+    return done
+
+
+def erase_name_everywhere(conn: sqlite3.Connection, name: str) -> None:
+    """Remove `name` from encounters' `identities_json` and members'
+    `sub_labels_json`. The caller decides no other cluster still uses it."""
+    needles = {name, json.dumps(name)[1:-1]}
+    for table, col in (("encounters", "identities_json"), ("encounter_members", "sub_labels_json")):
+        key = "id" if table == "encounters" else "rowid"
+        rows = conn.execute(
+            f"SELECT {key} AS k, {col} AS v FROM {table} WHERE "
+            + " OR ".join("instr(" + col + ", ?) > 0" for _ in needles),
+            tuple(needles),
+        ).fetchall()
+        for r in rows:
+            try:
+                values = json.loads(r["v"])
+            except ValueError:
+                continue
+            if not isinstance(values, list) or name not in values:
+                continue
+            kept = [v for v in values if v != name]
             conn.execute(
-                "UPDATE face_enrichments SET sub_label_written = ? WHERE event_id = ?",
-                (name, eid),
+                f"UPDATE {table} SET {col} = ? WHERE {key} = ?", (json.dumps(kept), r["k"])
             )
-            labeled += 1
-    return labeled
 
 
 def set_sighting_excluded(

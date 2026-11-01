@@ -794,3 +794,190 @@ def test_rebuild_after_merge_leaves_count_and_last_seen_right(world: World) -> N
     finally:
         c.close()
     assert (row["observation_count"], row["last_seen_at"]) == (2, 80.0)
+
+
+# --------------------------------------------------------------------------
+# Review fixes: no write lock across Frigate calls; labels follow exclusion
+# and deletion
+# --------------------------------------------------------------------------
+
+
+def _label_recorder(
+    monkeypatch: pytest.MonkeyPatch, world: World, fail: bool = False
+) -> list[tuple[str, str, bool]]:
+    """Record (event, label, write-txn-open) for each set_sub_label call; the
+    third field probes the DB from another connection for a held write lock."""
+    calls: list[tuple[str, str, bool]] = []
+
+    def _fake(self: Any, event_id: str, sub_label: str, *, score: Any = None) -> None:
+        probe = sqlite3.connect(world.settings.sidecar.db_path, timeout=0.05)
+        try:
+            probe.execute("BEGIN IMMEDIATE")
+            probe.rollback()
+            locked = False
+        except sqlite3.OperationalError:
+            locked = True
+        finally:
+            probe.close()
+        calls.append((event_id, sub_label, locked))
+        if fail:
+            from marcellus.frigate_api import FrigateAPIError
+
+            raise FrigateAPIError("HTTP 500")
+
+    monkeypatch.setattr(FrigateClient, "set_sub_label", _fake)
+    return calls
+
+
+def test_retro_label_holds_no_write_lock_during_network(
+    world: World, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.cluster(1)
+    for i in range(3):
+        world.sight(1, f"2026-08-0{i + 1} 10:00")
+    calls = _label_recorder(monkeypatch, world)
+    assert client.post("/enrich/clusters/1/name", json={"name": "Horatio"}).status_code == 200
+    assert len(calls) == 3 and not any(c[2] for c in calls)
+    assert {r[0] for r in world.query("SELECT sub_label_written FROM face_enrichments")} == {
+        "Horatio"
+    }
+    calls.clear()
+    assert client.post("/v1/people/1/name", json={"name": "Marcellus"}).status_code == 200
+    assert len(calls) == 3 and not any(c[2] for c in calls)
+
+
+def test_exclude_clears_event_label_and_undo_restores(
+    world: World, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.cluster(1, name="Horatio")
+    a = world.sight(1, "2026-08-01 10:00")
+    world.sight(1, "2026-08-02 10:00")
+    c = world.conn()
+    c.execute("UPDATE face_enrichments SET sub_label_written = 'Horatio'")
+    c.commit()
+    c.close()
+    calls = _label_recorder(monkeypatch, world)
+    r = client.patch(f"/v1/people/1/sightings/{a}", json={"excluded": True})
+    assert r.status_code == 200
+    assert calls == [(a, "", False)]
+    row = world.query("SELECT sub_label_written FROM face_enrichments WHERE event_id = ?", a)
+    assert row[0][0] is None
+    r = client.patch(f"/v1/people/1/sightings/{a}", json={"excluded": False})
+    assert r.status_code == 200
+    assert calls[-1] == (a, "Horatio", False)
+    row = world.query("SELECT sub_label_written FROM face_enrichments WHERE event_id = ?", a)
+    assert row[0][0] == "Horatio"
+
+
+def test_exclude_unlabeled_or_unnamed_makes_no_frigate_calls(
+    world: World, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.cluster(1)
+    a = world.sight(1, "2026-08-01 10:00")
+    world.sight(1, "2026-08-02 10:00")
+    calls = _label_recorder(monkeypatch, world)
+    client.patch(f"/v1/people/1/sightings/{a}", json={"excluded": True})
+    client.patch(f"/v1/people/1/sightings/{a}", json={"excluded": False})
+    assert calls == []
+
+
+def test_exclude_frigate_failure_never_fails_request(
+    world: World, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.cluster(1, name="Horatio")
+    a = world.sight(1, "2026-08-01 10:00")
+    world.sight(1, "2026-08-02 10:00")
+    c = world.conn()
+    c.execute("UPDATE face_enrichments SET sub_label_written = 'Horatio'")
+    c.commit()
+    c.close()
+    _label_recorder(monkeypatch, world, fail=True)
+    r = client.patch(f"/v1/people/1/sightings/{a}", json={"excluded": True})
+    assert r.status_code == 200
+    # The clear failed, so the record still says the label is on the event.
+    row = world.query("SELECT sub_label_written FROM face_enrichments WHERE event_id = ?", a)
+    assert row[0][0] == "Horatio"
+    assert client.patch(f"/v1/people/1/sightings/{a}", json={"excluded": False}).status_code == 200
+
+
+def test_web_exclude_leaves_labels_alone(
+    world: World, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.cluster(1, name="Horatio")
+    a = world.sight(1, "2026-08-01 10:00")
+    calls = _label_recorder(monkeypatch, world)
+    assert client.patch(f"/enrich/events/{a}", json={"excluded": True}).status_code == 200
+    assert calls == []
+
+
+def _seed_encounters(world: World, *names: str) -> None:
+    import json as _json
+
+    c = world.conn()
+    try:
+        c.execute(
+            "INSERT INTO encounters (id, start_time, updated_at, identities_json) "
+            "VALUES ('enc', 1.0, 1.0, ?)",
+            (_json.dumps(list(names)),),
+        )
+        c.execute(
+            "INSERT INTO encounter_members (atom_id, encounter_id, camera, start_time, severity, "
+            "sub_labels_json, link_reason, confidence, joined_at) "
+            "VALUES ('atom', 'enc', 'gate-face', 1.0, 'alert', ?, 'new', 1.0, 1.0)",
+            (_json.dumps(list(names)),),
+        )
+        c.commit()
+    finally:
+        c.close()
+
+
+def _encounter_names(world: World) -> tuple[str, str]:
+    return (
+        world.query("SELECT identities_json FROM encounters")[0][0],
+        world.query("SELECT sub_labels_json FROM encounter_members")[0][0],
+    )
+
+
+def test_delete_scrubs_name_and_clears_event_labels(
+    world: World, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.cluster(1, name="Horatio")
+    a = world.sight(1, "2026-08-01 10:00")
+    world.sight(1, "2026-08-02 10:00")  # never labeled
+    c = world.conn()
+    c.execute("UPDATE face_enrichments SET sub_label_written = 'Horatio' WHERE event_id = ?", (a,))
+    c.commit()
+    c.close()
+    _seed_encounters(world, "Horatio", "amazon")
+    calls = _label_recorder(monkeypatch, world)
+    assert client.delete("/v1/people/1").json() == {"ok": True}
+    assert calls == [(a, "", False)]
+    assert _encounter_names(world) == ('["amazon"]', '["amazon"]')
+    assert all(r[0] is None for r in world.query("SELECT sub_label_written FROM face_enrichments"))
+
+
+def test_delete_keeps_name_while_another_cluster_uses_it(
+    world: World, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.cluster(1, name="Horatio")
+    world.sight(1, "2026-08-01 10:00")
+    world.cluster(2, name="Horatio")
+    world.sight(2, "2026-08-02 10:00")
+    _seed_encounters(world, "Horatio")
+    _label_recorder(monkeypatch, world)
+    assert client.delete("/v1/people/1").status_code == 200
+    assert _encounter_names(world) == ('["Horatio"]', '["Horatio"]')
+
+
+def test_delete_frigate_failure_still_succeeds(
+    world: World, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.cluster(1, name="Horatio")
+    a = world.sight(1, "2026-08-01 10:00")
+    c = world.conn()
+    c.execute("UPDATE face_enrichments SET sub_label_written = 'Horatio' WHERE event_id = ?", (a,))
+    c.commit()
+    c.close()
+    _label_recorder(monkeypatch, world, fail=True)
+    assert client.delete("/v1/people/1").status_code == 200
+    assert client.get("/v1/people/1").status_code == 404

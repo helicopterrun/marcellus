@@ -313,11 +313,13 @@ async def patch_person_sighting(
     tz: str = "UTC",
 ) -> dict[str, Any]:
     zone = _tz(tz)
+    settings = _settings(request)
 
     def _do(conn: sqlite3.Connection) -> dict[str, Any]:
         cid = _resolve(conn, person_id)
         row = conn.execute(
-            "SELECT cluster_id FROM face_enrichments WHERE event_id = ?", (event_id,)
+            "SELECT cluster_id, sub_label_written FROM face_enrichments WHERE event_id = ?",
+            (event_id,),
         ).fetchone()
         if row is None or row["cluster_id"] != cid:
             raise HTTPException(
@@ -326,6 +328,26 @@ async def patch_person_sighting(
             )
         enrich.set_sighting_excluded(conn, event_id, body.excluded)
         conn.commit()
+        # Keep Frigate's label in step, best-effort, with no transaction open.
+        if body.excluded and row["sub_label_written"]:
+            if enrich.write_sub_labels(settings, [event_id], ""):
+                conn.execute(
+                    "UPDATE face_enrichments SET sub_label_written = NULL WHERE event_id = ?",
+                    (event_id,),
+                )
+                conn.commit()
+        elif not body.excluded:
+            named = conn.execute(
+                "SELECT name FROM face_clusters WHERE cluster_id = ?", (cid,)
+            ).fetchone()
+            if named is not None and named["name"]:
+                label = str(named["name"])
+                if enrich.write_sub_labels(settings, [event_id], label):
+                    conn.execute(
+                        "UPDATE face_enrichments SET sub_label_written = ? WHERE event_id = ?",
+                        (label, event_id),
+                    )
+                    conn.commit()
         found = people.load_people(conn, zone, person_id=cid).get(cid)
         return {"person": found.wire() if found else None}
 
@@ -334,12 +356,33 @@ async def patch_person_sighting(
 
 @v1_router.delete("/people/{person_id}", response_model=PeopleOkResponse)
 async def delete_person(person_id: int, request: Request) -> dict[str, Any]:
-    crops_dir = _settings(request).face_enrich.crops_dir
+    settings = _settings(request)
+    crops_dir = settings.face_enrich.crops_dir
 
     def _do(conn: sqlite3.Connection) -> dict[str, Any]:
         cid = _resolve(conn, person_id)
+        labeled = [
+            str(r["event_id"])
+            for r in conn.execute(
+                "SELECT event_id FROM face_enrichments "
+                "WHERE cluster_id = ? AND sub_label_written IS NOT NULL",
+                (cid,),
+            )
+        ]
+        row = conn.execute("SELECT name FROM face_clusters WHERE cluster_id = ?", (cid,)).fetchone()
+        name = str(row["name"]) if row is not None and row["name"] else None
         enrich.delete_cluster(conn, crops_dir, cid)
+        if labeled:
+            conn.executemany(
+                "UPDATE face_enrichments SET sub_label_written = NULL WHERE event_id = ?",
+                [(e,) for e in labeled],
+            )
+        if name is not None and not conn.execute(
+            "SELECT 1 FROM face_clusters WHERE name = ?", (name,)
+        ).fetchone():
+            enrich.erase_name_everywhere(conn, name)
         conn.commit()
+        enrich.write_sub_labels(settings, labeled, "")
         return {"ok": True}
 
     return await _run(request, _do)

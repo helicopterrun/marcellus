@@ -497,6 +497,7 @@ def cluster_name(cluster_id: int, payload: NamePayload, request: Request) -> JSO
                 status_code=404,
                 detail=error_detail("cluster_not_found", "cluster not found"),
             )
+        conn.commit()
         relabeled = enrich.retro_label(conn, s, cluster_id, name)
         conn.commit()
         return JSONResponse({"ok": True, "relabeled": relabeled})
