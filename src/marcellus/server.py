@@ -25,6 +25,7 @@ from marcellus.auth import FrigateAuthMiddleware
 from marcellus.config import Settings, load_settings
 from marcellus.db import FrigateDBMissingError
 from marcellus.errors import error_detail
+from marcellus.faces.handles import handle_for
 from marcellus.frigate_api import FrigateClient
 from marcellus.guide import load_guide
 from marcellus.push import delivery, delivery_wire
@@ -838,6 +839,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.templates.env.globals["asset_v"] = _asset_v
     app.state.templates.env.globals.update(
         {
+            "handle_for": handle_for,
             "fmt_ts": fmt.fmt_ts,
             "fmt_score": fmt.fmt_score,
             "fmt_duration": fmt.fmt_duration,

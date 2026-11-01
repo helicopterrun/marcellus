@@ -21,6 +21,7 @@ from marcellus.config import (
     SidecarSection,
 )
 from marcellus.faces import enrich
+from marcellus.faces.handles import handle_for
 from marcellus.frigate_api import FrigateAPIError, FrigateClient
 from marcellus.routes import enrich as enrich_routes
 from marcellus.server import create_app
@@ -69,7 +70,7 @@ def test_clusters_page_renders(client: TestClient) -> None:
     r = client.get("/enrich/clusters")
     assert r.status_code == 200
     assert "alice" in r.text
-    assert "Unknown #2" in r.text
+    assert f"{handle_for(2)} · #2" in r.text
 
 
 def test_clusters_json_orders_named_first(client: TestClient) -> None:
@@ -158,14 +159,14 @@ def test_people_view_hides_single_sightings_and_once_view_shows_them(
     settings = client.app.state.settings  # type: ignore[attr-defined]
     once = _add_cluster(settings, None, 1, "ev-once")
     people = client.get("/enrich/clusters").text
-    assert f"Unknown #{once}" not in people and "Unknown #2" in people
+    assert f"{handle_for(once)} · #{once}" not in people and f"{handle_for(2)} · #2" in people
     # Tab counts: alice + unknown #2 under People, the new one under Seen once.
     assert '<span class="pp-n">2</span>' in people and '<span class="pp-n">1</span>' in people
     seen_once = client.get("/enrich/clusters?view=once").text
     cards = seen_once.split("</datalist>", 1)[1]  # the name datalist lists alice
-    assert f"Unknown #{once}" in cards and "alice" not in cards
+    assert f"{handle_for(once)} · #{once}" in cards and "alice" not in cards
     # A bogus view falls back to People rather than erroring.
-    assert "Unknown #2" in client.get("/enrich/clusters?view=nope").text
+    assert f"{handle_for(2)} · #2" in client.get("/enrich/clusters?view=nope").text
 
 
 def test_unknowns_sort_by_sightings_after_named(client: TestClient) -> None:
@@ -181,7 +182,7 @@ def test_unknowns_sort_by_sightings_after_named(client: TestClient) -> None:
 
 def test_single_cluster_view_and_missing_cluster(client: TestClient) -> None:
     html = client.get("/enrich/clusters?cluster=2").text
-    assert "Unknown #2" in html and "alice" not in html.split("<datalist", 1)[1].split(
+    assert f"{handle_for(2)} · #2" in html and "alice" not in html.split("<datalist", 1)[1].split(
         "</datalist>", 1
     )[1]
     assert "All identities" in html

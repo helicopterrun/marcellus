@@ -86,7 +86,7 @@
 
   <div class="id-list{{ ' id-list-grid' if view == 'once' and single is none }}">
   {% for c in clusters %}
-  {% set title = c.name if c.name else 'Unknown #' ~ c.cluster_id %}
+  {% set title = c.name if c.name else handle_for(c.cluster_id) ~ ' · #' ~ c.cluster_id %}
   <section class="id-card id-cluster{{ ' id-named' if c.name }}" id="cluster-{{ c.cluster_id }}"
            data-cluster="{{ c.cluster_id }}" data-name="{{ c.name or '' }}"
            data-thumb="{{ c.avatar or '' }}">

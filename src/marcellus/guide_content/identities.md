@@ -75,6 +75,11 @@ it, so you can follow, annotate, or correct a face without naming it. The app
 shows each person as **named**, **regular** (unnamed, seen on two or more
 days) or **new** (unnamed, seen on one day), counted in your own timezone.
 
+Every face number also has a generated **handle** such as "Alder Wren", so an
+unnamed face is easier to talk about than "#183". A handle is not a name: it
+never changes whether someone counts as named, and it is never written to
+Frigate, encounters or notifications. It stays the same for a number forever.
+
 - **Follow** an unknown face and it is exempt from the `cluster_ttl_days`
   expiry; unfollow and it goes back on the normal clock.
 - **Note** is a short free-text reminder ("probably the courier").

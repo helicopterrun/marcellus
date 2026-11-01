@@ -621,6 +621,8 @@ class SightingDetail(SightingSummary):
 
 class Person(_Wire):
     id: int
+    #: Generated label for the id ("Alder Wren"): not a name, never sent to Frigate.
+    handle: str
     name: str | None
     note: str | None
     followed: bool
