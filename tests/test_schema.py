@@ -32,6 +32,16 @@ from marcellus import db
 # existed (indexes on these tables are unaffected and are NOT duplicated
 # here -- they're left in place from the current SIDECAR_SCHEMA text).
 _OLD_TABLES: dict[str, str] = {
+    "face_clusters": """
+CREATE TABLE IF NOT EXISTS face_clusters (
+    cluster_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    name              TEXT,
+    centroid          BLOB NOT NULL,
+    observation_count INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT NOT NULL,
+    last_seen_at      REAL NOT NULL
+);
+""",
     "face_captures": """
 CREATE TABLE IF NOT EXISTS face_captures (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,

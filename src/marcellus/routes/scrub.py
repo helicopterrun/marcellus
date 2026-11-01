@@ -191,6 +191,20 @@ def _encounters_capabilities(settings: Any) -> dict[str, Any]:
     }
 
 
+def _people_capabilities(settings: Any) -> dict[str, Any]:
+    """`people` block of `/v1/capabilities`: `enabled` mirrors
+    `face_enrich.enabled`; `filters` / `sorts` list what `GET /v1/people`
+    accepts (empty while disabled)."""
+    from marcellus.faces import people
+
+    enabled = bool(settings.face_enrich.enabled)
+    return {
+        "enabled": enabled,
+        "filters": list(people.FILTERS) if enabled else [],
+        "sorts": list(people.SORTS) if enabled else [],
+    }
+
+
 def _external_sources_capabilities(settings: Any, state: Any) -> dict[str, Any]:
     """`external_sources` block of `/v1/capabilities` (guide_content's
     `external-sources.md`): which non-Frigate sources this build serves
@@ -285,6 +299,7 @@ async def capabilities(request: Request) -> dict[str, Any]:
         "search": {"enabled": True, "related_events": True},
         "unifi_protect": _protect_capabilities(settings, request.app.state),
         "encounters": _encounters_capabilities(settings),
+        "people": _people_capabilities(settings),
         "external_sources": _external_sources_capabilities(settings, request.app.state),
     }
 

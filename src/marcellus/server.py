@@ -47,6 +47,7 @@ from marcellus.routes import login_page as login_page_routes
 from marcellus.routes import map_page as map_page_routes
 from marcellus.routes import motion as motion_routes
 from marcellus.routes import observations as observations_routes
+from marcellus.routes import people as people_routes
 from marcellus.routes import placement as placement_routes
 from marcellus.routes import protect as protect_routes
 from marcellus.routes import proxy as proxy_routes
@@ -900,6 +901,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(inbox_routes.router)
     app.include_router(encounters_routes.router)
     app.include_router(encounters_routes.v1_router)
+    app.include_router(people_routes.v1_router)
     app.include_router(sources_routes.v1_router)
     app.include_router(observations_routes.v1_router)
     app.include_router(topology_routes.v1_router)

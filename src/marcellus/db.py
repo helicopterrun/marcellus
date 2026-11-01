@@ -471,9 +471,34 @@ CREATE TABLE IF NOT EXISTS face_clusters (
     centroid          BLOB NOT NULL,
     observation_count INTEGER NOT NULL DEFAULT 0,
     created_at        TEXT NOT NULL,
-    last_seen_at      REAL NOT NULL
+    last_seen_at      REAL NOT NULL,
+    -- People API (/v1/people): when a person chose to follow this identity
+    -- (NULL = not followed; followed ones skip the cluster_ttl_days reap) and
+    -- their free-text note. Also in _ADDED_COLUMNS.
+    followed_at       REAL,
+    note              TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_face_cluster_seen ON face_clusters(last_seen_at);
+
+-- Merge redirects: a cluster merged away keeps resolving to its survivor, so a
+-- client holding the old id lands on the right person. Chains stay one hop
+-- long (a merge repoints existing redirects at the new survivor). IDs are
+-- AUTOINCREMENT and never reused, so an old_id can never alias a new cluster.
+CREATE TABLE IF NOT EXISTS face_cluster_redirects (
+    old_id    INTEGER PRIMARY KEY,
+    new_id    INTEGER NOT NULL,
+    merged_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_face_redirect_new ON face_cluster_redirects(new_id);
+-- A deleted cluster takes the redirects pointing at it with it, whichever code
+-- path deleted it (web delete, remove, reap, regate, ...), so a deleted
+-- person's old ids 404 instead of dangling. A merge repoints redirects BEFORE
+-- deleting its source row, so this never eats the redirect it just wrote.
+CREATE TRIGGER IF NOT EXISTS trg_face_cluster_redirect_cleanup
+AFTER DELETE ON face_clusters
+BEGIN
+    DELETE FROM face_cluster_redirects WHERE new_id = OLD.cluster_id;
+END;
 
 -- One row per Frigate person event the enrichment worker has settled or is
 -- retrying — this table IS the queue state: enrich.find_candidates LEFT JOINs
@@ -948,6 +973,11 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("best_crop_path", "TEXT"),
         # Face-stack backfill queue. Also in the CREATE TABLE literal.
         ("stack_status", "TEXT"),
+    ],
+    "face_clusters": [
+        # People API (followed/note). Also in the CREATE TABLE literal.
+        ("followed_at", "REAL"),
+        ("note", "TEXT"),
     ],
     "face_crops": [
         # Detection confidence (min_det_score gate). Also in the CREATE TABLE literal.

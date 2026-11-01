@@ -452,8 +452,230 @@ def rebuild_centroid(conn: sqlite3.Connection, cluster_id: int) -> None:
     )
 
 
+#: Centroid cosine distance under which two clusters get a "looks like" merge
+#: hint. Deliberately looser than face_enrich.cluster_threshold (0.55): the
+#: hint is a human-confirmed suggestion, not an automatic join. Shared by the
+#: web page's similar pairs and `/v1/people/{id}/similar`.
+SUGGEST_THRESHOLD = 0.6
+
+
+class NameConflict(Exception):
+    """Both clusters of a strict merge carry different names."""
+
+
+@dataclass(frozen=True)
+class MergeResult:
+    #: A name the survivor gained from the source. The caller commits, then
+    #: runs `retro_label` for it (network calls stay out of the write lock).
+    carried_name: str | None
+
+
+def merge_clusters(
+    conn: sqlite3.Connection,
+    source_id: int,
+    into_id: int,
+    *,
+    strict_names: bool = False,
+    now: float | None = None,
+) -> MergeResult:
+    """Fold cluster `source_id` into `into_id`; the source row disappears.
+
+    Repoints sightings and existing redirects, records `source -> into`, carries
+    over the name (when the survivor has none), the note (likewise),
+    `followed_at` (either), and the later `last_seen_at`, deletes the source and
+    rebuilds the survivor's centroid. When both are named the survivor's name
+    wins, unless `strict_names` and the names differ (raises `NameConflict`).
+    Caller validates existence, owns commit, and runs `retro_label` for a
+    carried name. Redirects are repointed before the source row is deleted:
+    the delete trigger removes redirects aimed at the deleted cluster.
+    """
+    src = conn.execute(
+        "SELECT name, note, followed_at, last_seen_at, observation_count "
+        "FROM face_clusters WHERE cluster_id = ?",
+        (source_id,),
+    ).fetchone()
+    dst = conn.execute(
+        "SELECT name, note, followed_at, last_seen_at, observation_count "
+        "FROM face_clusters WHERE cluster_id = ?",
+        (into_id,),
+    ).fetchone()
+    if src is None or dst is None or source_id == into_id:
+        raise ValueError("merge needs two distinct existing clusters")
+    src_name, dst_name = src["name"], dst["name"]
+    if (
+        strict_names
+        and src_name
+        and dst_name
+        and str(src_name).casefold() != str(dst_name).casefold()
+    ):
+        raise NameConflict()
+    carried = str(src_name) if src_name and not dst_name else None
+    conn.execute(
+        "UPDATE face_enrichments SET cluster_id = ? WHERE cluster_id = ?", (into_id, source_id)
+    )
+    conn.execute(
+        "UPDATE face_cluster_redirects SET new_id = ? WHERE new_id = ?", (into_id, source_id)
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO face_cluster_redirects (old_id, new_id, merged_at) "
+        "VALUES (?, ?, ?)",
+        (source_id, into_id, time.time() if now is None else now),
+    )
+    conn.execute("DELETE FROM face_clusters WHERE cluster_id = ?", (source_id,))
+    # Count falls back to the sum when no stored embedding lets the rebuild
+    # recompute it; last_seen_at is never touched by rebuild_centroid.
+    conn.execute(
+        "UPDATE face_clusters SET name = COALESCE(name, ?), note = COALESCE(note, ?), "
+        "       followed_at = COALESCE(followed_at, ?), "
+        "       last_seen_at = MAX(last_seen_at, ?), observation_count = ? "
+        " WHERE cluster_id = ?",
+        (
+            carried,
+            src["note"],
+            src["followed_at"],
+            src["last_seen_at"],
+            int(src["observation_count"]) + int(dst["observation_count"]),
+            into_id,
+        ),
+    )
+    rebuild_centroid(conn, into_id)
+    return MergeResult(carried_name=carried)
+
+
+def rename_cluster(conn: sqlite3.Connection, cluster_id: int, name: str) -> bool:
+    """Set the name and rebuild the centroid; False when no such cluster. The
+    caller commits, then runs `retro_label`."""
+    cur = conn.execute("UPDATE face_clusters SET name = ? WHERE cluster_id = ?", (name, cluster_id))
+    if not cur.rowcount:
+        return False
+    rebuild_centroid(conn, cluster_id)
+    return True
+
+
+def retro_label(conn: sqlite3.Connection, settings: Settings, cluster_id: int, name: str) -> int:
+    """Write `name` as the sub_label onto the cluster's past events.
+
+    Best-effort per event: an event that has aged out of Frigate's retention
+    404s and is skipped -- that must never fail the rename itself. Returns how
+    many events were actually labeled.
+    """
+    event_ids = [
+        str(r["event_id"])
+        for r in conn.execute(
+            "SELECT event_id FROM face_enrichments WHERE cluster_id = ? AND excluded_at IS NULL",
+            (cluster_id,),
+        )
+    ]
+    # The network loop only collects; the DB write happens once, after it, so
+    # no write transaction is held open across Frigate calls.
+    labeled: list[str] = []
+    with FrigateClient(settings.frigate.base_url) as fc:
+        for eid in event_ids:
+            try:
+                fc.set_sub_label(eid, name)
+            except FrigateAPIError as exc:
+                logger.info("enrich: retro-label skipped for %s: %s", eid, exc)
+                continue
+            labeled.append(eid)
+    conn.executemany(
+        "UPDATE face_enrichments SET sub_label_written = ? WHERE event_id = ?",
+        [(name, eid) for eid in labeled],
+    )
+    return len(labeled)
+
+
+def write_sub_labels(settings: Settings, event_ids: list[str], label: str) -> list[str]:
+    """Best-effort `set_sub_label(event, label)` for each event ("" clears).
+    Returns the events that succeeded; never raises on a Frigate failure and
+    never logs the label. Call with no write transaction open."""
+    done: list[str] = []
+    if not event_ids:
+        return done
+    try:
+        with FrigateClient(settings.frigate.base_url) as fc:
+            for eid in event_ids:
+                try:
+                    fc.set_sub_label(eid, label)
+                except FrigateAPIError as exc:
+                    logger.info("enrich: sub_label write skipped for %s: %s", eid, exc)
+                    continue
+                done.append(eid)
+    except Exception:  # noqa: BLE001 - Frigate trouble must never fail the caller
+        logger.info("enrich: sub_label writes aborted")
+    return done
+
+
+def erase_name_everywhere(conn: sqlite3.Connection, name: str) -> None:
+    """Remove `name` from encounters' `identities_json` and members'
+    `sub_labels_json`. The caller decides no other cluster still uses it."""
+    needles = {name, json.dumps(name)[1:-1]}
+    for table, col in (("encounters", "identities_json"), ("encounter_members", "sub_labels_json")):
+        key = "id" if table == "encounters" else "rowid"
+        rows = conn.execute(
+            f"SELECT {key} AS k, {col} AS v FROM {table} WHERE "
+            + " OR ".join("instr(" + col + ", ?) > 0" for _ in needles),
+            tuple(needles),
+        ).fetchall()
+        for r in rows:
+            try:
+                values = json.loads(r["v"])
+            except ValueError:
+                continue
+            if not isinstance(values, list) or name not in values:
+                continue
+            kept = [v for v in values if v != name]
+            conn.execute(
+                f"UPDATE {table} SET {col} = ? WHERE {key} = ?", (json.dumps(kept), r["k"])
+            )
+
+
+def set_sighting_excluded(
+    conn: sqlite3.Connection, event_id: str, excluded: bool
+) -> tuple[bool, int | None]:
+    """Soft-exclude/include one sighting and rebuild its cluster's centroid.
+
+    Returns (found, cluster_id); cluster_id is None for a clusterless sighting.
+    Does not touch Frigate sub_labels.
+    """
+    row = conn.execute(
+        "SELECT cluster_id FROM face_enrichments WHERE event_id = ?", (event_id,)
+    ).fetchone()
+    if row is None:
+        return (False, None)
+    excluded_at = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds") if excluded else None
+    )
+    conn.execute(
+        "UPDATE face_enrichments SET excluded_at = ? WHERE event_id = ?", (excluded_at, event_id)
+    )
+    cluster_id = row["cluster_id"]
+    if cluster_id is not None:
+        rebuild_centroid(conn, int(cluster_id))
+        return (True, int(cluster_id))
+    return (True, None)
+
+
+def delete_cluster(conn: sqlite3.Connection, crops_dir: Path, cluster_id: int) -> bool:
+    """Erase an identity: crops, embeddings and the cluster row (its redirects
+    follow via the delete trigger). False when there was no such cluster."""
+    event_ids = [
+        str(r["event_id"])
+        for r in conn.execute(
+            "SELECT event_id FROM face_enrichments WHERE cluster_id = ?", (cluster_id,)
+        )
+    ]
+    drop_crops(conn, crops_dir, event_ids)
+    conn.execute(
+        "UPDATE face_enrichments SET cluster_id = NULL, embedding = NULL WHERE cluster_id = ?",
+        (cluster_id,),
+    )
+    cur = conn.execute("DELETE FROM face_clusters WHERE cluster_id = ?", (cluster_id,))
+    return bool(cur.rowcount)
+
+
 def reap_stale_clusters(conn: sqlite3.Connection, *, cfg: Any, now: float) -> int:
-    """Delete UNNAMED clusters unseen for cluster_ttl_days, with their embeddings.
+    """Delete UNNAMED, unfollowed clusters unseen for cluster_ttl_days, with their
+    embeddings. A followed cluster (`followed_at` set, /v1/people) is exempt.
 
     This is the retention boundary that keeps the feature from becoming an
     unbounded stranger database: the enrichment rows stay (they mirror
@@ -464,7 +686,7 @@ def reap_stale_clusters(conn: sqlite3.Connection, *, cfg: Any, now: float) -> in
         int(r["cluster_id"])
         for r in conn.execute(
             "SELECT cluster_id FROM face_clusters "
-            "WHERE name IS NULL AND last_seen_at < ?",
+            "WHERE name IS NULL AND followed_at IS NULL AND last_seen_at < ?",
             (cutoff,),
         )
     ]

@@ -1,6 +1,6 @@
 {
   "files": {
-    "capabilities.json": "208e953792074419b3cc9e1571d12b3ea009e67115579119d4707daf064a210e",
+    "capabilities.json": "b89206260013aca5750738330f978c8d072a08b6cd9a3574838fb87f7d06b7a4",
     "card_push.json": "32962eefc42db5bbc3561b9b0e19aabf72c6d9a3c6da48d1e35ceb49934b30ae",
     "card_push_silent.json": "d20c0cd6bd23a417cd71dcd92085b1940883e2065dbf8962c54e90e8506593dd",
     "card_push_test.json": "b3aa845223322fd9ebed4e7d4b7fdd7692f72e05382228a1d541f6ce722e6f9a",
@@ -22,6 +22,9 @@
     "v1_events_related.json": "ba5debfaff2236c6baf68e4b24c3f1fcb214ebfeeac160b9b82b90fcbc57988a",
     "v1_events_search.json": "bea2924484a8f196ffe0d35b73a5523709b62294e47b7baa05ec36e2e7cb7970",
     "v1_highlights.json": "6f7b277033f667cc24b2e6bc9c5a2886ba41b55f07c0116d74179c3bcd74ec59",
+    "v1_people.json": "784ecb1e9ae4d843f79c031fc3c0ec6b4b8df772b59bdb401c8a33a2bc0c15ee",
+    "v1_person.json": "dc453d618a8d35ee175a7bed33de1e0dbd25ecc159a001199891293e90641cb7",
+    "v1_person_sightings.json": "a3a2b1581216987e218a0758fe1ec79e3fdc58b7a74b474583bed523fc3730f4",
     "v1_push_map_live.json": "2e47b0076bc1ef11401ee23bb8169d767e1c8d072f9bd53a3621562fef0fad4b",
     "v1_push_map_track.json": "182a0fc275b48b10acf4dc951badc2fc64f83fb65a95e86bb7ed32cba753b2b1",
     "v1_reel.json": "65e5cea2fc766c0ccde3d57a5ed527f08d36aa90f4139edd807542dbd536d9ce",
