@@ -1338,11 +1338,11 @@ async def handle_delivery_event(
     policy = policy_settings.get_active()
     escalation_sound = policy.get("escalation_sound", "urgent")
 
-    # Quiet hours (§4): check before ladder evaluation.
-    import datetime
-    local_now = datetime.datetime.now()
-    now_minutes = local_now.hour * 60 + local_now.minute
-    qh_active, qh_mode = policy_settings.is_quiet_hours(policy, now_minutes)
+    # Quiet hours (§4): check before ladder evaluation, on the household's
+    # clock (the window is set in phone time; the host usually runs UTC).
+    qh_active, qh_mode = policy_settings.quiet_hours_at(
+        policy, now, policy_settings.household_zone(devices)
+    )
 
     muted = bool(policy.get("mute_sounds"))
 

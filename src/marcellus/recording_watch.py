@@ -42,7 +42,6 @@ import asyncio
 import datetime
 import logging
 import time
-from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -445,18 +444,6 @@ class RecordingWatcher:
         finally:
             conn.close()
 
-    @staticmethod
-    def _zone(devices: list[Any]) -> ZoneInfo | None:
-        """The registered devices' most common time zone: one card goes to all of
-        them, and the host's clock is often UTC. None when no device names one."""
-        names = Counter(d.timezone for d in devices if getattr(d, "timezone", ""))
-        for name, _count in names.most_common():
-            try:
-                return ZoneInfo(name)
-            except Exception:  # noqa: BLE001 -- an unknown zone must not drop the card
-                continue
-        return None
-
     def _sound_allowed(self, zone: ZoneInfo | None, now: float) -> bool:
         """No sound inside quiet hours, or with sounds muted."""
         from marcellus.push import policy_settings
@@ -464,8 +451,7 @@ class RecordingWatcher:
         policy = policy_settings.get_active()
         if policy.get("mute_sounds"):
             return False
-        local = datetime.datetime.fromtimestamp(now, zone)
-        active, _mode = policy_settings.is_quiet_hours(policy, local.hour * 60 + local.minute)
+        active, _mode = policy_settings.quiet_hours_at(policy, now, zone)
         return not active
 
     @staticmethod
@@ -488,6 +474,7 @@ class RecordingWatcher:
         self, conn: Any, engine: Any, push_store: Any, existing: Card | None,
         stalled: Mapping[str, float], now: float,
     ) -> None:
+        from marcellus.push import policy_settings
         from marcellus.push.cards import CREATE
         from marcellus.push.delivery import advance_card, build_card_payload, send_card_mutation
         from marcellus.push.ladder_policy import SYSTEM_CARD_LEVEL
@@ -503,7 +490,7 @@ class RecordingWatcher:
         else:
             card = replace(card, kept_row=True)
         devices = self._devices(conn, push_store)
-        zone = self._zone(devices)
+        zone = policy_settings.household_zone(devices)
         title, body = stalled_copy(stalled, len(self.watched), now, zone)
         payload = build_card_payload(
             card, mutation, sound=sound and self._sound_allowed(zone, now),

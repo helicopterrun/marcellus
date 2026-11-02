@@ -199,17 +199,6 @@ def test_times_are_in_the_devices_zone_never_the_hosts() -> None:
     assert "ago" in body and "PM" not in body and "AM" not in body
 
 
-def test_zone_is_the_most_common_valid_device_zone() -> None:
-    class D:
-        def __init__(self, timezone: str) -> None:
-            self.timezone = timezone
-
-    pick = RecordingWatcher._zone
-    assert pick([]) is None and pick([D("")]) is None
-    assert str(pick([D("Asia/Tokyo"), D("UTC"), D("UTC")])) == "UTC"
-    assert str(pick([D("Not/AZone"), D("Not/AZone"), D("UTC")])) == "UTC"
-
-
 # --- the worker ------------------------------------------------------------------
 
 
