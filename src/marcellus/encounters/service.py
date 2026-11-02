@@ -43,6 +43,12 @@ _QUEUE_MAXSIZE = 1000
 #: never eligible for removal regardless of age.
 _VANISH_GRACE_S = 300.0
 
+#: Consecutive reconcile cycles that may skip because the sidecar DB's write
+#: lock stayed busy past `busy_timeout`. A brief queue is routine and the next
+#: cycle catches up; this many in a row (about 5 minutes) is a wedge, so the
+#: cycle then raises and `status()` reports the error instead of staying "ok".
+_LOCK_SKIP_LIMIT = 10
+
 
 @dataclass(frozen=True)
 class ReconcileStats:
@@ -129,6 +135,7 @@ class EncounterService:
         self._last_reconcile_at: float | None = None
         self._last_error: str | None = None
         self._last_prune_at: float | None = None
+        self._lock_skips = 0
         # Live-hook decoupling (see `observe_review`/`run_worker`): sqlite
         # writes never happen on the caller's thread/loop, only inside the
         # worker (via `asyncio.to_thread`) or `reconcile`.
@@ -380,13 +387,6 @@ class EncounterService:
                 (self._atom_from_review_row(row) for row in rows), key=lambda a: a.start_time
             )
 
-            open_encounters = store.load_open(sidecar_conn, now)
-            by_id = {e.encounter_id: e for e in open_encounters}
-            new_count = 0
-            updated_count = 0
-            skipped_count = 0
-            error_count = 0
-
             # One transaction for the whole cycle: python's sqlite3 module
             # only auto-BEGINs ahead of INSERT/UPDATE/DELETE/REPLACE
             # statements, not ahead of SAVEPOINT -- without this explicit
@@ -395,7 +395,32 @@ class EncounterService:
             # point of batching (verified empirically: a bare
             # SAVEPOINT/INSERT/RELEASE with no enclosing BEGIN is visible to
             # another connection immediately, before `conn.commit()` runs).
-            sidecar_conn.execute("BEGIN")
+            #
+            # IMMEDIATE, and before the first read below: a deferred BEGIN
+            # reads a WAL snapshot, and if anything else commits before this
+            # cycle's first write, that write fails at once with
+            # SQLITE_BUSY_SNAPSHOT, ignoring `busy_timeout`, and so does every
+            # later atom on the same stale snapshot. IMMEDIATE waits instead.
+            try:
+                sidecar_conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc) or self._lock_skips + 1 >= _LOCK_SKIP_LIMIT:
+                    raise
+                self._lock_skips += 1
+                logger.warning(
+                    "encounters: sidecar DB busy, skipping this reconcile cycle (%d in a row)",
+                    self._lock_skips,
+                )
+                return ReconcileStats(rows=len(rows), new=0, updated=0, sealed=0)
+            self._lock_skips = 0
+
+            open_encounters = store.load_open(sidecar_conn, now)
+            by_id = {e.encounter_id: e for e in open_encounters}
+            new_count = 0
+            updated_count = 0
+            skipped_count = 0
+            error_count = 0
+
             for atom in atoms:
                 sidecar_conn.execute("SAVEPOINT atom")
                 try:
