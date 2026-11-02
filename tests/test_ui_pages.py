@@ -1,4 +1,4 @@
-"""New UI surfaces: status dashboard, debug index, devices, zone-hits, scrub viewer."""
+"""New UI surfaces: status dashboard, debug index, devices, zone-hits, nav."""
 
 from __future__ import annotations
 
@@ -155,40 +155,26 @@ def test_devices_page_lists_registered(
     assert "btn-primary" in r.text
 
 
-def test_scrub_viewer_disabled(client: TestClient) -> None:
-    r = client.get("/scrub")
-    assert r.status_code == 200
-    assert "disabled" in r.text
+def test_scrub_page_redirects_to_status(client: TestClient) -> None:
+    r = client.get("/scrub", follow_redirects=False)
+    assert r.status_code == 307
+    assert r.headers["location"] == "/"
 
 
-def test_scrub_page_carries_every_mount_point_the_reel_binds_to() -> None:
-    """The template/JS contract, which fails silently in both directions.
-
-    `scrub.js` returns early if `#sv-reel` is missing and throws on the rest,
-    and neither shows up in a server-side test -- the page still renders 200
-    with a dead canvas. The previous strip left exactly that trap behind: it
-    bound `#sv-timeline`, an id no longer in the template.
-    """
-    from jinja2 import Environment, FileSystemLoader, select_autoescape
-
-    env = Environment(
-        loader=FileSystemLoader(TEMPLATES_DIR), autoescape=select_autoescape(["html"])
-    )
-    html = env.get_template("scrub.html").render(
-        cameras=["gate-face"], camera="gate-face", enabled=True, counts={}, asset_v="t",
-        request=None,
-    )
-    for element_id in (
-        "sv-camera", "sv-frame", "sv-moment", "sv-reel",
-        "sv-rungs", "sv-lanes", "sv-status", "sv-frigate-link", "sv-clock",
+def test_nav_has_tools_dropdown_and_no_scrub_link(client: TestClient) -> None:
+    html = client.get("/").text
+    assert 'href="/scrub"' not in html
+    nav = html[html.index('<nav class="pages"') : html.index("</header>")]
+    tools = nav[nav.index(">Tools</summary>") :]
+    for href in (
+        "/score-histogram", "/motion", "/fps-budget", "/zone-hits",
+        "/placement", "/wildlife", "/replay", "/guide", "/debug",
     ):
-        assert f'id="{element_id}"' in html, element_id
-
-    js = (JS_DIR / "scrub.js").read_text()
-    for element_id in ("sv-reel", "sv-rungs", "sv-lanes", "sv-moment"):
-        assert f'getElementById("{element_id}")' in js, element_id
-    # The strip's id must be gone from both sides, not just one.
-    assert "sv-timeline" not in html and "sv-timeline" not in js
+        assert f'href="{href}"' in tools, href
+    assert ">Tuning</summary>" not in html
+    tabbar = html[html.index('<nav class="tabbar"') : html.index('class="more-backdrop"')]
+    assert 'href="/encounters"' in tabbar
+    assert "i-scrub" not in html
 
 
 def test_triage_moved_to_slash_triage(client: TestClient) -> None:

@@ -17,7 +17,7 @@
      surface, surface-2 and panel (WCAG AA for small text -- every use of
      these is 9-13px). --muted-3 is NOT a text token: it is the dimmest
      step and only clears the 3:1 non-text threshold, so it is for borders
-     and decorative glyphs only (.sv-chip border, .guide-crumbs separator).
+     and decorative glyphs only (.guide-crumbs separator).
      tests/test_contrast.py enforces all three. */
   --muted: #96979D;
   --muted-2: #8B8E95;
@@ -111,26 +111,30 @@ header .stats { font-size: 12px; color: var(--muted); min-width: 0; overflow: hi
 header .brand a { color: inherit; text-decoration: none; }
 header .pages { display: flex; gap: 4px; align-items: center; }
 header .header-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
-header .page-link.util { color: var(--muted-2); }
-/* Analysis dropdown: <details> so it needs no JS. */
+/* Nav dropdowns (People, Tools): <details> so they need no JS. util.js closes
+   them on outside click / Escape. */
 .nav-group { position: relative; }
 .nav-group summary { list-style: none; cursor: pointer; user-select: none; }
 .nav-group summary::-webkit-details-marker { display: none; }
 .nav-group summary::after { content: " ▾"; font-size: 9px; color: var(--muted-2); }
 .nav-group[open] .nav-drop { position: absolute; top: 100%; left: 0; z-index: 40; display: flex; flex-direction: column; min-width: 130px; background: var(--surface); border: 1px solid var(--stroke); border-radius: var(--radius-md); padding: 4px; margin-top: 4px; }
 header .page-link { display: inline-block; padding: 4px 10px; font-size: 12px; color: var(--muted); text-decoration: none; border-radius: var(--radius-sm); }
+/* Tools sits at the far right: anchor its panel to the right edge so it
+   cannot overflow the viewport. */
+.header-right .nav-group[open] .nav-drop { left: auto; right: 0; }
+.nav-drop .nav-sep { height: 1px; margin: 4px 6px; background: var(--stroke); }
 header .page-link:hover { background: var(--surface-2); color: var(--text); }
 header .page-link.active { background: var(--surface-2); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
-/* Narrow desktops / tablet landscape: the header's own content (brand, seven
-   nav items, summary, search, three utility links) overflows one row below
-   ~1200px and drops .header-right onto a second line. The summary text is the
+/* Narrow desktops / tablet landscape: the header's own content (brand, six
+   nav items, search, summary, Tools) can overflow one row below
+   ~1200px and drop .header-right onto a second line. The summary text is the
    one element duplicated elsewhere -- Triage repeats it in .triage-progress --
    so it yields first and the bar stays one row down to 1024px. */
 @media (max-width: 1200px) {
   header .stats { display: none; }
 }
 /* Tablet portrait (721-950px) genuinely cannot fit one row. Let it wrap, but
-   drop the auto margin so the utility links sit with the nav instead of
+   drop the auto margin so the Tools menu sits with the nav instead of
    floating right against an empty band. */
 @media (max-width: 950px) {
   header .header-right { margin-left: 0; }
@@ -166,7 +170,7 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
   .tabbar .tab.active { color: var(--accent); }
   /* #more-btn is a <button>, unlike its sibling <a> tabs — strip UA button
      chrome (background/border/font) so it matches them exactly. */
-  .tabbar button.tab { background: transparent; border: 0; margin: 0; font: inherit; appearance: none; -webkit-appearance: none; }
+  .tabbar button.tab { background: transparent; border: 0; margin: 0; font-family: inherit; font-size: 10px; font-weight: inherit; line-height: inherit; letter-spacing: inherit; appearance: none; -webkit-appearance: none; }
   /* Content must never hide behind the bar. */
   body { padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px)); }
   /* Phones drop the top bar entirely — the tab bar owns nav, and Settings
@@ -445,72 +449,6 @@ a { color: var(--accent); }
   .kv { grid-template-columns: 1fr; gap: 2px 0; }
   .kv dt { font-size: 11px; margin-top: 6px; }
   .kv dd { font-size: 13px; }
-}
-
-/* ----- Scrub viewer: the reel -----
-   The frame and what is in it on the left; the reel standing beside it. The
-   reel is vertical on every screen (it already was on phones), which is why
-   there is one layout here and not a desktop/phone pair. */
-.sv-rig { display: grid; grid-template-columns: minmax(0, 1fr) 336px; gap: var(--space-3); margin-top: var(--space-3); }
-.sv-viewer { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
-.sv-frame-wrap { padding: 0; overflow: hidden; border: 1px solid var(--stroke); border-radius: var(--radius-md); }
-.sv-frame { width: 100%; aspect-ratio: 16/9; background: var(--deep) no-repeat; background-size: cover; display: flex; align-items: center; justify-content: center; color: var(--muted-2); font-size: 13px; }
-
-.sv-reelcol { display: flex; gap: var(--space-2); min-width: 0; }
-.sv-reel-shell { flex: 1; min-width: 0; background: var(--deep); border: 1px solid var(--stroke); border-radius: var(--radius-md); overflow: hidden; }
-.sv-reel { display: block; width: 100%; height: max(360px, calc(100dvh - 300px)); touch-action: none; cursor: grab; }
-.sv-reel:active { cursor: grabbing; }
-
-/* The rung ladder: one notch per sprite tier the cache generates. */
-.sv-rungs { display: flex; flex-direction: column; gap: 3px; justify-content: center; }
-.sv-rungs button { font-family: var(--font-mono); font-size: 10px; width: 34px; padding: 6px 0; background: transparent; color: var(--muted-2); border: 1px solid var(--stroke-soft); border-radius: var(--radius-sm); cursor: pointer; }
-.sv-rungs button:hover { color: var(--muted); border-color: var(--stroke); }
-.sv-rungs button[aria-pressed="true"] { color: var(--accent-2); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
-
-/* Moment card: who is here, in which zone, how sure, and whether Frigate
-   called it an alert -- the question the 72px strip could not answer. */
-.sv-moment { background: var(--deep); border: 1px solid var(--stroke); border-radius: var(--radius-md); padding: 12px 14px; min-height: 150px; font-family: var(--font-mono); display: flex; flex-direction: column; gap: 10px; }
-.sv-moment-head { display: flex; align-items: baseline; gap: var(--space-3); flex-wrap: wrap; }
-.sv-moment-t { font-size: 18px; color: var(--text); font-variant-numeric: tabular-nums; }
-.sv-moment-rel { font-size: 11px; color: var(--muted-2); }
-.sv-moment-empty { color: var(--muted-2); font-size: 12px; margin: 10px 0 0; }
-.sv-sev { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; padding: 2px 7px; border-radius: var(--radius-sm); border: 1px solid; }
-.sv-sev.alert { color: var(--accent-2); border-color: var(--accent-2); background: color-mix(in srgb, var(--accent-2) 9%, transparent); }
-.sv-sev.detection { color: var(--muted-2); border-color: var(--stroke); background: var(--surface); }
-.sv-sev.none { color: var(--muted-2); border-color: var(--stroke-soft); }
-.sv-sev.gap { color: var(--gap-c); border-color: var(--gap-c); }
-
-.sv-tracklist { display: flex; flex-direction: column; gap: 6px; }
-.sv-trk { display: grid; grid-template-columns: 9px auto 1fr auto; gap: 9px; align-items: center; width: 100%; text-align: left; font-family: inherit; font-size: 12px; color: inherit; padding: 5px 8px; border-radius: var(--radius-sm); background: var(--surface); border: 1px solid transparent; cursor: pointer; }
-.sv-trk:hover { border-color: var(--stroke); }
-.sv-trk.on { border-color: var(--accent); background: var(--surface-2); }
-.sv-swatch { width: 9px; height: 9px; border-radius: 2px; }
-.sv-lbl { color: var(--text); }
-.sv-sub { color: var(--accent-2); }
-.sv-zone { color: var(--muted-2); font-size: 11px; border: 1px solid var(--stroke-soft); padding: 0 5px; border-radius: 2px; justify-self: start; }
-.sv-meta { color: var(--muted-2); font-size: 11px; justify-self: end; text-align: right; }
-
-.sv-ctl { display: flex; gap: var(--space-4); align-items: center; flex-wrap: wrap; margin-top: var(--space-3); }
-.sv-ctl-g { display: flex; gap: var(--space-2); align-items: center; font-size: 12px; color: var(--muted); }
-.sv-lanes { display: flex; gap: 6px; flex-wrap: wrap; }
-.sv-chip { font-family: var(--font-mono); font-size: 11px; padding: 4px 9px; cursor: pointer; background: var(--surface); color: var(--muted-2); border: 1px solid var(--stroke); border-radius: var(--radius-sm); display: inline-flex; align-items: center; gap: 6px; }
-.sv-chip:hover { color: var(--text); }
-.sv-chip[aria-pressed="true"] { color: var(--text); border-color: var(--muted-3); }
-.sv-dot { width: 8px; height: 8px; border-radius: 2px; opacity: 0.3; }
-.sv-chip[aria-pressed="true"] .sv-dot { opacity: 1; }
-.sv-clock { margin-left: auto; font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; align-self: center; }
-.sv-status-row { display: flex; gap: var(--space-4); align-items: baseline; flex-wrap: wrap; }
-.sv-status-row #sv-status { font-family: var(--font-mono); color: var(--muted-2); }
-
-.sv-hint-phone { display: none; }
-@media (max-width: 860px) {
-  /* One column: the reel goes under the frame, still vertical, still the
-     same instrument -- only the rig stacks. */
-  .sv-rig { grid-template-columns: 1fr; }
-  .sv-reel { height: max(300px, calc(100dvh - 64px - 100vw * 9 / 16 - 260px)); }
-  .sv-hint-phone { display: block; }
-  .sv-hint-desktop { display: none; }
-  .sv-clock { margin-left: 0; }
 }
 
 /* ----- Buttons: one component -----
@@ -1603,7 +1541,7 @@ body.map-full-open .me-toolbar {
 .search-form { position: relative; flex: 0 1 220px; min-width: 0; }
 .search-input { width: 100%; padding: 4px 8px; font: inherit; font-size: 13px; background: var(--surface-2); color: var(--text); border: 1px solid var(--stroke); border-radius: var(--radius-md); }
 .search-input::placeholder { color: var(--muted-2); }
-/* Under ~1100px the nav + search + utility links overrun one row, and
+/* Under ~1100px the nav + search + Tools overrun one row, and
    `flex-wrap: wrap` makes items wrap *before* flex-shrink applies -- so the
    field is narrowed explicitly. Must sit after the .search-form base rule:
    same specificity, so source order decides. */

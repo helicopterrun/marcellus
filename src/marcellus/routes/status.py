@@ -15,7 +15,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from marcellus import __version__, db
 from marcellus.auth import _cache
@@ -360,6 +360,16 @@ async def v1_stats(request: Request) -> dict[str, Any]:
             "max": settings.push.mqtt_queue_max,
         },
     }
+
+
+@router.get("/scrub")
+async def scrub_page_redirect() -> RedirectResponse:
+    """The browser scrub page was removed (the /v1 scrub API remains).
+
+    Redirect rather than fall through to `proxy_routes`'s catch-all, which would
+    answer old bookmarks and installed PWAs with Frigate's SPA at HTTP 200.
+    """
+    return RedirectResponse(url="/", status_code=307)
 
 
 @router.get("/cameras", response_class=HTMLResponse)
