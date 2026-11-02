@@ -184,3 +184,52 @@ def test_send_to_plus_failure_is_recorded_and_retryable(
         conn.close()
     assert row["plus_status"] == "error"
     assert client.post("/wildlife/boxes/424242/plus").status_code == 404
+
+
+def _add_visits(settings: Settings, n: int) -> None:
+    now = time.time()
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        for i in range(n):
+            conn.execute(
+                "INSERT INTO wildlife_visits (camera, start_ts, end_ts, hits, created_at) "
+                "VALUES ('gate-walkway', ?, ?, 0, 'now')",
+                (now - 1000 - i * 100, now - 990 - i * 100),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_page_caps_visits_and_show_more_keeps_filters(
+    env: tuple[TestClient, dict[str, int], Settings]
+) -> None:
+    client, _, settings = env
+    _add_visits(settings, 24)  # 25 pending in all, with the seeded one
+    html = client.get("/wildlife", params={"camera": "gate-walkway", "days": 14}).text
+    assert html.count('class="capture-visit wildlife-visit"') == 20
+    assert "Show more" in html
+    assert "20 of 25 visits" in html
+    assert "camera=gate-walkway" in html and "days=14.0" in html
+    assert "limit=40" in html and "#visit-" in html
+    full = client.get("/wildlife", params={"limit": 40}).text
+    assert full.count('class="capture-visit wildlife-visit"') == 25
+    assert "Show more" not in full
+    assert "25 visits" in full
+
+
+def test_page_without_overflow_has_no_show_more(
+    env: tuple[TestClient, dict[str, int], Settings]
+) -> None:
+    client, _, _ = env
+    html = client.get("/wildlife").text
+    assert "Show more" not in html
+    assert "1 visit" in html
+
+
+def test_page_out_of_range_limit_is_clamped(
+    env: tuple[TestClient, dict[str, int], Settings]
+) -> None:
+    client, _, _ = env
+    for limit in ("0", "-1", "100000"):
+        assert client.get("/wildlife", params={"limit": limit}).status_code == 200

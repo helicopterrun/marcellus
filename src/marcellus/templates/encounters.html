@@ -1,14 +1,15 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% set active_page = 'encounters' %}
 {% set _n = encounters|length %}
-{% set summary = _n ~ ' encounter' ~ ('s' if _n != 1 else '') %}
+{% set summary = (_n ~ ' of ' ~ total if total > _n else total|string) ~ ' encounter' ~ ('s' if total != 1 else '') %}
 {% block title %}Encounters · Marcellus{% endblock %}
 
-{% block page_heading %}<h1 class="sr-only">Encounters</h1>{% endblock %}
 {% block body %}
 <main id="main-content">
+  {{ page_head("Encounters") }}
   <div class="faces-bar">
-    <span class="mode"><b>{{ 'ON' if enabled else 'OFF' }}</b></span>
+    <span class="mode" title="encounters.enabled: whether new activity is still being linked into encounters">Linking <b>{{ 'ON' if enabled else 'OFF' }}</b></span>
     <form class="enc-filter" method="get" action="/encounters">
       <input type="text" name="camera" placeholder="camera" value="{{ camera }}">
       <button type="submit" class="btn btn-neutral">Filter</button>
@@ -30,13 +31,13 @@
   {% endif %}
 
   {% for e in encounters %}
-  <section class="capture-visit enc-row">
+  <section class="capture-visit enc-row" id="enc-{{ e.id }}">
     <header>
       <span class="badge {{ 'ok' if e.sealed else 'recognized' }}">{{ 'sealed' if e.sealed else 'open' }}</span>
       <b class="id-title"><a href="/encounters/{{ e.id }}">{{ e.title }}</a></b>
       <span class="mode">
-        {{ e.cameras|join(' → ') }} &middot; {{ fmt_ts(e.start) }} &middot; {{ fmt_duration(e.start, e.end) if e.end else 'ongoing' }}
-        &middot; {{ e.atom_count }} atom{{ 's' if e.atom_count != 1 else '' }}
+        {{ e.cameras|join(' → ') }} &middot; <time data-ts="{{ e.start }}" data-fmt="when">{{ fmt_ts(e.start) }}</time> &middot; {{ fmt_duration(e.start, e.end) if e.end else 'ongoing' }}
+        &middot; {{ e.atom_count }} sighting{{ 's' if e.atom_count != 1 else '' }}
       </span>
     </header>
     <div class="enc-chips">
@@ -45,14 +46,14 @@
       <span class="badge {{ 'noise' if e.peak_severity == 'detection' else 'ok' }}">{{ e.peak_severity }}</span>
     </div>
     <details class="enc-members">
-      <summary>{{ e.members|length }} atom{{ 's' if e.members|length != 1 else '' }}</summary>
+      <summary>{{ e.members|length }} sighting{{ 's' if e.members|length != 1 else '' }}</summary>
       <table class="enc-member-table">
         <thead><tr><th>Camera</th><th>Span</th><th>Labels</th><th>Zones</th><th>Reason</th><th>Conf.</th></tr></thead>
         <tbody>
         {% for m in e.members %}
           <tr>
             <td>{{ m.camera }}</td>
-            <td>{{ fmt_ts(m.start) }}{% if m.end %} &ndash; {{ fmt_duration(m.start, m.end) }}{% endif %}</td>
+            <td><time data-ts="{{ m.start }}" data-fmt="when">{{ fmt_ts(m.start) }}</time>{% if m.end %} &ndash; {{ fmt_duration(m.start, m.end) }}{% endif %}</td>
             <td>{{ m.labels|join(', ') }}</td>
             <td>{{ m.zones|join(', ') }}</td>
             <td>{{ m.link_reason }}</td>
@@ -65,15 +66,21 @@
   </section>
   {% endfor %}
 
-  <section class="capture-visit enc-adjacency">
-    <header>
+  {% if more_href %}
+  <div class="pp-more">
+    <a class="btn btn-neutral" href="{{ more_href }}">Show more</a>
+  </div>
+  {% endif %}
+
+  <details class="capture-visit enc-adjacency">
+    <summary>
       <b class="id-title">Adjacency</b>
       <span class="mode">
         {{ adjacency.cameras|length }} camera{{ 's' if adjacency.cameras|length != 1 else '' }}
         &middot; {{ adjacency.edges|length }} edge{{ 's' if adjacency.edges|length != 1 else '' }}
         &middot; <a href="/settings#encounters">edit in Settings</a>
       </span>
-    </header>
+    </summary>
     {% if not adjacency.edges %}
       <p class="empty">No adjacency edges (no shared zones, no
         <code>encounters.adjacency</code> overrides).</p>
@@ -92,7 +99,7 @@
         </tbody>
       </table>
     {% endif %}
-  </section>
+  </details>
 </main>
 <script src="/static/js/sightings.js?v={{ asset_v }}" defer></script>
 {% endblock %}

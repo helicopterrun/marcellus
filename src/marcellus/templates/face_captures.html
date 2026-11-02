@@ -1,12 +1,13 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% set active_page = 'face_captures' %}
 {% set _n = visits|length %}
 {% set summary = _n ~ ' visit' ~ ('s' if _n != 1 else '') %}
 {% block title %}Face captures · Marcellus{% endblock %}
 
-{% block page_heading %}<h1 class="sr-only">Face captures</h1>{% endblock %}
 {% block body %}
 <main id="main-content" class="pp">
+  {{ page_head("Face captures") }}
   {% include "_people_tabs.html" %}
 
   <p class="pp-lede">

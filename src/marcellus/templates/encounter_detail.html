@@ -9,8 +9,8 @@
     <a href="/encounters" class="page-link">&larr; Encounters</a>
     <span class="badge {{ 'ok' if encounter.sealed else 'recognized' }}">{{ 'sealed' if encounter.sealed else 'open' }}</span>
     <span class="mode">
-      {{ fmt_ts(encounter.start) }} &middot; {{ fmt_duration(encounter.start, encounter.end) if encounter.end else 'ongoing' }}
-      &middot; {{ encounter.atom_count }} atom{{ 's' if encounter.atom_count != 1 else '' }}
+      <time data-ts="{{ encounter.start }}" data-fmt="when">{{ fmt_ts(encounter.start) }}</time> &middot; {{ fmt_duration(encounter.start, encounter.end) if encounter.end else 'ongoing' }}
+      &middot; {{ encounter.atom_count }} sighting{{ 's' if encounter.atom_count != 1 else '' }}
     </span>
   </div>
 
@@ -36,7 +36,7 @@
       {% for m in members %}
         <tr>
           <td>{{ m.camera }}</td>
-          <td>{{ fmt_ts(m.start) }}{% if m.end %} &ndash; {{ fmt_duration(m.start, m.end) }}{% endif %}</td>
+          <td><time data-ts="{{ m.start }}" data-fmt="when">{{ fmt_ts(m.start) }}</time>{% if m.end %} &ndash; {{ fmt_duration(m.start, m.end) }}{% endif %}</td>
           <td>{{ m.labels|join(', ') }}</td>
           <td>{{ m.zones|join(', ') }}{% if m.direction %} <span class="badge">{{ m.direction }}</span>{% endif %}</td>
           <td>{{ m.link_reason }}</td>
@@ -52,15 +52,15 @@
           </td>
           <td>
             <form method="post" action="/encounters/{{ encounter.id }}/atoms/{{ m.atom_id }}/split" class="inline-form">
-              <button type="submit">Split out</button>
+              <button type="submit" class="btn btn-neutral">Split out</button>
             </form>
             <form method="post" action="/encounters/{{ encounter.id }}/atoms/{{ m.atom_id }}/pin" class="inline-form">
               <input type="text" name="target" placeholder="target encounter id" required>
-              <button type="submit">Move to</button>
+              <button type="submit" class="btn btn-neutral">Move to</button>
             </form>
             {% if decisions.get(m.atom_id) %}
             <form method="post" action="/encounters/{{ encounter.id }}/atoms/{{ m.atom_id }}/undo" class="inline-form">
-              <button type="submit">Undo decisions</button>
+              <button type="submit" class="btn btn-neutral">Undo decisions</button>
             </form>
             {% endif %}
           </td>
@@ -74,7 +74,7 @@
     <header><b class="id-title">Merge another encounter into this one</b></header>
     <form method="post" action="/encounters/{{ encounter.id }}/merge" class="inline-form">
       <input type="text" name="source" placeholder="source encounter id" required>
-      <button type="submit">Merge</button>
+      <button type="submit" class="btn">Merge</button>
     </form>
   </section>
 </main>

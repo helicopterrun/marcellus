@@ -1,27 +1,31 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% set active_page = 'settings' %}
 {% block title %}Settings · Marcellus{% endblock %}
 
-{% block page_heading %}<h1 class="sr-only">Settings</h1>{% endblock %}
 {% block body %}
 <main id="main-content">
-  <nav class="settings-nav" aria-label="Settings sections">
-    <a href="#zones" class="page-link">Zones</a>
-    <a href="#routing" class="page-link">Routing</a>
-    <a href="#notifications" class="page-link">Notifications</a>
-    <a href="#cameras" class="page-link">Cameras</a>
-    <a href="#alignment" class="page-link">Alignment</a>
-    <a href="#push" class="page-link">Push</a>
-    <a href="#tuning" class="page-link">Tuning</a>
-    <a href="#config" class="page-link">Config</a>
-    <a href="#data" class="page-link">Data</a>
-    <a href="#about" class="page-link">About</a>
+  {{ page_head("Settings") }}
+  <nav class="pp-tabs settings-nav" id="settings-nav" aria-label="Settings sections">
+    <a href="#zones" class="pp-tab" data-tab="zones">Zones</a>
+    <a href="#routing" class="pp-tab" data-tab="routing">Routing</a>
+    <a href="#notifications" class="pp-tab" data-tab="notifications">Notifications</a>
+    <a href="#cameras" class="pp-tab" data-tab="cameras">Cameras</a>
+    <a href="#alignment" class="pp-tab" data-tab="alignment">Alignment</a>
+    <a href="#push" class="pp-tab" data-tab="push">Push</a>
+    <a href="#tuning" class="pp-tab" data-tab="tuning">Tuning</a>
+    <a href="#config" class="pp-tab" data-tab="config">Config</a>
+    <a href="#data" class="pp-tab" data-tab="data">Data</a>
+    <a href="#about" class="pp-tab" data-tab="about">About</a>
   </nav>
 
+  {# Global: zones.js raises it for load/save errors of the shared policy doc
+     (zones, neighbors, routing, notifications), so it sits above all panels. #}
   <div id="zones-banner" class="help page-intro" style="display:none"></div> {# JS-toggled #}
 
   {# ---- Zones & routing (element ids shared with zones.js) ---- #}
-  <h3 class="section-title first" id="zones">Zones &amp; routing</h3>
+  <section id="zones" class="settings-panel" data-settings-panel>
+  <h3 class="section-title first">Zones &amp; routing</h3>
   <p class="help page-intro">
     Place classes and per-zone overrides drive push routing; camera neighbors
     merge one walk seen by adjacent cameras into a single story. The Name
@@ -47,13 +51,11 @@
     <div class="skeleton-row"></div>
   </div>
 
-  <div class="section-block">
-    <button id="save-btn" class="btn-primary">Save</button>
-    <span id="save-state" class="save-state"></span>
-  </div>
+  </section>
 
   {# ---- Routing (element ids shared with policy.js) ---- #}
-  <h3 class="section-title" id="routing">Routing</h3>
+  <section id="routing" class="settings-panel" data-settings-panel>
+  <h3 class="section-title first">Routing</h3>
   <p class="help page-intro">
     What happens when each kind of subject is seen in each place: Ignore
     (nothing on the phone; shows in the app only), Quiet (a silent
@@ -89,15 +91,21 @@
     {% endfor %}
   </div>
 
+  </section>
+
   {# ---- Notifications (element ids shared with policy.js) ---- #}
-  <h3 class="section-title" id="notifications">Notifications</h3>
+  <section id="notifications" class="settings-panel" data-settings-panel>
+  <h3 class="section-title first">Notifications</h3>
   <h4 class="sub-title">Quiet hours</h4>
   <div id="quiet-hours-controls"></div>
   <h4 class="sub-title">Sound &amp; Live Activities</h4>
   <div id="sound-la-controls"></div>
 
+  </section>
+
   {# ---- Cameras ---- #}
-  <h3 class="section-title" id="cameras">Cameras</h3>
+  <section id="cameras" class="settings-panel" data-settings-panel>
+  <h3 class="section-title first">Cameras</h3>
   <p class="help page-intro">
     Rig facts feed the ground projection: world trails, speed labels, heading.
     Place, aim and draw the secure area in the
@@ -120,7 +128,7 @@
         <td>{{ (c.hfov ~ '°') if c.hfov is not none else '—' }}</td>
         <td>{{ (c.mount_ft ~ ' ft') if c.mount_ft is not none else '—' }}</td>
         <td>{{ (c.tilt_deg ~ '°') if c.tilt_deg is not none else '—' }}</td>
-        <td><a class="btn-neutral" href="/map">Landmark calibrate</a></td>
+        <td><a class="btn btn-neutral" href="/map">Landmark calibrate</a></td>
       </tr>
     {% endfor %}
     </tbody>
@@ -129,8 +137,11 @@
     <div class="empty">No cameras found in the Frigate config. Check that <code>frigate.config_path</code> in <code>sidecar.yml</code> points to Frigate's config file.</div>
   {% endif %}
 
+  </section>
+
   {# ---- Event clock alignment ---- #}
-  <h3 class="section-title" id="alignment">Event alignment</h3>
+  <section id="alignment" class="settings-panel" data-settings-panel>
+  <h3 class="section-title first">Event alignment</h3>
   <p class="help page-intro">
     Frigate stamps events from the detect stream and recordings from the record
     stream &mdash; two separate camera connections that can sit a few seconds
@@ -141,15 +152,18 @@
     Frigate's own config works too and wins over values applied here.
   </p>
   <div class="section-block">
-    <button id="align-measure" class="btn-primary">Measure cameras</button>
+    <button id="align-measure" class="btn btn-primary">Measure cameras</button>
     <select id="calib-camera" aria-label="camera to calibrate"></select>
-    <button id="calib-open" class="btn-neutral">Calibrate&hellip;</button>
+    <button id="calib-open" class="btn btn-neutral">Calibrate&hellip;</button>
     <span id="align-state" class="help save-state"></span>
   </div>
   <div id="align-results"></div>
 
+  </section>
+
   {# ---- Push & devices ---- #}
-  <h3 class="section-title" id="push">Push &amp; devices</h3>
+  <section id="push" class="settings-panel" data-settings-panel>
+  <h3 class="section-title first">Push &amp; devices</h3>
   <div class="stat-row">
     <div class="stat-card">
       <div class="stat-label">Push</div>
@@ -178,7 +192,7 @@
         <td>{{ d.cameras|join(', ') if d.cameras else 'all' }}</td>
         <td>{{ d.labels|join(', ') if d.labels else 'all' }}</td>
         <td>{{ d.min_severity }}</td>
-        <td><button class="btn-primary" data-token="{{ d.apns_token }}">Test</button></td>
+        <td><button class="btn btn-primary" data-token="{{ d.apns_token }}">Test</button></td>
       </tr>
     {% endfor %}
     </tbody>
@@ -196,8 +210,11 @@
     edit the matrix on <a href="#routing" class="page-link">Routing</a>.
   </p>
 
+  </section>
+
   {# ---- Tuning (element ids/data consumed by tuning.js) ---- #}
-  <h3 class="section-title" id="tuning">Tuning</h3>
+  <section id="tuning" class="settings-panel" data-settings-panel>
+  <h3 class="section-title first">Tuning</h3>
   <p class="help page-intro">
     Every runtime knob the sidecar exposes, grouped by config section. A
     <span class="badge src-override">override</span> badge marks a value
@@ -211,19 +228,25 @@
   <div id="tuning-restart-banner" class="help page-intro" style="display:none"></div>
   <div id="tuning-sections">
     {% for sec in tuning_sections %}
-    <details class="tuning-section" open data-section="{{ sec.name }}" id="{{ sec.name }}">
+    {# id stays the bare section name for /settings#encounters-style deep links,
+       except where it would collide with a panel id (push) or be empty. #}
+    {% set sec_id = ('tuning-' ~ sec.name) if sec.name in ['zones','routing','notifications','cameras','alignment','push','tuning','config','data','about','help'] else sec.name %}
+    <details class="tuning-section" open data-section="{{ sec.name }}"{% if sec_id %} id="{{ sec_id }}"{% endif %}>
       <summary>{{ sec.title }}</summary>
       <div class="tuning-grid" id="tuning-grid-{{ sec.name or 'root' }}"></div>
     </details>
     {% endfor %}
   </div>
   <div class="section-block">
-    <button id="tuning-save" class="btn-primary">Save tuning</button>
+    <button id="tuning-save" class="btn btn-primary">Save tuning</button>
     <span id="tuning-state" class="save-state"></span>
   </div>
 
+  </section>
+
   {# ---- Effective configuration (read-only, includes wiring/secrets) ---- #}
-  <h3 class="section-title" id="config">Effective configuration</h3>
+  <section id="config" class="settings-panel" data-settings-panel>
+  <h3 class="section-title first">Effective configuration</h3>
   <p class="help page-intro">
     Wiring, paths and secrets — read-only here; edit <code>sidecar.yml</code>
     and restart to change them. Secrets are masked.
@@ -233,8 +256,11 @@
     <div class="skeleton-row"></div>
   </div>
 
+  </section>
+
   {# ---- Data ---- #}
-  <h3 class="section-title" id="data">Data</h3>
+  <section id="data" class="settings-panel" data-settings-panel>
+  <h3 class="section-title first">Data</h3>
   <p class="help page-intro">
     Export downloads this instance's full policy (routing, zones, camera
     calibration, secure area, floorplan image — no device registrations).
@@ -242,27 +268,28 @@
     To copy dev → production: export here, open production's Settings,
     import there.
   </p>
-  <button id="export-btn" class="btn-primary">Export settings</button>
-  <label class="btn-primary inline-label">
+  <button id="export-btn" class="btn btn-primary">Export settings</button>
+  <label class="btn btn-primary inline-label">
     Import settings…
     <input id="import-file" type="file" accept=".json,application/json" class="hidden">
   </label>
   <span id="sync-state" class="help save-state"></span>
 
-  {# ---- Help ---- #}
-  <h3 class="section-title" id="help">Help</h3>
-  <ul class="rec-list">
-    <li><a href="/guide">User guide</a> — every page and setting, with walkthroughs</li>
-  </ul>
+  </section>
 
   {# ---- About ---- #}
-  <h3 class="section-title" id="about">About</h3>
+  <section id="about" class="settings-panel" data-settings-panel>
+  <h3 class="section-title first">About</h3>
   <div class="stat-row">
     <div class="stat-card">
       <div class="stat-label">Marcellus version</div>
       <div class="stat-value">{{ version }}</div>
     </div>
   </div>
+  <h4 class="sub-title" id="help">Help</h4>
+  <ul class="rec-list">
+    <li><a href="/guide">User guide</a> — every page and setting, with walkthroughs</li>
+  </ul>
   <ul class="rec-list">
     <li><a href="/docs">API docs</a> — interactive OpenAPI browser</li>
     <li><a href="/version">/version</a> · <a href="/healthz">/healthz</a> · <a href="/v1/capabilities">/v1/capabilities</a></li>
@@ -272,10 +299,20 @@
     <summary>Capabilities (what the app sees)</summary>
     <div class="panel">{% include "_capabilities.html" %}</div>
   </details>
+  </section>
+
+  {# One Save for the shared policy document that zones.js PUTs (zones,
+     neighbors, routing, notifications). Lives outside the panels so it is
+     reachable from each of those tabs; settings_tabs.js shows it only there. #}
+  <div class="section-block settings-savebar" data-save-panels="zones routing notifications">
+    <button id="save-btn" class="btn btn-primary">Save</button>
+    <span id="save-state" class="save-state"></span>
+  </div>
 </main>
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/js/settings_tabs.js?v={{ asset_v }}"></script>
 <script src="/static/js/zones.js?v={{ asset_v }}"></script>
 <script src="/static/js/policy.js?v={{ asset_v }}"></script>
 <script src="/static/js/devices.js?v={{ asset_v }}"></script>

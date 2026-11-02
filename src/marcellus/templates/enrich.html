@@ -1,11 +1,12 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% set active_page = 'enrich' %}
 {% set summary = counts.named ~ ' named · ' ~ counts.unknown ~ ' unknown' %}
 {% block title %}Identities · Marcellus{% endblock %}
 
-{% block page_heading %}<h1 class="sr-only">Identities</h1>{% endblock %}
 {% block body %}
 <main id="main-content" class="pp">
+  {{ page_head("Identities") }}
   {% include "_people_tabs.html" %}
 
   <p class="pp-lede">
@@ -195,7 +196,8 @@
 
   {% if has_more %}
   <div class="pp-more">
-    <a class="btn btn-neutral" href="?view={{ view }}&amp;page={{ page + 1 }}{{ '&show_excluded=1' if show_excluded }}#cluster-{{ clusters[-1].cluster_id }}">Show more</a>
+    <a class="btn btn-neutral" href="?view={{ view }}&amp;page={{ page + 1 }}{{ '&amp;show_excluded=1' if show_excluded }}#cluster-{{ next_cluster_id }}">Show more</a>
+    <span class="pp-more-n">Showing {{ clusters|length }} of {{ total }}</span>
   </div>
   {% endif %}
 </main>

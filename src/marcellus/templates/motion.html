@@ -1,10 +1,12 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% set active_page = 'motion' %}
 {% block title %}Motion · Marcellus{% endblock %}
 
-{% block page_heading %}<h1 class="sr-only">Motion</h1>{% endblock %}
 {% block body %}
 <main id="main-content">
+  {{ page_head("Motion") }}
+  {% include "_tuning_tabs.html" %}
   <form class="filters motion-form" method="get" action="/motion">
     <label>baseline range (blank = single-window view)
       <input type="text" name="baseline" value="{{ baseline }}"
@@ -14,15 +16,15 @@
       <input type="text" name="target" value="{{ target }}"
              placeholder="today, yesterday, or YYYY-MM-DD[..YYYY-MM-DD]" class="field-280">
     </label>
-    <button type="submit">compute</button>
+    <button type="submit" class="btn">compute</button>
   </form>
 
   <div class="presets">
     <span class="preset-label">presets:</span>
-    <button type="button" class="preset" data-base=""                          data-tgt="today">today only</button>
-    <button type="button" class="preset" data-base=""                          data-tgt="yesterday">yesterday only</button>
-    <button type="button" class="preset" data-base="{{ presets.today_vs_prior3[0] }}"   data-tgt="{{ presets.today_vs_prior3[1] }}">today vs prior 3</button>
-    <button type="button" class="preset" data-base="{{ presets.last7_vs_prior7[0] }}"   data-tgt="{{ presets.last7_vs_prior7[1] }}">last 7d vs prior 7d</button>
+    <button type="button" class="btn btn-neutral preset" data-base=""                          data-tgt="today">today only</button>
+    <button type="button" class="btn btn-neutral preset" data-base=""                          data-tgt="yesterday">yesterday only</button>
+    <button type="button" class="btn btn-neutral preset" data-base="{{ presets.today_vs_prior3[0] }}"   data-tgt="{{ presets.today_vs_prior3[1] }}">today vs prior 3</button>
+    <button type="button" class="btn btn-neutral preset" data-base="{{ presets.last7_vs_prior7[0] }}"   data-tgt="{{ presets.last7_vs_prior7[1] }}">last 7d vs prior 7d</button>
   </div>
 
   {% if error %}

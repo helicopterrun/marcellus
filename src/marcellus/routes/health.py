@@ -228,12 +228,20 @@ async def _probe_frigate(app: Any, settings: Any, now: float) -> tuple[str, str 
     return result
 
 
-@router.get("/healthz")
-async def healthz(request: Request) -> JSONResponse:
-    app = request.app
+async def compute_health(app: Any, now: float | None = None) -> dict[str, Any]:
+    """Run the `/healthz` probes and return `{"ok", "checks", "failing",
+    "reason", "scrub_low_disk"}`.
+
+    Shared by `/healthz` and `/status.json` (the status page's verdict), so
+    the two can never disagree about what is wrong. `failing` names the checks
+    that cleared `ok` (the ones that gate the 503), in probe order. Cost: the
+    Frigate probe is cached for `_FRIGATE_PROBE_INTERVAL_S`; everything else is
+    in-memory stats plus one `SELECT 1`.
+    """
     settings = app.state.settings
-    now = time.time()
+    now = time.time() if now is None else now
     checks: dict[str, Any] = {}
+    failing: list[str] = []
     ok = True
 
     frigate_status, frigate_reason = await _probe_frigate(app, settings, now)
@@ -241,6 +249,7 @@ async def healthz(request: Request) -> JSONResponse:
     reason: str | None = None
     if frigate_status == "proxy_stalled":
         ok = False
+        failing.append("frigate")
         reason = frigate_reason
 
     stream_stats, stream_saturated = check_stream_pool(app, now)
@@ -248,6 +257,7 @@ async def healthz(request: Request) -> JSONResponse:
         checks["upstream_pool"] = stream_stats
     if stream_saturated:
         ok = False
+        failing.append("upstream_pool")
 
     http_client = getattr(app.state, "http_client", None)
     if http_client is not None:
@@ -262,6 +272,7 @@ async def healthz(request: Request) -> JSONResponse:
             )
             if saturated:
                 ok = False
+                failing.append("api_pool")
 
     # `push_subscriber` is set by the lifespan when push starts; its absence
     # means the lifespan hasn't run (tests, bare create_app under another
@@ -273,6 +284,8 @@ async def healthz(request: Request) -> JSONResponse:
         # Disconnected is degraded even during startup/backoff: push is not
         # being delivered either way, and the reconnect loop clears it fast.
         ok = ok and connected
+        if not connected:
+            failing.append("mqtt")
 
         try:
             conn = db.open_sidecar(str(settings.sidecar.db_path))
@@ -284,6 +297,7 @@ async def healthz(request: Request) -> JSONResponse:
         except Exception:
             checks["db"] = "error"
             ok = False
+            failing.append("db")
 
     scrub_low_disk: bool | None = None
     if settings.scrub.enabled:
@@ -296,6 +310,7 @@ async def healthz(request: Request) -> JSONResponse:
             # process rather than a wedge.
             checks["scrub"] = "locked"
             ok = False
+            failing.append("scrub")
         else:
             tick = min(settings.scrub.generate_interval_s, settings.scrub.live_edge_interval_s)
             last_cycle = getattr(app.state, "scrub_last_cycle", None)
@@ -306,12 +321,14 @@ async def healthz(request: Request) -> JSONResponse:
                 if age > tick * _SCRUB_STALE_TICKS:
                     checks["scrub"] = "stale"
                     ok = False
+                    failing.append("scrub")
                 else:
                     checks["scrub"] = "ok"
             elif now - started_at > tick * _SCRUB_STALE_TICKS:
                 # Never completed a cycle and we're well past startup grace.
                 checks["scrub"] = "stale"
                 ok = False
+                failing.append("scrub")
             else:
                 checks["scrub"] = "starting"
 
@@ -328,11 +345,13 @@ async def healthz(request: Request) -> JSONResponse:
             if age > tick * _SCRUB_STALE_TICKS:
                 checks["face_enrich"] = "stale"
                 ok = False
+                failing.append("face_enrich")
             else:
                 checks["face_enrich"] = "ok"
         elif now - started_at > tick * _SCRUB_STALE_TICKS:
             checks["face_enrich"] = "stale"
             ok = False
+            failing.append("face_enrich")
         else:
             checks["face_enrich"] = "starting"
 
@@ -345,6 +364,7 @@ async def healthz(request: Request) -> JSONResponse:
                 checks["encounters_last_reconcile"] = enc_status["last_reconcile"]
             if enc_status["state"] == "error":
                 ok = False
+                failing.append("encounters")
         else:
             checks["encounters"] = "starting"
     else:
@@ -367,6 +387,7 @@ async def healthz(request: Request) -> JSONResponse:
         if protect_subscriber is None:
             checks["unifi_protect"] = "degraded"
             ok = False
+            failing.append("unifi_protect")
             if reason is None:
                 reason = "unifi_protect"
         else:
@@ -374,6 +395,7 @@ async def healthz(request: Request) -> JSONResponse:
             checks["unifi_protect"] = protect_status
             if protect_status == "down":
                 ok = False
+                failing.append("unifi_protect")
                 if reason is None:
                     reason = "unifi_protect"
             protect_last_ring_at = protect_subscriber.status().get("last_ring_at")
@@ -387,11 +409,24 @@ async def healthz(request: Request) -> JSONResponse:
     if settings.recording_watch.enabled and recording_watcher is not None:
         checks["recording"] = recording_watcher.health(now)
 
-    body: dict[str, Any] = {"status": "ok" if ok else "degraded", "checks": checks}
-    if reason is not None:
-        body["reason"] = reason
-    if scrub_low_disk is not None:
-        body["scrub_low_disk"] = scrub_low_disk
+    return {
+        "ok": ok,
+        "checks": checks,
+        "failing": failing,
+        "reason": reason,
+        "scrub_low_disk": scrub_low_disk,
+    }
+
+
+@router.get("/healthz")
+async def healthz(request: Request) -> JSONResponse:
+    health = await compute_health(request.app)
+    ok = health["ok"]
+    body: dict[str, Any] = {"status": "ok" if ok else "degraded", "checks": health["checks"]}
+    if health["reason"] is not None:
+        body["reason"] = health["reason"]
+    if health["scrub_low_disk"] is not None:
+        body["scrub_low_disk"] = health["scrub_low_disk"]
     return JSONResponse(body, status_code=200 if ok else 503)
 
 
