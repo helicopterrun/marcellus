@@ -299,7 +299,7 @@
   // ---- construction -------------------------------------------------------
 
   function holdToBlink() {
-    var b = SC.el("button", { class: "btn-neutral", text: "hold to compare (B)" });
+    var b = SC.el("button", { class: "btn btn-neutral", text: "hold to compare (B)" });
     ["pointerdown", "touchstart"].forEach(function (evt) {
       b.addEventListener(evt, function (e) { e.preventDefault(); setBlink(true); });
     });
@@ -323,17 +323,17 @@
     };
 
     var saveBtn = SC.el("button", {
-      class: "btn-primary", id: "calib-save",
+      class: "btn btn-primary", id: "calib-save",
       text: state.configMs ? "Save to Frigate config" : "Save offset",
     });
     saveBtn.addEventListener("click", function () { save(saveBtn); });
-    var sampleBtn = SC.el("button", { class: "btn-neutral", text: "Add sample" });
+    var sampleBtn = SC.el("button", { class: "btn btn-neutral", text: "Add sample" });
     sampleBtn.addEventListener("click", addSample);
-    var closeBtn = SC.el("button", { class: "btn-neutral", text: "✕" });
+    var closeBtn = SC.el("button", { class: "btn btn-neutral", text: "✕" });
     closeBtn.addEventListener("click", close);
 
     function nudgeBtn(label, ms, cls) {
-      var b = SC.el("button", { class: "btn-neutral" + (cls ? " " + cls : ""), text: label });
+      var b = SC.el("button", { class: "btn btn-neutral" + (cls ? " " + cls : ""), text: label });
       if (cls) { b.dataset.dir = ms < 0 ? "-" : "+"; b.dataset.ms = ms; }
       b.addEventListener("click", function () {
         nudge(cls ? parseInt(b.dataset.ms, 10) : ms);
@@ -359,7 +359,7 @@
     ]);
     STEPS.forEach(function (step) {
       var b = SC.el("button", {
-        class: "btn-neutral calib-step-btn", id: "calib-step-" + step,
+        class: "btn btn-neutral calib-step-btn", id: "calib-step-" + step,
         text: step >= 1000 ? (step / 1000) + " s" : step + " ms",
       });
       b.addEventListener("click", function () { setStep(step); });

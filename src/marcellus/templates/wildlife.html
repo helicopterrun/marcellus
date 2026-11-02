@@ -1,12 +1,13 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% set active_page = 'wildlife' %}
 {% set _n = visits|length %}
 {% set summary = _n ~ ' visit' ~ ('s' if _n != 1 else '') %}
 {% block title %}Wildlife · Marcellus{% endblock %}
 
-{% block page_heading %}<h1 class="sr-only">Wildlife finder</h1>{% endblock %}
 {% block body %}
 <main id="main-content">
+  {{ page_head("Wildlife") }}
   <div class="faces-bar">
     <span class="mode">finder <b>{{ 'ON' if enabled else 'OFF' }}</b></span>
     <span class="mode">
@@ -74,8 +75,8 @@
       {% if v.sent %}· {{ v.sent }} sent to Frigate+{% endif %}
       {% if v.review != 'pending' %}· <i>{{ v.review }}</i>{% endif %}
       <span class="visit-actions">
-        <button type="button" class="keep-visit" data-id="{{ v.id }}">keep</button>
-        <button type="button" class="discard-visit" data-id="{{ v.id }}">discard</button>
+        <button type="button" class="btn keep-visit" data-id="{{ v.id }}">keep</button>
+        <button type="button" class="btn btn-neutral discard-visit" data-id="{{ v.id }}">discard</button>
       </span>
     </header>
     <div class="capture-strip">
@@ -94,7 +95,7 @@
             {% if h.plus_status == 'sent' %}
               <span class="sent">sent ✓</span>
             {% else %}
-              <button type="button" class="send-plus" data-id="{{ h.id }}"
+              <button type="button" class="btn send-plus" data-id="{{ h.id }}"
                       {% if h.plus_status == 'error' %}title="last attempt: {{ h.plus_detail }}"{% endif %}>Frigate+</button>
             {% endif %}
           </span>

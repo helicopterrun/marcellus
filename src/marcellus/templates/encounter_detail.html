@@ -52,15 +52,15 @@
           </td>
           <td>
             <form method="post" action="/encounters/{{ encounter.id }}/atoms/{{ m.atom_id }}/split" class="inline-form">
-              <button type="submit">Split out</button>
+              <button type="submit" class="btn btn-neutral">Split out</button>
             </form>
             <form method="post" action="/encounters/{{ encounter.id }}/atoms/{{ m.atom_id }}/pin" class="inline-form">
               <input type="text" name="target" placeholder="target encounter id" required>
-              <button type="submit">Move to</button>
+              <button type="submit" class="btn btn-neutral">Move to</button>
             </form>
             {% if decisions.get(m.atom_id) %}
             <form method="post" action="/encounters/{{ encounter.id }}/atoms/{{ m.atom_id }}/undo" class="inline-form">
-              <button type="submit">Undo decisions</button>
+              <button type="submit" class="btn btn-neutral">Undo decisions</button>
             </form>
             {% endif %}
           </td>
@@ -74,7 +74,7 @@
     <header><b class="id-title">Merge another encounter into this one</b></header>
     <form method="post" action="/encounters/{{ encounter.id }}/merge" class="inline-form">
       <input type="text" name="source" placeholder="source encounter id" required>
-      <button type="submit">Merge</button>
+      <button type="submit" class="btn">Merge</button>
     </form>
   </section>
 </main>

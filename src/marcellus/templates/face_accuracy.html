@@ -1,12 +1,13 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% set active_page = 'face_accuracy' %}
 {% block title %}Accuracy · Marcellus{% endblock %}
 
-{% block page_heading %}<h1 class="sr-only">Face accuracy</h1>{% endblock %}
 {% block body %}
 <main id="main-content" class="pp fa"
       data-match-threshold="{{ match_threshold }}"
       data-cluster-threshold="{{ cluster_threshold }}">
+  {{ page_head("Face accuracy") }}
   {% include "_people_tabs.html" %}
   <div id="fa-root" aria-live="polite"><p class="pp-lede">Loading…</p></div>
 </main>

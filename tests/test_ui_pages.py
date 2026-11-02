@@ -249,3 +249,39 @@ def test_settings_page_unifies_surfaces(client: TestClient) -> None:
                        "export-btn", "import-file"):
         assert element_id in r.text, element_id
 
+
+
+_TITLED_PAGES = [
+    ("/", "Status"),
+    ("/cameras", "Cameras"),
+    ("/triage", "All events"),
+    ("/encounters", "Encounters"),
+    ("/faces/captures", "Face captures"),
+    ("/enrich/clusters", "Identities"),
+    ("/enrich/accuracy", "Face accuracy"),
+    ("/score-histogram", "Scores"),
+    ("/motion", "Motion"),
+    ("/fps-budget", "FPS budget"),
+    ("/zone-hits", "Zone hits"),
+    ("/placement", "Placement"),
+    ("/wildlife", "Wildlife"),
+    ("/settings", "Settings"),
+    ("/replay", "Push replay"),
+    ("/debug", "Debug"),
+    ("/inbox/coverage", "Inbox coverage"),
+]
+
+
+@pytest.mark.parametrize(("path", "title"), _TITLED_PAGES)
+def test_titled_pages_render_page_title(client: TestClient, path: str, title: str) -> None:
+    r = client.get(path)
+    # /fps-budget answers 503 (still rendering the page) when Frigate is down.
+    assert r.status_code == (503 if path == "/fps-budget" else 200)
+    assert r.text.count('class="page-title"') == 1
+    assert f'<h1 class="page-title">{title}</h1>' in r.text
+
+
+@pytest.mark.parametrize("path", ["/inbox", "/map", "/guide", "/toybox"])
+def test_exempt_pages_have_no_page_title(client: TestClient, path: str) -> None:
+    r = client.get(path)
+    assert 'class="page-title"' not in r.text

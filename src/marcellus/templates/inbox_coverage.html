@@ -1,11 +1,12 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% set active_page = 'inbox' %}
 {% set summary = 'Frigate+ coverage' %}
 {% block title %}Frigate+ coverage · Marcellus{% endblock %}
 
-{% block page_heading %}<h1 class="sr-only">Frigate+ coverage</h1>{% endblock %}
 {% block body %}
 <main id="main-content" class="inbox">
+  {{ page_head("Inbox coverage") }}
   <p class="page-intro"><a href="/inbox">← Inbox</a></p>
 
   {% if not meta.ok %}
@@ -70,7 +71,7 @@
         <td>{{ fmt_ts(r.created_at) }}</td>
         <td>{{ r.attempts }}</td>
         <td class="ib-detail">{{ r.detail or '' }}</td>
-        <td>{% if r.status == 'error' %}<button type="button" class="btn-neutral ib-retry" data-id="{{ r.id }}">retry</button>{% endif %}</td>
+        <td>{% if r.status == 'error' %}<button type="button" class="btn btn-neutral ib-retry" data-id="{{ r.id }}">retry</button>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>

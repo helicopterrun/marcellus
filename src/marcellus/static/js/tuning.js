@@ -178,7 +178,7 @@
       var addRow = el("span", { class: "tuning-dict-item tuning-dict-add" });
       var keyInput = el("input", { type: "text", placeholder: "key" });
       var valInput = el("input", { type: "number", step: "1", placeholder: "value" });
-      var addBtn = el("button", { type: "button", text: "add" });
+      var addBtn = el("button", { type: "button", class: "btn btn-neutral", text: "add" });
       addBtn.addEventListener("click", function () {
         var k = keyInput.value.trim();
         if (!k) return;

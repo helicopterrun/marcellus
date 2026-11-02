@@ -1,10 +1,11 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% set active_page = 'settings' %}
 {% block title %}Settings · Marcellus{% endblock %}
 
-{% block page_heading %}<h1 class="sr-only">Settings</h1>{% endblock %}
 {% block body %}
 <main id="main-content">
+  {{ page_head("Settings") }}
   <nav class="settings-nav" aria-label="Settings sections">
     <a href="#zones" class="page-link">Zones</a>
     <a href="#routing" class="page-link">Routing</a>
@@ -48,7 +49,7 @@
   </div>
 
   <div class="section-block">
-    <button id="save-btn" class="btn-primary">Save</button>
+    <button id="save-btn" class="btn btn-primary">Save</button>
     <span id="save-state" class="save-state"></span>
   </div>
 
@@ -120,7 +121,7 @@
         <td>{{ (c.hfov ~ '°') if c.hfov is not none else '—' }}</td>
         <td>{{ (c.mount_ft ~ ' ft') if c.mount_ft is not none else '—' }}</td>
         <td>{{ (c.tilt_deg ~ '°') if c.tilt_deg is not none else '—' }}</td>
-        <td><a class="btn-neutral" href="/map">Landmark calibrate</a></td>
+        <td><a class="btn btn-neutral" href="/map">Landmark calibrate</a></td>
       </tr>
     {% endfor %}
     </tbody>
@@ -141,9 +142,9 @@
     Frigate's own config works too and wins over values applied here.
   </p>
   <div class="section-block">
-    <button id="align-measure" class="btn-primary">Measure cameras</button>
+    <button id="align-measure" class="btn btn-primary">Measure cameras</button>
     <select id="calib-camera" aria-label="camera to calibrate"></select>
-    <button id="calib-open" class="btn-neutral">Calibrate&hellip;</button>
+    <button id="calib-open" class="btn btn-neutral">Calibrate&hellip;</button>
     <span id="align-state" class="help save-state"></span>
   </div>
   <div id="align-results"></div>
@@ -178,7 +179,7 @@
         <td>{{ d.cameras|join(', ') if d.cameras else 'all' }}</td>
         <td>{{ d.labels|join(', ') if d.labels else 'all' }}</td>
         <td>{{ d.min_severity }}</td>
-        <td><button class="btn-primary" data-token="{{ d.apns_token }}">Test</button></td>
+        <td><button class="btn btn-primary" data-token="{{ d.apns_token }}">Test</button></td>
       </tr>
     {% endfor %}
     </tbody>
@@ -218,7 +219,7 @@
     {% endfor %}
   </div>
   <div class="section-block">
-    <button id="tuning-save" class="btn-primary">Save tuning</button>
+    <button id="tuning-save" class="btn btn-primary">Save tuning</button>
     <span id="tuning-state" class="save-state"></span>
   </div>
 
@@ -242,8 +243,8 @@
     To copy dev → production: export here, open production's Settings,
     import there.
   </p>
-  <button id="export-btn" class="btn-primary">Export settings</button>
-  <label class="btn-primary inline-label">
+  <button id="export-btn" class="btn btn-primary">Export settings</button>
+  <label class="btn btn-primary inline-label">
     Import settings…
     <input id="import-file" type="file" accept=".json,application/json" class="hidden">
   </label>

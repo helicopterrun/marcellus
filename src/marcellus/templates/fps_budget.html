@@ -1,10 +1,11 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% set active_page = 'fps_budget' %}
 {% block title %}FPS Budget · Marcellus{% endblock %}
 
-{% block page_heading %}<h1 class="sr-only">FPS budget</h1>{% endblock %}
 {% block body %}
 <main id="main-content">
+  {{ page_head("FPS budget") }}
   {% if error %}
     <div class="empty error">{{ error }}</div>
   {% else %}

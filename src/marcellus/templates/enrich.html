@@ -1,11 +1,12 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% set active_page = 'enrich' %}
 {% set summary = counts.named ~ ' named · ' ~ counts.unknown ~ ' unknown' %}
 {% block title %}Identities · Marcellus{% endblock %}
 
-{% block page_heading %}<h1 class="sr-only">Identities</h1>{% endblock %}
 {% block body %}
 <main id="main-content" class="pp">
+  {{ page_head("Identities") }}
   {% include "_people_tabs.html" %}
 
   <p class="pp-lede">

@@ -107,7 +107,6 @@ header .stats { font-size: 12px; color: var(--muted); min-width: 0; overflow: hi
   text-overflow: ellipsis; white-space: nowrap; }
 /* Triage session tag (list filter bar + detail sidebar). */
 .session label { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
-.session input[type=text] { background: var(--panel); color: var(--text); border: 1px solid var(--stroke); padding: 4px 8px; border-radius: var(--radius-sm); font-size: 13px; }
 header .brand a { color: inherit; text-decoration: none; }
 header .pages { display: flex; gap: 4px; align-items: center; }
 header .header-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
@@ -260,7 +259,6 @@ code { background: var(--panel); padding: 2px 6px; border-radius: 3px; font-fami
 .ctrl-row + .ctrl-row { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--stroke-soft); }
 .ctrl-row label { font-size: 11px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; font-family: var(--font-mono); }
 .ctrl-row.sliders label { flex: 1; min-width: 175px; }
-.ctrl-row select, .ctrl-row input[type=number] { background: var(--panel); color: var(--text); border: 1px solid var(--stroke); border-radius: var(--radius-sm); padding: 4px 8px; font-size: 13px; }
 .ctrl-row input[type=range] { accent-color: var(--accent); width: 100%; }
 .ctrl-row label span { color: var(--text); font-variant-numeric: tabular-nums; }
 
@@ -314,7 +312,6 @@ details.advanced summary:hover { color: var(--text); }
 }
 .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; align-items: center; }
 .filters label { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 2px; font-family: var(--font-mono); }
-.filters select, .filters input { background: var(--surface); color: var(--text); border: 1px solid var(--stroke); padding: 4px 8px; border-radius: var(--radius-sm); font-size: 13px; font-family: var(--font-mono); }
 .filters button { align-self: flex-end; }
 
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
@@ -369,7 +366,7 @@ details.advanced summary:hover { color: var(--text); }
 .btn-tp.active { box-shadow: inset 0 0 0 3px var(--ok); }
 .btn-fp.active { box-shadow: inset 0 0 0 3px var(--danger); }
 .btn-skip.active { box-shadow: inset 0 0 0 3px var(--text); }
-.note-input { width: 100%; background: var(--panel); color: var(--text); border: 1px solid var(--stroke); padding: 8px; border-radius: var(--radius-sm); font-size: 13px; font-family: inherit; resize: vertical; }
+.note-input { width: 100%; resize: vertical; }
 .nav { display: flex; gap: 8px; }
 .nav a, .nav button { flex: 1; text-align: center; padding: 8px; background: var(--surface-2); color: var(--text); text-decoration: none; border-radius: var(--radius-sm); border: 0; font-size: 13px; cursor: pointer; }
 .nav a:hover, .nav button:hover { background: var(--btn-neutral); }
@@ -407,7 +404,8 @@ a { color: var(--accent); }
 
   /* iOS Safari zooms the page when a focused control's font-size is under
      16px. Keep controls at 16px on phones so focusing a field never zooms. */
-  input[type=text], input[type=number], input[type=search], select, textarea {
+  input[type=text], input[type=number], input[type=search], input[type=date],
+  input[type=time], input[type=password], select, textarea {
     font-size: 16px;
   }
 
@@ -443,7 +441,6 @@ a { color: var(--accent); }
   /* Filters wrap into a more readable column-ish layout. */
   .filters { gap: 6px; }
   .filters label { font-size: 11px; }
-  .filters select, .filters input { font-size: 13px; padding: 6px 8px; }
 
   /* kv table: stack dt/dd so long values don't overflow. */
   .kv { grid-template-columns: 1fr; gap: 2px 0; }
@@ -463,10 +460,51 @@ a { color: var(--accent); }
 }
 .btn:hover, .btn-primary:hover, .filters button:hover, .faces-bar button:hover { background: var(--accent-2); }
 .btn:disabled, .btn-primary:disabled { opacity: 0.6; cursor: default; }
-.btn-neutral, .filters button.secondary, .presets .preset { background: var(--surface); color: var(--text); border: 1px solid var(--stroke); }
-.btn-neutral:hover, .filters button.secondary:hover, .presets .preset:hover { background: var(--surface-2); }
+.btn-neutral, .filters button.btn-neutral, .filters button.secondary, .presets .preset { background: var(--surface); color: var(--text); border: 1px solid var(--stroke); }
+.btn-neutral:hover, .filters button.btn-neutral:hover, .filters button.secondary:hover, .presets .preset:hover { background: var(--surface-2); }
 .btn-danger { background: var(--danger-solid); color: #fff; }
 .btn-danger:hover { filter: brightness(1.1); }
+
+/* ----- Page title (templates/_page_head.html) -----
+   One h1 per page, mono like the other headings; the optional sub line is
+   one sentence of description. Compact on purpose. */
+.page-head { margin: 0 0 var(--space-3); }
+.page-title { margin: 0; font-size: 20px; line-height: 1.25; color: var(--text); }
+.page-sub { margin: 2px 0 0; font-size: var(--text-sm); line-height: 1.4; color: var(--muted); }
+@media (max-width: 720px) {
+  .page-head { margin-bottom: var(--space-2); }
+  .page-title { font-size: 18px; }
+}
+
+/* ----- Form controls: one look inside <main> -----
+   Zero specificity (:where) so a page rule that really needs something
+   different (layout widths, the dense policy matrix, data-level colours)
+   still wins. Header/search-sheet inputs sit outside <main>; the map editor,
+   Toybox and login have their own look and are excluded. Phones keep 16px
+   (the iOS no-zoom rule in the mobile block above). */
+:where(main:not(.me-root, .toybox, .login))
+  :where(input:not([type=checkbox], [type=radio], [type=range], [type=file], [type=hidden],
+                   [type=submit], [type=button], [type=reset], [type=color], [type=image]),
+         select, textarea) {
+  box-sizing: border-box; max-width: 100%; min-width: 0;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--stroke); border-radius: var(--radius-md);
+  padding: 6px 10px; font-family: var(--font-body); font-size: var(--text-base); line-height: 1.3;
+}
+:where(main:not(.me-root, .toybox, .login))
+  :where(input:not([type=checkbox], [type=radio], [type=range], [type=file], [type=hidden],
+                   [type=submit], [type=button], [type=reset], [type=color], [type=image]),
+         select, textarea)::placeholder { color: var(--muted-2); opacity: 1; }
+:where(main:not(.me-root, .toybox, .login))
+  :where(input:not([type=checkbox], [type=radio], [type=range], [type=file], [type=hidden],
+                   [type=submit], [type=button], [type=reset], [type=color], [type=image]),
+         select, textarea):focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent);
+  border-radius: var(--radius-md);
+}
+:where(main:not(.me-root, .toybox, .login)) :where(input[type=checkbox], input[type=radio]) {
+  accent-color: var(--accent); vertical-align: middle;
+}
 
 /* ----- Faces curation page ----- */
 .faces-bar { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
@@ -480,7 +518,7 @@ a { color: var(--accent); }
 .face-card .badge.recognized { background: var(--info-bg); color: var(--info-text); }
 .face-card .badge.unknown { background: var(--btn-neutral); color: var(--muted); }
 .face-controls { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--stroke); }
-.face-controls input { flex: 1; min-width: 0; background: var(--deep); color: var(--text); border: 1px solid var(--stroke); border-radius: var(--radius-sm); padding: 4px 6px; font-size: 12px; }
+.face-controls input { flex: 1; min-width: 0; }
 .face-controls button { border: 0; border-radius: var(--radius-sm); padding: 4px 10px; font-size: 12px; cursor: pointer; color: var(--on-accent); }
 .face-controls button.promote { background: var(--ok-bg); }
 .face-controls button.discard { background: var(--danger-bg); }
@@ -647,7 +685,18 @@ a { color: var(--accent); }
 .cap-section summary:hover { color: var(--text); }
 
 /* ----- Replay page ----- */
-.replay-advanced { margin: 0.5em 0 1em; }
+/* Push replay: one panel, scenario on its own row, speed + options below. */
+.replay-warn { margin: 0 0 var(--space-3); padding: var(--space-2) var(--space-3); background: var(--warn-bg); color: var(--warn-text); border: 1px solid var(--warn); border-radius: var(--radius-md); font-size: var(--text-base); }
+.replay-form { display: flex; flex-direction: column; gap: var(--space-4); max-width: 760px; margin-bottom: var(--space-4); }
+.replay-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.replay-label { font-family: var(--font-mono); font-size: var(--text-sm); color: var(--muted); padding: 0; }
+.replay-field select { width: 100%; text-overflow: ellipsis; }
+.replay-split { display: flex; flex-wrap: wrap; gap: var(--space-4) var(--space-5); }
+.replay-choices { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); align-items: center; }
+.replay-choice { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: var(--text-base); cursor: pointer; }
+.replay-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
+.replay-actions .save-state { margin-left: 0; }
+.replay-advanced { margin: 0 0 var(--space-4); }
 .replay-advanced-body { padding: 0.5em 0; }
 .replay-output { max-height: 60vh; overflow: auto; font-size: 0.85em; padding: 0.5em; background: var(--deep); border-radius: var(--radius-sm); }
 
@@ -739,21 +788,9 @@ body.map-full-open { overflow: hidden; }
 .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 8px; }
 .matrix-table td, .matrix-table th { text-align: center; white-space: nowrap; }
 .matrix-table td:first-child, .matrix-table th:first-child { text-align: left; }
-.matrix-table select {
-  font: inherit;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  background: var(--panel);
-  color: var(--text);
-  border: 1px solid var(--stroke);
-  border-radius: var(--radius-sm);
-  padding: 3px 6px;
-}
+/* Dense policy matrix: the shared control look, tightened to fit a table cell. */
+.matrix-table select { font-size: 12px; padding: 3px 6px; }
 .toggle-row { display: flex; align-items: center; gap: 8px; margin: 0.4em 0; font-size: 13px; color: var(--text); }
-.toggle-row select, .toggle-row input[type=text], .toggle-row input[type=time] {
-  background: var(--panel); color: var(--text); border: 1px solid var(--stroke);
-  border-radius: var(--radius-sm); padding: 4px 8px; font-size: 13px; font-family: var(--font-mono);
-}
 select[data-level="off"] { background: var(--surface-2); color: var(--muted-2); }
 select[data-level="log"] { background: var(--surface-2); color: var(--muted); }
 select[data-level="glance"] { background: var(--mixed-bg); color: var(--mixed-text); }
@@ -776,11 +813,7 @@ select[data-level="alarm"] { background: var(--danger-bg); color: var(--danger-t
 .tuning-label code { font-family: var(--font-mono); color: var(--text); }
 .tuning-label .help { font-size: 11px; margin-top: 1px; }
 .tuning-control input[type=text], .tuning-control input[type=number],
-.tuning-control select, .tuning-control textarea {
-  font: inherit; font-family: var(--font-mono); font-size: 12px;
-  background: var(--panel); color: var(--text); border: 1px solid var(--stroke);
-  border-radius: var(--radius-sm); padding: 3px 6px; width: 100%; box-sizing: border-box;
-}
+.tuning-control select, .tuning-control textarea { width: 100%; }
 .tuning-control textarea.invalid { border-color: var(--danger-text); }
 .tuning-value { color: var(--muted); font-family: var(--font-mono); word-break: break-word; }
 .tuning-dict { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -1566,7 +1599,6 @@ body.map-full-open .me-toolbar {
 /* Encounters (docs/encounters.md): list + detail pages, styled off the same
    .capture-visit/.faces-bar/.badge tokens enrich.html established. */
 .enc-filter { display: flex; gap: 8px; align-items: center; }
-.enc-filter input[type="text"] { padding: 6px 10px; border-radius: var(--radius-md); border: 1px solid var(--stroke); background: var(--surface); color: var(--text); }
 .enc-chips { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 .6rem .6rem; }
 .enc-members { padding: 0 .6rem .6rem; }
 .enc-members summary { cursor: pointer; color: var(--muted); font-size: 12px; }
@@ -1694,7 +1726,7 @@ body.map-full-open .me-toolbar {
 .ib-card .btn-skip { background: var(--btn-neutral); color: var(--text); }
 .ib-actions button:hover, .ib-wrong button:hover { filter: brightness(1.2); }
 .ib-wrong label { flex: 1 0 100%; display: flex; gap: var(--space-2); align-items: center; font-size: var(--text-sm); color: var(--muted); }
-.ib-wrong select { flex: 1; background: var(--surface-2); color: var(--text); border: 1px solid var(--stroke); border-radius: var(--radius-sm); padding: 6px; font-family: var(--font-mono); }
+.ib-wrong select { flex: 1; }
 .ib-wrong .help { flex: 1 0 100%; margin: 0; }
 .ib-result { justify-content: space-between; font-family: var(--font-mono); font-size: var(--text-sm); }
 .ib-card.v-tp .ib-result-text { color: var(--ok); }

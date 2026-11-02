@@ -1,10 +1,11 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% set active_page = 'status' %}
 {% block title %}Status · Marcellus{% endblock %}
 
-{% block page_heading %}<h1 class="sr-only">Status</h1>{% endblock %}
 {% block body %}
 <main id="main-content">
+  {{ page_head("Status") }}
   <div class="stat-row">
     <div class="stat-card">
       <div class="stat-label">Marcellus</div>

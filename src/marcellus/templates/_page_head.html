@@ -1,0 +1,11 @@
+{# Shared page title: one h1 per page, optional one-line description.
+   Usage: {% from "_page_head.html" import page_head %} then, as the first
+   child of <main>: {{ page_head("Status") }} or {{ page_head("Cameras", "Tap a camera for its live stream") }}. #}
+{% macro page_head(title, sub=None) -%}
+<div class="page-head">
+  <h1 class="page-title">{{ title }}</h1>
+  {%- if sub %}
+  <p class="page-sub">{{ sub }}</p>
+  {%- endif %}
+</div>
+{%- endmacro %}
