@@ -655,6 +655,17 @@ def set_sighting_excluded(
     return (True, None)
 
 
+def _forget_pair_labels(conn: sqlite3.Connection, cluster_id: int) -> None:
+    """A forgotten identity's labelled pairs (faces/accuracy.py) go with it. Call
+    while its sightings still carry the cluster id. Merges keep them on purpose."""
+    conn.execute(
+        "DELETE FROM face_pair_labels WHERE "
+        "event_a IN (SELECT event_id FROM face_enrichments WHERE cluster_id = ?) OR "
+        "event_b IN (SELECT event_id FROM face_enrichments WHERE cluster_id = ?)",
+        (cluster_id, cluster_id),
+    )
+
+
 def delete_cluster(conn: sqlite3.Connection, crops_dir: Path, cluster_id: int) -> bool:
     """Erase an identity: crops, embeddings and the cluster row (its redirects
     follow via the delete trigger). False when there was no such cluster."""
@@ -665,6 +676,7 @@ def delete_cluster(conn: sqlite3.Connection, crops_dir: Path, cluster_id: int) -
         )
     ]
     drop_crops(conn, crops_dir, event_ids)
+    _forget_pair_labels(conn, cluster_id)
     conn.execute(
         "UPDATE face_enrichments SET cluster_id = NULL, embedding = NULL WHERE cluster_id = ?",
         (cluster_id,),
@@ -674,8 +686,9 @@ def delete_cluster(conn: sqlite3.Connection, crops_dir: Path, cluster_id: int) -
 
 
 def reap_stale_clusters(conn: sqlite3.Connection, *, cfg: Any, now: float) -> int:
-    """Delete UNNAMED, unfollowed clusters unseen for cluster_ttl_days, with their
-    embeddings. A followed cluster (`followed_at` set, /v1/people) is exempt.
+    """Delete UNNAMED, unfollowed, un-noted clusters unseen for cluster_ttl_days,
+    with their embeddings. Following or noting a cluster (/v1/people) exempts it:
+    either one says a person cares about this ID.
 
     This is the retention boundary that keeps the feature from becoming an
     unbounded stranger database: the enrichment rows stay (they mirror
@@ -686,11 +699,13 @@ def reap_stale_clusters(conn: sqlite3.Connection, *, cfg: Any, now: float) -> in
         int(r["cluster_id"])
         for r in conn.execute(
             "SELECT cluster_id FROM face_clusters "
-            "WHERE name IS NULL AND followed_at IS NULL AND last_seen_at < ?",
+            "WHERE name IS NULL AND followed_at IS NULL AND note IS NULL "
+            "AND last_seen_at < ?",
             (cutoff,),
         )
     ]
     for cid in stale:
+        _forget_pair_labels(conn, cid)
         conn.execute(
             "UPDATE face_enrichments SET cluster_id = NULL, embedding = NULL "
             "WHERE cluster_id = ?",

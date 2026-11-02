@@ -355,7 +355,7 @@ class FaceEnrichSection(BaseModel):
     consolidate_threshold: float = 0.45
 
     # Unnamed clusters not seen for this long are reaped (with their stored
-    # embeddings). Named clusters never expire.
+    # embeddings). Named, followed and noted clusters never expire.
     cluster_ttl_days: int = 60
 
     # insightface model-pack cache (buffalo_l, ~300 MB on first download).

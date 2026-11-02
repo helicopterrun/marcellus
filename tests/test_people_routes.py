@@ -729,6 +729,30 @@ def test_reap_skips_followed_clusters(world: World) -> None:
     assert reaped == 1 and left == [2, 3]
 
 
+def test_reap_skips_noted_clusters_until_the_note_is_cleared(
+    world: World, client: TestClient
+) -> None:
+    old = NOW - 90 * 86400.0
+    world.cluster(1, last_seen=old)
+    world.sight(1, old)
+    assert client.put("/v1/people/1/note", json={"note": "Mail carrier"}).status_code == 200
+
+    def reap() -> int:
+        c = world.conn()
+        try:
+            reaped = enrich.reap_stale_clusters(c, cfg=world.settings.face_enrich, now=NOW)
+            c.commit()
+        finally:
+            c.close()
+        return reaped
+
+    assert reap() == 0
+    assert client.get("/v1/people/1").status_code == 200
+    assert client.put("/v1/people/1/note", json={"note": "  "}).status_code == 200
+    assert reap() == 1
+    assert client.get("/v1/people/1").status_code == 404
+
+
 def test_reaped_cluster_takes_its_redirects(world: World, client: TestClient) -> None:
     old = NOW - 90 * 86400.0
     for cid in (1, 2):

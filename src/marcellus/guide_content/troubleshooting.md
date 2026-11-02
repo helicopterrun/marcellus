@@ -87,7 +87,7 @@ Four independent retention knobs, each pruning its own store:
 | `scrub.retention_days` | `4` | Scrub sprite sheets and buckets, oldest first. Capped by how long continuous recording actually lasts. | `fsc scrub prune` |
 | `face_capture.retention_days` | `30` | Stored full-res face captures, matched to Frigate's own alert retention. | `fsc face-capture prune` |
 | `encounters.retention_days` | `30` | Sealed encounters plus their members and decisions; unsealed encounters never expire. | `fsc encounters prune` |
-| `face_enrich.cluster_ttl_days` | `60` | Unnamed clusters and their embeddings. Named clusters never expire. | (worker only) |
+| `face_enrich.cluster_ttl_days` | `60` | Unnamed clusters and their embeddings. Named, followed and noted clusters never expire. | (worker only) |
 
 `scrub.min_free_bytes` (default 2 GiB) is the floor below which the scrub
 generator skips a cycle rather than grinding out the same ENOSPC failure

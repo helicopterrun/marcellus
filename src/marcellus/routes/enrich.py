@@ -18,20 +18,21 @@ own Frigate session — /api/events/{id}/snapshot.jpg straight from the page.
 from __future__ import annotations
 
 import logging
+import random
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from marcellus.config import Settings
 from marcellus.db import open_sidecar, with_sidecar
 from marcellus.errors import error_detail
-from marcellus.faces import consolidate, enrich
+from marcellus.faces import accuracy, consolidate, enrich
 from marcellus.faces.handles import handle_for
 from marcellus.frigate_api import get_async_client
 from marcellus.routes._deps import settings_of as _settings
@@ -722,3 +723,85 @@ def sighting_remove(event_id: str, request: Request) -> JSONResponse:
         return JSONResponse({"ok": True, "cluster_deleted": cluster_deleted})
     finally:
         conn.close()
+
+
+# --- Blind face-pair accuracy labelling (faces/accuracy.py) ---
+
+
+@router.get("/enrich/accuracy", response_class=HTMLResponse)
+def accuracy_view(request: Request) -> Any:
+    s = _settings(request)
+    return _templates(request).TemplateResponse(
+        request,
+        "face_accuracy.html",
+        {
+            "match_threshold": s.face_enrich.match_threshold,
+            "cluster_threshold": s.face_enrich.cluster_threshold,
+        },
+    )
+
+
+def _accuracy_state(s: Settings, conn: sqlite3.Connection) -> dict[str, Any]:
+    out = accuracy.state(conn, s.face_enrich.crops_dir)
+    conn.commit()  # state() may have marked vanished pairs 'gone'
+    return out
+
+
+@router.get("/enrich/accuracy/state.json")
+async def accuracy_state(request: Request) -> JSONResponse:
+    s = _settings(request)
+    return JSONResponse(await with_sidecar(s.sidecar.db_path, lambda c: _accuracy_state(s, c)))
+
+
+class DrawPayload(BaseModel):
+    count: int = Field(50, ge=1, le=200)
+
+
+@router.post("/enrich/accuracy/draw")
+async def accuracy_draw(request: Request, payload: DrawPayload | None = None) -> JSONResponse:
+    """Draw a fresh batch of pairs. Refuses while any drawn pair is unlabelled,
+    so batches never pile up."""
+    s = _settings(request)
+    count = payload.count if payload is not None else 50
+
+    def _do(conn: sqlite3.Connection) -> dict[str, Any] | None:
+        pending = conn.execute(
+            "SELECT 1 FROM face_pair_labels WHERE label IS NULL LIMIT 1"
+        ).fetchone()
+        if pending is not None:
+            return None
+        accuracy.draw_pairs(conn, count=count, rng=random.Random(), now=time.time())
+        conn.commit()
+        return _accuracy_state(s, conn)
+
+    out = await with_sidecar(s.sidecar.db_path, _do)
+    if out is None:
+        raise HTTPException(
+            status_code=409,
+            detail=error_detail("pairs_pending", "label the pairs already drawn first"),
+        )
+    return JSONResponse(out)
+
+
+class PairLabelPayload(BaseModel):
+    label: Literal["same", "different", "unsure"] | None
+
+
+@router.post("/enrich/accuracy/pairs/{pair_id}/label")
+async def accuracy_label(
+    pair_id: int, payload: PairLabelPayload, request: Request
+) -> JSONResponse:
+    s = _settings(request)
+
+    def _do(conn: sqlite3.Connection) -> dict[str, Any] | None:
+        if not accuracy.set_label(conn, pair_id, payload.label, time.time()):
+            return None
+        conn.commit()
+        return _accuracy_state(s, conn)
+
+    out = await with_sidecar(s.sidecar.db_path, _do)
+    if out is None:
+        raise HTTPException(
+            status_code=404, detail=error_detail("pair_not_found", "pair not found")
+        )
+    return JSONResponse(out)
