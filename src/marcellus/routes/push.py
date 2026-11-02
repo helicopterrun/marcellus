@@ -943,15 +943,17 @@ async def get_push_status(request: Request) -> dict[str, Any]:
             subscriber.last_review_at, tz=_datetime.timezone.utc
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    def _query(conn: Any) -> tuple[dict[str, Any], int]:
-        return decision_trace.status(conn), len(store.list_devices(conn))
+    def _query(conn: Any) -> tuple[dict[str, Any], list[Any]]:
+        return decision_trace.status(conn), store.list_devices(conn)
 
     trace_status, devices = await db.with_sidecar(settings.sidecar.db_path, _query)
 
     policy = policy_settings.get_active()
-    local_now = _datetime.datetime.now()
-    now_minutes = local_now.hour * 60 + local_now.minute
-    quiet_hours_active, _qh_mode = policy_settings.is_quiet_hours(policy, now_minutes)
+    quiet_hours_active, _qh_mode = policy_settings.quiet_hours_at(
+        policy,
+        _datetime.datetime.now(_datetime.timezone.utc).timestamp(),
+        policy_settings.household_zone(devices),
+    )
 
     return {
         "now": _datetime.datetime.now(_datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -963,7 +965,7 @@ async def get_push_status(request: Request) -> dict[str, Any]:
         # No global timed-mute concept exists (spec is scoped to per-cell/
         # per-zone silence, `push_silences`) -- resolved as always null.
         "paused_until": None,
-        "devices": devices,
+        "devices": len(devices),
         # Alerts-slice2 §C: in-memory, process-lifetime relay health, updated
         # by `push/transport.py`'s `RelayTransport` on every relay response.
         "relay": RELAY_HEALTH.as_dict(),

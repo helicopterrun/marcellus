@@ -28,11 +28,15 @@ is "what a *freshly onboarded* settings file starts the user at".
 
 from __future__ import annotations
 
+import datetime
 import json
 import math
 import shutil
+from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from marcellus.push import ladder_policy
 from marcellus.push.live_activities import FAMILIES
@@ -282,6 +286,28 @@ def is_quiet_hours(settings: dict[str, Any], now_minutes: int) -> tuple[bool, st
     else:
         active = now_minutes >= start or now_minutes < end
     return active, mode if active else ""
+
+
+def household_zone(devices: Iterable[Any]) -> ZoneInfo | None:
+    """The registered devices' most common valid time zone, the clock for
+    settings that belong to the household rather than one phone. The host's
+    clock is often UTC. None when no device names one."""
+    names = Counter(d.timezone for d in devices if getattr(d, "timezone", ""))
+    for name, _count in names.most_common():
+        try:
+            return ZoneInfo(name)
+        except Exception:  # noqa: BLE001 -- an unknown zone must not drop a push
+            continue
+    return None
+
+
+def quiet_hours_at(
+    settings: dict[str, Any], now: float, zone: ZoneInfo | None
+) -> tuple[bool, str]:
+    """`is_quiet_hours` for the instant `now`, read on `zone`'s clock. With no
+    zone known, falls back to the host's clock."""
+    local = datetime.datetime.fromtimestamp(now, zone)
+    return is_quiet_hours(settings, local.hour * 60 + local.minute)
 
 
 def guess_zone_class(name: str, cameras: tuple[str, ...] = ()) -> str:
