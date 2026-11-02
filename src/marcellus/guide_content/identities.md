@@ -105,9 +105,10 @@ created, so they are probably one person. Nothing is merged automatically and
 nothing is written to compute them. Each group shows the faces, handles,
 sightings, days, the widest distance in the group, and a **same visit** tag when
 two of them were seen on the same camera minutes apart (the strongest hint).
-**Merge group** asks once, then merges the others into the one with the most
-sightings. Named identities are never proposed in a group. **Not the same**
-records that the group are different people, and that pair is never suggested
+Hover a face to enlarge it. **Compare**, or tapping a face, shows each identity's
+faces large, side by side, with the decision there: **Merge group** merges the
+others into the one with the most sightings. Named identities are never proposed
+in a group. **Not the same** records that the group are different people, and that pair is never suggested
 again (the ruling follows an identity through later merges). The app's
 `GET /v1/people/merge-suggestions` also offers an unnamed identity that is close
 to a named one, to be merged into the named one; `POST

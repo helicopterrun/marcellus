@@ -89,7 +89,7 @@ async function doMerge(fromId, intoId) {
 // opens at once; Merge stays disabled until every side has finished loading
 // (or failed), so nobody merges blind on a slow connection.
 
-const FACES_SHOWN = 6;
+const FACES_SHOWN = 8;
 
 function openFace(url) {
   const img = SC.el('img', { src: url, alt: 'face', class: 'id-ev-big' }, []);
@@ -111,10 +111,28 @@ function renderFaces(box, faces) {
   });
 }
 
+// A small face on a page with a mouse grows beside the pointer. Touch screens get
+// no hover, so anything using this also needs a tap target (the Compare dialog).
+function hoverZoom(img) {
+  let big = null;
+  const hide = () => { if (big) { big.remove(); big = null; } };
+  img.addEventListener('pointerenter', e => {
+    if (e.pointerType !== 'mouse' || big) return;
+    big = SC.el('img', { src: img.src, alt: '', class: 'id-hover-zoom' }, []);
+    const r = img.getBoundingClientRect();
+    const size = 320;
+    big.style.left = Math.min(r.right + 12, window.innerWidth - size - 12) + 'px';
+    big.style.top = Math.max(12, Math.min(r.top, window.innerHeight - size - 12)) + 'px';
+    document.body.appendChild(big);
+  });
+  img.addEventListener('pointerleave', hide);
+  img.addEventListener('click', hide);
+}
+
 // sides: [{ id, meta (or null: looked up), role, title?, count? }]. `summary`
 // is a plain sentence naming what will be merged into what. `onMerge` runs on
-// the Merge button.
-function evidenceDialog(heading, summary, sides, mergeLabel, onMerge, autoEnable = true) {
+// the Merge button; `extra` are more dialog actions after it.
+function evidenceDialog(heading, summary, sides, mergeLabel, onMerge, autoEnable = true, extra = []) {
   const rows = sides.map(side => {
     const head = SC.el('div', { class: 'id-ev-head' }, []);
     const faces = SC.el('div', { class: 'id-ev-faces' }, [
@@ -124,10 +142,11 @@ function evidenceDialog(heading, summary, sides, mergeLabel, onMerge, autoEnable
   });
   const content = [];
   if (summary) content.push(SC.el('p', { class: 'id-ev-summary', text: summary }, []));
-  rows.forEach(r => content.push(r.node));
+  content.push(SC.el('div', { class: 'id-ev-sides' }, rows.map(r => r.node)));
   const overlay = SC.dialog(heading, content, [
     { label: 'Cancel' },
     { label: mergeLabel, kind: 'btn-primary', onclick: onMerge },
+    ...extra,
   ]);
   overlay.firstChild.classList.add('id-evidence');
   const mergeBtn = overlay.querySelectorAll('.me-actions button')[1];
@@ -558,7 +577,7 @@ async function mergeGroup(group) {
   window.location.reload();
 }
 
-function confirmGroup(group) {
+function compareGroup(group, card, notSame) {
   const losers = group.members.filter(m => m.id !== group.survivor);
   const keeper = group.members.find(m => m.id === group.survivor);
   const keepTitle = keeper.handle + ' · #' + keeper.id;
@@ -570,8 +589,9 @@ function confirmGroup(group) {
     meta: proposalMeta(m),
     role: m.id === group.survivor ? 'keeps everything' : 'goes away',
   }));
-  evidenceDialog('Merge ' + group.members.length + ' identities into one?', summary, sides,
-    'Merge group', () => mergeGroup(group));
+  evidenceDialog('Are these the same person?', summary, sides,
+    'Merge group', () => mergeGroup(group), true,
+    [{ label: 'Not the same', onclick: () => dismissGroup(group, card, notSame) }]);
 }
 
 async function dismissGroup(group, card, btn) {
@@ -602,11 +622,19 @@ function renderProposal(group) {
           title: 'two of these were seen on the same camera within minutes of each other' }, [])]
       : []),
   ]);
-  const btn = SC.el('button', { type: 'button', class: 'btn btn-primary', text: 'Merge group' }, []);
-  btn.addEventListener('click', () => confirmGroup(group));
+  const btn = SC.el('button', { type: 'button', class: 'btn btn-primary', text: 'Compare',
+    title: 'see these faces large, then merge them or rule them out' }, []);
   const notSame = SC.el('button', { type: 'button', class: 'btn', text: 'Not the same',
     title: 'these are different people: stop suggesting this merge' }, []);
   const card = SC.el('div', { class: 'id-prop' }, [members, info, btn, notSame]);
+  const compare = () => compareGroup(group, card, notSame);
+  btn.addEventListener('click', compare);
+  members.querySelectorAll('.id-pick-row').forEach(row => {
+    row.classList.add('id-prop-face');
+    row.addEventListener('click', compare);
+    const img = row.querySelector('img');
+    if (img) hoverZoom(img);
+  });
   notSame.addEventListener('click', () => dismissGroup(group, card, notSame));
   return card;
 }
