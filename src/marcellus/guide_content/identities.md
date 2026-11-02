@@ -2,7 +2,7 @@
 title: Identities
 section: people
 order: 2
-routes: ["/enrich/clusters", "/v1/people", "/v1/people/{person_id}", "/v1/people/{person_id}/sightings", "/v1/people/{person_id}/similar", "/v1/people/{person_id}/avatar.jpg", "/v1/people/{person_id}/name", "/v1/people/{person_id}/merge", "/v1/people/{person_id}/follow", "/v1/people/{person_id}/note", "/v1/people/{person_id}/sightings/{event_id}", "/v1/faces/{event_id}/{rank}.jpg", "/v1/people/for-event/{event_id}", "/enrich/merge-proposals.json"]
+routes: ["/enrich/clusters", "/v1/people", "/v1/people/{person_id}", "/v1/people/{person_id}/sightings", "/v1/people/{person_id}/similar", "/v1/people/{person_id}/avatar.jpg", "/v1/people/{person_id}/name", "/v1/people/{person_id}/merge", "/v1/people/{person_id}/follow", "/v1/people/{person_id}/note", "/v1/people/{person_id}/sightings/{event_id}", "/v1/faces/{event_id}/{rank}.jpg", "/v1/people/for-event/{event_id}", "/enrich/merge-proposals.json", "/enrich/clusters/{cluster_id}/faces.json"]
 config: ["face_enrich"]
 ---
 
