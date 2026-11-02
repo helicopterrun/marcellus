@@ -204,6 +204,15 @@ def _push_status(app_state: Any, settings: Any) -> dict[str, Any]:
     return push
 
 
+def _recording_status(app_state: Any, settings: Any, now: float) -> dict[str, Any]:
+    """The recording watcher's snapshot, same shape as `/healthz`
+    `checks["recording"]` plus `enabled`."""
+    watcher = getattr(app_state, "recording_watcher", None)
+    if not settings.recording_watch.enabled or watcher is None:
+        return {"enabled": False, "status": "off", "stalled": [], "last_check_age_s": None}
+    return {"enabled": True, **watcher.health(now)}
+
+
 def _counts(request: Request, settings: Any) -> dict[str, Any]:
     """Additive status-page counters (Wave 6B-2): one query/attribute each,
     degrading to zeros rather than a 500 on an empty or predating-column DB.
@@ -313,6 +322,7 @@ async def _gather_status(request: Request) -> dict[str, Any]:
         "proxy_enabled": settings.proxy.enabled,
         "scrub": scrub,
         "push": push,
+        "recording": _recording_status(request.app.state, settings, now),
         # Wave 2A: relay retry/breaker + MQTT queue counters, same snapshot
         # GET /v1/stats returns -- one source of truth for the status page.
         "push_stats": STATS.snapshot(),

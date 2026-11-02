@@ -39,6 +39,14 @@
       <div class="stat-value cell-class muted" data-k="push">off</div>
     </div>
     {% endif %}
+    {% set rec = status.recording %}
+    <div class="stat-card">
+      <div class="stat-label">Recording</div>
+      <div class="stat-value cell-class {{ 'muted' if not rec.enabled else 'noise' if rec.stalled else 'ok' }}" data-k="recording">
+        {{ 'off' if not rec.enabled else (rec.stalled | length ~ ' stalled') if rec.stalled else 'ok' }}
+      </div>
+      <div class="help" data-k="recording-detail">{% for c in rec.stalled %}{{ c.camera }}{{ ', ' if not loop.last }}{% endfor %}</div>
+    </div>
     <div class="stat-card">
       <div class="stat-label">Devices</div>
       <div class="stat-value" data-k="devices">{{ status.push.device_count }}</div>

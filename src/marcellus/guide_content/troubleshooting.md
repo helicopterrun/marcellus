@@ -43,6 +43,7 @@ ones that flip the whole response to `degraded` + HTTP 503.
 | `encounters` | `starting` | Enabled, but the service object isn't up yet. | Wait. |
 | `encounters` | `ok` | Reconciling; `encounters_last_reconcile` carries the last cycle's counts and age. | Nothing. |
 | `encounters` | `error` | **Degraded.** The last reconcile raised; the message is in the body. | Read the error, check the Frigate DB is readable, then restart. |
+| `recording` | `ok` / `stalled` | Informational only (never degrades the response). `stalled` lists `{camera, since}` for cameras whose newest recording segment is older than `recording_watch.stall_after_s`; `last_check_age_s` is the age of the last successful check. Absent when `recording_watch.enabled` is off. | See [Status](/guide/status) ("Cameras that stop recording"); check that camera's record stream in Frigate. |
 
 The body also carries `scrub_low_disk` when scrub is enabled -- free space
 on the cache filesystem is under `scrub.min_free_bytes`, so the generator

@@ -130,6 +130,19 @@ face_enrich:
 # ~60s in-process generator (server.py lifespan, §5.4a) in addition to
 # advertising the capability -- requires ffmpeg/ffprobe on PATH and a
 # frigate.recordings_path mount/host-path that resolves.
+# "Camera stopped recording" watcher. Frigate can keep detecting while a camera's
+# record stream delivers no video, and /api/stats still looks healthy; the age of
+# each camera's newest row in Frigate's `recordings` table does not lie (5-15 s
+# when healthy). One notification per incident across all cameras; cameras you
+# switch off in Frigate are not watched. Shown on the Status page and /healthz
+# (checks.recording, informational only).
+recording_watch:
+  enabled: true
+  notify: true                  # send the push card; false keeps healthz/Status only
+  interval_s: 30.0
+  stall_after_s: 300.0          # newest segment older than this = stalled
+  recover_within_s: 60.0        # newest segment fresher than this = recovered
+
 scrub:
   enabled: false
   cameras: []              # [] = all cameras; else an opt-in list

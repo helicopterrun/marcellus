@@ -767,6 +767,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         else:
             enrich_task = asyncio.create_task(_face_enrich_loop(app))
 
+    recording_watch_task: asyncio.Task[None] | None = None
+    if settings.recording_watch.enabled:
+        from marcellus.recording_watch import RecordingWatcher, recording_watch_loop
+
+        app.state.recording_watcher = RecordingWatcher(
+            settings, engine_getter=lambda: getattr(app.state, "push_engine", None)
+        )
+        recording_watch_task = asyncio.create_task(recording_watch_loop(app))
+
     # Always on: it only ever sends rows a person queued from /inbox or
     # /event, and costs one SELECT a tick when there are none.
     outbox_task = asyncio.create_task(_plus_outbox_loop(app))
@@ -786,6 +795,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             encounters_task,
             encounters_worker_task,
             proxy_watchdog_task,
+            recording_watch_task,
         ):
             if pending is not None:
                 pending.cancel()
