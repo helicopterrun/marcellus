@@ -15,7 +15,7 @@ from marcellus import db
 from marcellus.config import PushSection, Settings
 from marcellus.encounters import store
 from marcellus.encounters.adjacency import Adjacency
-from marcellus.encounters.service import EncounterService
+from marcellus.encounters.service import _LOCK_SKIP_LIMIT, EncounterService
 from marcellus.push.decision import parse_review_message
 from marcellus.push.engine import PushEngine
 from marcellus.push.models import ReviewEvent
@@ -664,6 +664,90 @@ def test_reconcile_isolates_a_failing_atom(tmp_path: Path, monkeypatch: pytest.M
         assert watermark == pytest.approx(now - 260)
     finally:
         conn.close()
+
+
+def test_reconcile_survives_a_commit_arriving_before_its_first_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another writer tries to commit in the gap between this cycle's first
+    read and first write. On a deferred BEGIN that commit lands, and every
+    atom then fails at once with SQLITE_BUSY_SNAPSHOT."""
+    frigate_db = _reviewsegment_db(tmp_path)
+    now = time.time()
+    _three_atom_reviews(frigate_db, now)
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()), now=lambda: now)
+
+    def _competing_writer(_frigate_conn, _event_ids):  # type: ignore[no-untyped-def]
+        other = sqlite3.connect(settings.sidecar.db_path, timeout=0)
+        try:
+            other.execute("CREATE TABLE IF NOT EXISTS competing (x)")
+            other.commit()
+        except sqlite3.OperationalError:
+            pass  # correctly held off by this cycle's write lock
+        finally:
+            other.close()
+
+    monkeypatch.setattr("marcellus.encounters.service.load_direction", _competing_writer)
+
+    stats = service.reconcile()
+    assert stats.errors == 0
+    assert stats.new == 3
+
+
+def _nonblocking_conn(settings: Settings) -> sqlite3.Connection:
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    conn.execute("PRAGMA busy_timeout = 0")
+    return conn
+
+
+def test_reconcile_skips_quietly_when_the_write_lock_stays_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frigate_db = _reviewsegment_db(tmp_path)
+    now = time.time()
+    _three_atom_reviews(frigate_db, now)
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()), now=lambda: now)
+    monkeypatch.setattr(service, "_conn", lambda: _nonblocking_conn(settings))
+
+    holder = db.open_sidecar(settings.sidecar.db_path)
+    holder.execute("BEGIN IMMEDIATE")
+    stats = service.reconcile()
+    assert stats.errors == 0
+    assert stats.new == 0
+    assert service.status()["state"] == "ok"
+    holder.rollback()
+    holder.close()
+
+    # The next cycle catches up on everything the skipped one left.
+    assert service.reconcile().new == 3
+
+
+def test_reconcile_reports_an_error_once_the_lock_looks_wedged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frigate_db = _reviewsegment_db(tmp_path)
+    now = time.time()
+    _three_atom_reviews(frigate_db, now)
+    settings = _settings(tmp_path, frigate_db)
+    service = EncounterService(settings, adjacency=Adjacency(edges=frozenset()), now=lambda: now)
+    monkeypatch.setattr(service, "_conn", lambda: _nonblocking_conn(settings))
+
+    holder = db.open_sidecar(settings.sidecar.db_path)
+    holder.execute("BEGIN IMMEDIATE")
+    for _ in range(_LOCK_SKIP_LIMIT - 1):
+        service.reconcile()
+    assert service.status()["state"] == "ok"
+    with pytest.raises(sqlite3.OperationalError):
+        service.reconcile()
+    assert service.status()["state"] == "error"
+    holder.rollback()
+    holder.close()
+
+    # One good cycle clears it.
+    assert service.reconcile().new == 3
+    assert service.status()["state"] == "ok"
 
 
 def test_reconcile_removes_vanished_segment_and_shrinks_encounter(tmp_path: Path) -> None:
