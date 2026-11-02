@@ -17,6 +17,7 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -33,6 +34,9 @@ router = APIRouter(tags=["wildlife"])
 
 _REVIEWS = ("pending", "kept", "discarded")
 _HITS_PER_VISIT = 12
+#: HTML page: first batch, and how much each "Show more" adds.
+_PAGE_BATCH = 20
+_MAX_LIMIT = 500
 
 
 def _local(ts: float, tz_name: str) -> str:
@@ -46,9 +50,7 @@ def _local(ts: float, tz_name: str) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%a %b %d %H:%M:%S UTC")
 
 
-def _visits(
-    settings: Settings, *, days: float, review: str, camera: str, limit: int
-) -> list[dict[str, Any]]:
+def _visit_filter(days: float, review: str, camera: str) -> tuple[str, list[Any]]:
     since = time.time() - days * 86400
     clauses = ["v.start_ts >= ?"]
     args: list[Any] = [since]
@@ -58,10 +60,27 @@ def _visits(
     if camera:
         clauses.append("v.camera = ?")
         args.append(camera)
+    return " AND ".join(clauses), args
+
+
+def _visit_total(settings: Settings, *, days: float, review: str, camera: str) -> int:
+    where, args = _visit_filter(days, review, camera)
+    conn = open_sidecar(settings.sidecar.db_path)
+    try:
+        row = conn.execute(f"SELECT COUNT(*) FROM wildlife_visits v WHERE {where}", args).fetchone()
+        return int(row[0])
+    finally:
+        conn.close()
+
+
+def _visits(
+    settings: Settings, *, days: float, review: str, camera: str, limit: int
+) -> list[dict[str, Any]]:
+    where, args = _visit_filter(days, review, camera)
     conn = open_sidecar(settings.sidecar.db_path)
     try:
         vrows = conn.execute(
-            f"SELECT * FROM wildlife_visits v WHERE {' AND '.join(clauses)} "
+            f"SELECT * FROM wildlife_visits v WHERE {where} "
             "ORDER BY v.start_ts DESC LIMIT ?",
             [*args, limit],
         ).fetchall()
@@ -159,16 +178,31 @@ def wildlife_view(
     days: float = Query(7.0, ge=1, le=90),
     review: str = "pending",
     camera: str = "",
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = _PAGE_BATCH,
 ) -> Any:
     s = _settings(request)
     if review not in (*_REVIEWS, "all"):
         review = "pending"
+    # Clamped, not rejected: a hand-edited URL should still render.
+    limit = max(1, min(int(limit), _MAX_LIMIT))
+    # One extra row tells us whether "Show more" has anything to show and
+    # which visit it should land on.
+    fetched = _visits(s, days=days, review=review, camera=camera, limit=limit + 1)
+    page, extra = fetched[:limit], fetched[limit:]
+    total = _visit_total(s, days=days, review=review, camera=camera)
+    more_href = None
+    if extra and limit < _MAX_LIMIT:
+        query = {"days": days, "review": review, "limit": min(limit + _PAGE_BATCH, _MAX_LIMIT)}
+        if camera:
+            query["camera"] = camera
+        more_href = f"/wildlife?{urlencode(query)}#visit-{extra[0]['id']}"
     return _templates(request).TemplateResponse(
         request,
         "wildlife.html",
         {
-            "visits": _visits(s, days=days, review=review, camera=camera, limit=limit),
+            "visits": page,
+            "total": total,
+            "more_href": more_href,
             "board": finder.scoreboard(s, days=days),
             "days": days,
             "review": review,

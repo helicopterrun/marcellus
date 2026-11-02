@@ -570,33 +570,19 @@ def seal_stale(conn: sqlite3.Connection, now: float, cfg: LinkerConfig) -> int:
     return sealed
 
 
-def list_recent(
-    conn: sqlite3.Connection,
+def _recent_where(
     *,
-    since: float | None = None,
-    before: float | None = None,
-    limit: int = 200,
-    camera: str | Sequence[str] | None = None,
-    severity: str | None = None,
-    tag: str | None = None,
-    labels: Sequence[str] | None = None,
-    places: Sequence[str] | None = None,
-    person_cluster: int | None = None,
-) -> list[dict[str, Any]]:
-    """Newest first by `start_time` (ties broken by `id`, so a page is stable).
-
-    Every filter is applied in SQL, so `limit` counts filtered rows. `since`
-    is inclusive, `before` exclusive (`start_time < before`): a client pages
-    by passing the last row's `start` as `before`. Either bound may be
-    omitted -- the caller decides whether a default window applies.
-
-    Filters combine with AND. `camera` is one name or any-of a sequence;
-    `tag` is "notable" (which also matches never-stamped NULL rows) or
-    "background"; `labels` matches case-insensitively against the labels or
-    recognised identities; `places` matches the stamped place class;
-    `person_cluster` keeps encounters with a live (non-excluded) face sighting
-    of that cluster id on any member event.
-    """
+    since: float | None,
+    before: float | None,
+    camera: str | Sequence[str] | None,
+    severity: str | None,
+    tag: str | None,
+    labels: Sequence[str] | None,
+    places: Sequence[str] | None,
+    person_cluster: int | None,
+) -> tuple[str, list[Any]]:
+    """The shared WHERE clause (with leading ` WHERE `, or empty) + params
+    for `list_recent` / `count_recent`."""
     clauses: list[str] = []
     params: list[Any] = []
     if since is not None:
@@ -645,12 +631,78 @@ def list_recent(
             "AND fe.excluded_at IS NULL)"
         )
         params.append(person_cluster)
-    sql = "SELECT * FROM encounters"
-    if clauses:
-        sql += " WHERE " + " AND ".join(clauses)
+    return (" WHERE " + " AND ".join(clauses) if clauses else ""), params
+
+
+def list_recent(
+    conn: sqlite3.Connection,
+    *,
+    since: float | None = None,
+    before: float | None = None,
+    limit: int = 200,
+    camera: str | Sequence[str] | None = None,
+    severity: str | None = None,
+    tag: str | None = None,
+    labels: Sequence[str] | None = None,
+    places: Sequence[str] | None = None,
+    person_cluster: int | None = None,
+) -> list[dict[str, Any]]:
+    """Newest first by `start_time` (ties broken by `id`, so a page is stable).
+
+    Every filter is applied in SQL, so `limit` counts filtered rows. `since`
+    is inclusive, `before` exclusive (`start_time < before`): a client pages
+    by passing the last row's `start` as `before`. Either bound may be
+    omitted -- the caller decides whether a default window applies.
+
+    Filters combine with AND. `camera` is one name or any-of a sequence;
+    `tag` is "notable" (which also matches never-stamped NULL rows) or
+    "background"; `labels` matches case-insensitively against the labels or
+    recognised identities; `places` matches the stamped place class;
+    `person_cluster` keeps encounters with a live (non-excluded) face sighting
+    of that cluster id on any member event.
+    """
+    where, params = _recent_where(
+        since=since,
+        before=before,
+        camera=camera,
+        severity=severity,
+        tag=tag,
+        labels=labels,
+        places=places,
+        person_cluster=person_cluster,
+    )
+    sql = "SELECT * FROM encounters" + where
     sql += " ORDER BY start_time DESC, id DESC LIMIT ?"
     params.append(limit)
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def count_recent(
+    conn: sqlite3.Connection,
+    *,
+    since: float | None = None,
+    before: float | None = None,
+    camera: str | Sequence[str] | None = None,
+    severity: str | None = None,
+    tag: str | None = None,
+    labels: Sequence[str] | None = None,
+    places: Sequence[str] | None = None,
+    person_cluster: int | None = None,
+) -> int:
+    """How many rows `list_recent` would match with the same filters and no
+    limit."""
+    where, params = _recent_where(
+        since=since,
+        before=before,
+        camera=camera,
+        severity=severity,
+        tag=tag,
+        labels=labels,
+        places=places,
+        person_cluster=person_cluster,
+    )
+    row = conn.execute("SELECT COUNT(*) FROM encounters" + where, params).fetchone()
+    return int(row[0])
 
 
 def get(conn: sqlite3.Connection, encounter_id: str) -> dict[str, Any] | None:

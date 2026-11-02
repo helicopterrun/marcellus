@@ -2,7 +2,7 @@
 {% from "_page_head.html" import page_head %}
 {% set active_page = 'wildlife' %}
 {% set _n = visits|length %}
-{% set summary = _n ~ ' visit' ~ ('s' if _n != 1 else '') %}
+{% set summary = (_n ~ ' of ' ~ total if total > _n else total|string) ~ ' visit' ~ ('s' if total != 1 else '') %}
 {% block title %}Wildlife · Marcellus{% endblock %}
 
 {% block body %}
@@ -67,7 +67,7 @@
   {% endif %}
 
   {% for v in visits %}
-  <section class="capture-visit wildlife-visit" data-visit="{{ v.id }}">
+  <section class="capture-visit wildlife-visit" id="visit-{{ v.id }}" data-visit="{{ v.id }}">
     <header>
       <b>{{ v.camera }}</b> · probably a <b>{{ v.suggestion }}</b>
       · <time>{{ v.when }}</time>
@@ -105,6 +105,12 @@
     </div>
   </section>
   {% endfor %}
+
+  {% if more_href %}
+  <div class="pp-more">
+    <a class="btn btn-neutral" href="{{ more_href }}">Show more</a>
+  </div>
+  {% endif %}
 </main>
 {% endblock %}
 

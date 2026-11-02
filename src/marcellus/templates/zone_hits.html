@@ -6,6 +6,7 @@
 {% block body %}
 <main id="main-content">
   {{ page_head("Zone hits") }}
+  {% include "_tuning_tabs.html" %}
   <form class="filters" method="get" action="/zone-hits">
     <label>camera
       <select name="camera">

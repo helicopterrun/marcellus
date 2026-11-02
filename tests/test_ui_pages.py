@@ -166,15 +166,52 @@ def test_nav_has_tools_dropdown_and_no_scrub_link(client: TestClient) -> None:
     assert 'href="/scrub"' not in html
     nav = html[html.index('<nav class="pages"') : html.index("</header>")]
     tools = nav[nav.index(">Tools</summary>") :]
-    for href in (
-        "/score-histogram", "/motion", "/fps-budget", "/zone-hits",
-        "/placement", "/wildlife", "/replay", "/guide", "/debug",
-    ):
+    # Tuning is one entry; its five pages are tabs under /tuning.
+    for href in ("/tuning", "/wildlife", "/replay", "/guide", "/debug"):
         assert f'href="{href}"' in tools, href
+    for href in ("/score-histogram", "/motion", "/fps-budget", "/zone-hits", "/placement"):
+        assert f'href="{href}"' not in tools, href
     assert ">Tuning</summary>" not in html
     tabbar = html[html.index('<nav class="tabbar"') : html.index('class="more-backdrop"')]
     assert 'href="/encounters"' in tabbar
     assert "i-scrub" not in html
+    # Phone More sheet: one Tools group, no separate Tuning group.
+    sheet = html[html.index('<nav class="more-sheet"') : html.index('class="search-backdrop"')]
+    assert '>Tools</div>' in sheet and '>Tuning</div>' not in sheet
+    for href in ("/tuning", "/wildlife", "/replay", "/guide", "/debug"):
+        assert f'href="{href}"' in sheet, href
+    assert 'href="/score-histogram"' not in sheet
+
+
+def test_tuning_landing_lists_the_five_pages(client: TestClient) -> None:
+    r = client.get("/tuning")
+    assert r.status_code == 200
+    assert "<h1" in r.text and "Tuning" in r.text
+    body = r.text[r.text.index('<main id="main-content"') :]
+    for href in ("/score-histogram", "/motion", "/fps-budget", "/zone-hits", "/placement"):
+        assert f'class="tuning-name" href="{href}"' in body, href
+    assert "/wildlife" not in body  # Wildlife is a Tools page, not a tuning tab
+    assert 'aria-label="Tuning"' in body  # the tab row
+
+
+@pytest.mark.parametrize(
+    ("path", "label"),
+    [
+        ("/tuning", "Overview"),
+        ("/score-histogram", "Scores"),
+        ("/motion", "Motion"),
+        ("/fps-budget", "FPS budget"),
+        ("/zone-hits", "Zone hits"),
+        ("/placement", "Placement"),
+    ],
+)
+def test_tuning_tab_row_marks_current_page(client: TestClient, path: str, label: str) -> None:
+    html = client.get(path).text
+    tabs = html[html.index('<nav class="pp-tabs" aria-label="Tuning">') :]
+    tabs = tabs[: tabs.index("</nav>")]
+    assert tabs.count('aria-current="page"') == 1
+    assert f'class="pp-tab active" aria-current="page">{label}</a>' in tabs
+    assert "Wildlife" not in tabs
 
 
 def test_triage_moved_to_slash_triage(client: TestClient) -> None:

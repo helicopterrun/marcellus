@@ -196,7 +196,8 @@
 
   {% if has_more %}
   <div class="pp-more">
-    <a class="btn btn-neutral" href="?view={{ view }}&amp;page={{ page + 1 }}{{ '&show_excluded=1' if show_excluded }}#cluster-{{ clusters[-1].cluster_id }}">Show more</a>
+    <a class="btn btn-neutral" href="?view={{ view }}&amp;page={{ page + 1 }}{{ '&amp;show_excluded=1' if show_excluded }}#cluster-{{ next_cluster_id }}">Show more</a>
+    <span class="pp-more-n">Showing {{ clusters|length }} of {{ total }}</span>
   </div>
   {% endif %}
 </main>

@@ -2,8 +2,11 @@
 title: Tuning detection thresholds
 section: tuning
 order: 1
-routes: ["/score-histogram"]
+routes: ["/score-histogram", "/tuning"]
 ---
+
+[Tuning](/tuning) lists every measurement page (Scores, Motion, FPS budget,
+Zone hits, Placement) and what question each answers.
 
 [Scores](/score-histogram) plots the confidence-score distribution for any
 camera × label pair and suggests thresholds, with confidence banding. Paired
