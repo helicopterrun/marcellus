@@ -6,6 +6,7 @@
 {% block body %}
 <main id="main-content">
   {{ page_head("FPS budget") }}
+  {% include "_tuning_tabs.html" %}
   {% if error %}
     <div class="empty error">{{ error }}</div>
   {% else %}

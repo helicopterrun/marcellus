@@ -53,9 +53,13 @@ _SIGHTINGS_PER_CLUSTER = 8
 # cluster's current centroid first -- the likeliest wrong joins.
 _SORTS = ("best", "odd")
 
-# Clusters per page. On 2026-10-31 there were 465 clusters, 332 of them seen
-# once; rendering them all made a page of ~3,700 tiles.
-_PAGE_SIZE = 40
+# Unnamed clusters per batch. On 2026-10-31 there were 465 clusters, 332 of
+# them seen once; rendering them all made a page of ~3,700 tiles. Named people
+# are always all shown (the list is short and they are what the page is for);
+# the batch size only governs the unnamed that follow them, and the "Seen once"
+# tab.
+_PAGE_SIZE = 20
+_MAX_PAGES = 100
 
 # Page views. "people" is everyone named plus every unknown seen at least
 # twice -- the clusters worth naming. "once" is the long tail of single
@@ -332,29 +336,37 @@ def clusters_view(
     show_excluded: int = 0,
     view: str = "people",
     cluster: int | None = None,
-    page: int = Query(1, ge=1),
+    page: int = 1,
     sort: str = "best",
 ) -> Any:
     s = _settings(request)
+    page = max(1, min(page, _MAX_PAGES))  # clamp: a hand-edited URL still renders
     if view not in _VIEWS:
         view = "people"
     if sort not in _SORTS:
         sort = "best"
     conn = open_sidecar(s.sidecar.db_path)
     try:
+        counts = _view_counts(conn)
+        # Named clusters sort first, so "all named, then N unnamed" is one
+        # LIMIT. The Seen once tab holds only unnamed. One extra row says
+        # whether there is more, and which card "Show more" lands on.
+        batch = (0 if view == "once" else counts["named"]) + _PAGE_SIZE * page
         clusters = _clusters(
             conn,
             show_excluded=bool(show_excluded),
             view=view,
             cluster_id=cluster,
-            limit=None if cluster is not None else _PAGE_SIZE * page,
+            limit=None if cluster is not None else batch + 1,
             sort=sort,
         )
+        extra: list[dict[str, Any]] = []
+        if cluster is None:
+            clusters, extra = clusters[:batch], clusters[batch:]
         similar = _similar_pairs(conn)
         _attach_partner_avatars(conn, similar)
         stats = _stats(conn, request)
         backfill = enrich.backfill_status(conn)
-        counts = _view_counts(conn)
         known_names = sorted(
             str(r["name"])
             for r in conn.execute("SELECT name FROM face_clusters WHERE name IS NOT NULL")
@@ -375,7 +387,9 @@ def clusters_view(
             "single": cluster,
             "sort": sort,
             "page": page,
-            "has_more": cluster is None and total > len(clusters),
+            "has_more": bool(extra),
+            "next_cluster_id": extra[0]["cluster_id"] if extra else None,
+            "total": total,
             "known_names": known_names,
             "enabled": s.face_enrich.enabled,
             "cameras": s.face_enrich.cameras,

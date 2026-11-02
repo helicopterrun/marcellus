@@ -6,6 +6,7 @@
 {% block body %}
 <main id="main-content">
   {{ page_head("Motion") }}
+  {% include "_tuning_tabs.html" %}
   <form class="filters motion-form" method="get" action="/motion">
     <label>baseline range (blank = single-window view)
       <input type="text" name="baseline" value="{{ baseline }}"

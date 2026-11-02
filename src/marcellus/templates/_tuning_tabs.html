@@ -1,0 +1,10 @@
+{# Sub-nav shared by the tuning pages: /tuning plus the five analysis pages.
+   Wildlife is a Tools page, not a tuning tab. #}
+<nav class="pp-tabs" aria-label="Tuning">
+  <a href="/tuning" class="pp-tab{% if active_page == 'tuning' %} active" aria-current="page{% endif %}">Overview</a>
+  <a href="/score-histogram" class="pp-tab{% if active_page == 'score_histogram' %} active" aria-current="page{% endif %}">Scores</a>
+  <a href="/motion" class="pp-tab{% if active_page == 'motion' %} active" aria-current="page{% endif %}">Motion</a>
+  <a href="/fps-budget" class="pp-tab{% if active_page == 'fps_budget' %} active" aria-current="page{% endif %}">FPS budget</a>
+  <a href="/zone-hits" class="pp-tab{% if active_page == 'zone_hits' %} active" aria-current="page{% endif %}">Zone hits</a>
+  <a href="/placement" class="pp-tab{% if active_page == 'placement' %} active" aria-current="page{% endif %}">Placement</a>
+</nav>
