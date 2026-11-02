@@ -154,6 +154,9 @@ sidecar is the sole author of `sub_label`, and two writers would fight.
   frame, to be considered (default 4000).
 - `min_quality` — minimum quality score (sharpness × size × frontality) for
   a sampled face (default 0.15).
+  When an event finds faces but every one falls under this gate, the best
+  quality seen is kept (internally, never shown) so the gate can be tuned
+  from real data.
 - `min_det_score` — face detector confidence a box needs (default 0.6) to
   count as a face at all. Quality can't keep junk out on its own: leaves and
   wheel spokes are very sharp. `fsc face-enrich regate` applies it to older

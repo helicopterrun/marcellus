@@ -91,6 +91,8 @@ class PeopleCapabilities(_Wire):
     #: `GET /v1/people/merge-suggestions` and its `.../dismiss` exist (additive;
     #: absent on older sidecars, false while `enabled` is false).
     merge_suggestions: bool
+    #: `GET /v1/encounters` accepts `person=<id>` (additive; same gate).
+    encounter_filter: bool
 
 
 class ExternalSourceCapability(_Wire):

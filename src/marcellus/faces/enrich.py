@@ -918,13 +918,14 @@ def _record(
     embedding: list[float] | None = None,
     sub_label_written: str | None = None,
     detail: str | None = None,
+    rejected_best_quality: float | None = None,
 ) -> None:
     conn.execute(
         "INSERT INTO face_enrichments "
         "(event_id, camera, event_start_ts, cluster_id, distance, faces_found, faces_used, "
         " best_quality, embedding, sub_label_written, status, attempts, detail, processed_at, "
-        " best_frame_ts, best_bbox, best_crop_path) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " best_frame_ts, best_bbox, best_crop_path, rejected_best_quality) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(event_id) DO UPDATE SET "
         " cluster_id=excluded.cluster_id, distance=excluded.distance, "
         " faces_found=excluded.faces_found, faces_used=excluded.faces_used, "
@@ -932,7 +933,8 @@ def _record(
         " sub_label_written=excluded.sub_label_written, status=excluded.status, "
         " attempts=excluded.attempts, detail=excluded.detail, "
         " processed_at=excluded.processed_at, best_frame_ts=excluded.best_frame_ts, "
-        " best_bbox=excluded.best_bbox, best_crop_path=excluded.best_crop_path",
+        " best_bbox=excluded.best_bbox, best_crop_path=excluded.best_crop_path, "
+        " rejected_best_quality=excluded.rejected_best_quality",
         (
             cand.event_id,
             cand.camera,
@@ -951,6 +953,7 @@ def _record(
             best.frame_ts if best is not None else None,
             json.dumps([round(v, 5) for v in best.bbox]) if best is not None else None,
             best_crop_path,
+            rejected_best_quality,
         ),
     )
 
@@ -1029,7 +1032,15 @@ def process_event(
         return "no_frames"
     usable = _usable(faces, cfg=cfg)
     if not usable:
-        _record(conn, cand, status="no_faces", faces_found=len(faces))
+        _record(
+            conn,
+            cand,
+            status="no_faces",
+            faces_found=len(faces),
+            # Faces passed the detection/area gates but all fell under
+            # min_quality: keep the best quality seen (data only).
+            rejected_best_quality=max((f.quality for f in faces), default=None),
+        )
         return "no_faces"
     best = usable[0]  # == kept[0][0]: same stable order over the same faces
     best_path = _write_stack(conn, cand.event_id, kept, len(usable), cfg=cfg)

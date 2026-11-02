@@ -35,6 +35,7 @@
   },
   "people": {
     "enabled": true,
+    "encounter_filter": true,
     "filters": [
       "all",
       "named",

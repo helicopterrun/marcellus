@@ -577,7 +577,11 @@ CREATE TABLE IF NOT EXISTS face_enrichments (
     -- Face-stack backfill queue (faces/enrich.py): NULL | queued | done |
     -- no_frames | no_faces | error. Only events enriched before face_crops
     -- existed ever get a value.
-    stack_status      TEXT
+    stack_status      TEXT,
+    -- Data only (no behaviour reads it): for a no_faces event whose faces
+    -- passed the detection/area gates but all fell under min_quality, the best
+    -- quality seen. NULL otherwise. Also in _ADDED_COLUMNS.
+    rejected_best_quality REAL
 );
 CREATE INDEX IF NOT EXISTS idx_face_enrich_cluster ON face_enrichments(cluster_id);
 
@@ -1012,6 +1016,8 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("best_crop_path", "TEXT"),
         # Face-stack backfill queue. Also in the CREATE TABLE literal.
         ("stack_status", "TEXT"),
+        # Best quality among faces rejected by min_quality. Also in the CREATE TABLE literal.
+        ("rejected_best_quality", "REAL"),
     ],
     "face_clusters": [
         # People API (followed/note). Also in the CREATE TABLE literal.

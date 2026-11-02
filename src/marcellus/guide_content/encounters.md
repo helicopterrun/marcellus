@@ -107,6 +107,7 @@ broken by id, so pages are stable).
 | `tag` | `notable` or `background` (see below). `notable` also returns encounters that were never stamped. Anything else is a 422. |
 | `label` | Comma-separated; matches encounters whose labels or recognised identities include any of them (case-insensitive). |
 | `place` | Comma-separated place keys (`street` Public, `yard` Grounds, `doors` Entrances, `off_limits` Restricted; `private` is still accepted and means `yard`): encounters whose most private place is any of them. An unknown key is a 422. |
+| `person` | A person id from [Identities](/enrich/clusters) (merged-away ids follow to their survivor; unknown is a 404). Only encounters with a live, not-excluded face sighting of that person on any member event. A 400 while `face_enrich` is off. |
 
 All filters combine with AND.
 
