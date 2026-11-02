@@ -285,3 +285,54 @@ def test_titled_pages_render_page_title(client: TestClient, path: str, title: st
 def test_exempt_pages_have_no_page_title(client: TestClient, path: str) -> None:
     r = client.get(path)
     assert 'class="page-title"' not in r.text
+
+
+_SETTINGS_PANELS = [
+    "zones", "routing", "notifications", "cameras", "alignment",
+    "push", "tuning", "config", "data", "about",
+]
+
+
+def test_settings_page_has_tab_row_and_all_panels(client: TestClient) -> None:
+    """Settings shows one panel at a time (settings_tabs.js), but the server
+    renders every panel and a plain-anchor tab per panel, so the page still
+    works without JS and `/settings#<panel>` deep links resolve."""
+    import re
+
+    r = client.get("/settings")
+    assert r.status_code == 200
+    html = r.text
+    assert 'id="settings-nav"' in html
+    assert "/static/js/settings_tabs.js" in html
+    for pid in _SETTINGS_PANELS:
+        assert f'href="#{pid}"' in html, pid
+        assert re.search(rf'<section id="{pid}"[^>]*data-settings-panel', html), pid
+    assert html.count("data-settings-panel") == len(_SETTINGS_PANELS)
+    # Help folds into About rather than being its own (nav-less) section.
+    about = html[html.index('<section id="about"'):]
+    assert 'id="help"' in about
+    # Ids are unique: the tuning "push" section must not collide with the
+    # Push panel.
+    ids = re.findall(r'\bid="([^"]+)"', html)
+    assert len(ids) == len(set(ids)), sorted({i for i in ids if ids.count(i) > 1})
+
+
+def test_settings_tuning_section_ids_sit_inside_tuning_panel(client: TestClient) -> None:
+    html = client.get("/settings").text
+    start = html.index('<section id="tuning"')
+    end = html.index('<section id="config"')
+    tuning_panel = html[start:end]
+    # `/settings#encounters` (encounters.html) targets a Tuning section.
+    assert 'id="encounters"' in tuning_panel
+    assert 'id="tuning-push"' in tuning_panel
+    assert 'id="tuning-sections"' in tuning_panel
+    assert 'id="tuning-save"' in tuning_panel
+
+
+def test_settings_shared_save_bar_outside_panels(client: TestClient) -> None:
+    """The one Save button PUTs zones + neighbors + routing + notifications,
+    so it must not live inside a single panel."""
+    html = client.get("/settings").text
+    assert html.count('id="save-btn"') == 1
+    pos = html.index('id="save-btn"')
+    assert pos > html.rindex("</section>")
