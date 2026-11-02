@@ -83,6 +83,8 @@ def _key_time(key: str) -> float:
 
 class BernardoSource:
     kind = "bernardo"
+    #: Sent once, always `active: true`, never cleared (its docs/MQTT.md).
+    one_shot_alerts = frozenset({"degraded_event", "watchdog_restart"})
 
     def __init__(
         self, cfg: BernardoSourceConfig, *, clock: Callable[[], float] = time.time

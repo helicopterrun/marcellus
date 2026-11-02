@@ -13,7 +13,7 @@ from marcellus.config import BernardoSourceConfig, ExternalSourcesSection, Setti
 from marcellus.external import store
 from marcellus.external.media import SourceHttp
 from marcellus.external.registry import build_sources
-from marcellus.external.service import ExternalSourceService
+from marcellus.external.service import NOTICE_RECENT_S, ExternalSourceService
 from marcellus.external.types import (
     AlertSignal,
     Availability,
@@ -213,6 +213,52 @@ async def test_alerts_persist_and_show_in_health(tmp_path: Path) -> None:
     assert svc.health("cam1")["state"] == "ok"
     conn = db.open_sidecar(svc.db_path)
     assert "alert:disk_low" not in store.get_state(conn, "cam1")
+    conn.close()
+    await svc.aclose()
+    await svc2.aclose()
+
+
+async def test_one_shot_notice_never_reads_as_alert_and_ages_out(tmp_path: Path) -> None:
+    svc, _, clock = make(tmp_path)
+    await healthy(svc, clock)
+    await svc.on_signal(AlertSignal("cam1", "degraded_event", True, "Event 1: no frames"))
+    assert svc.health("cam1")["state"] == "ok"
+    checks = svc.health_checks()
+    assert checks["source:cam1:alerts"] == []
+    assert checks["source:cam1:notices"] == ["Event 1: no frames"]
+
+    # A restart keeps the notice, and a real condition still alerts beside it.
+    svc2, _, clock2 = make(tmp_path)
+    await svc2.load_persisted_state()
+    await svc2.on_signal(AlertSignal("cam1", "disk_low", True, "low"))
+    assert svc2.health("cam1")["notices"] == ["Event 1: no frames"]
+    assert svc2.health("cam1")["alerts"] == ["disk_low"]
+
+    clock2.t += NOTICE_RECENT_S + 1
+    assert svc2.health("cam1")["notices"] == []
+    await svc.aclose()
+    await svc2.aclose()
+
+
+async def test_one_shot_alert_stored_as_active_moves_to_a_notice(tmp_path: Path) -> None:
+    """The row older versions latched must not stick after an upgrade."""
+    svc, _, clock = make(tmp_path)
+    await healthy(svc, clock)
+    await svc.on_signal(AlertSignal("cam1", "disk_low", True, "low"))
+    old = {"code": "degraded_event", "message": "Event 1: no frames", "active": True}
+    conn = db.open_sidecar(svc.db_path)
+    store.set_state(conn, "cam1", "alert:degraded_event", old, clock())
+    conn.commit()
+    conn.close()
+
+    svc2, _, _ = make(tmp_path)
+    await svc2.load_persisted_state()
+    assert svc2.health("cam1")["alerts"] == ["disk_low"]
+    assert svc2.health("cam1")["notices"] == ["Event 1: no frames"]
+    conn = db.open_sidecar(svc.db_path)
+    state = store.get_state(conn, "cam1")
+    assert "alert:degraded_event" not in state and "notice:degraded_event" in state
+    assert "alert:disk_low" in state
     conn.close()
     await svc.aclose()
     await svc2.aclose()

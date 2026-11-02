@@ -101,6 +101,10 @@ right now. Journal rows survive a `media_gone`.
 **never** makes `/healthz` fail: a flaky wildlife camera must not look like a
 sick sidecar.
 
+`alert` means a condition the source says still holds, such as low disk. Bernardo
+also sends notices it never clears, `degraded_event` and `watchdog_restart`.
+Those don't change the state: `source:<id>:notices` lists them for 24 hours.
+
 `/v1/capabilities` gains `external_sources: {enabled, sources: [{id, kind,
 name, enabled, healthy, subjects, media}]}` so the app only shows the
 Wildlife camera section when a source is actually there.

@@ -45,6 +45,8 @@ DEBOUNCE_S = 2.0
 FOLLOWUP_S = 90.0
 PRUNE_INTERVAL_S = 3600.0
 _DEFAULT_POLL_LIMIT = 50
+#: How long a one-shot notice stays listed in health.
+NOTICE_RECENT_S = 24 * 3600.0
 
 
 @dataclasses.dataclass
@@ -58,6 +60,8 @@ class _SourceRuntime:
     state_payload: dict[str, Any] | None = None
     state_at: float | None = None
     alerts: dict[str, dict[str, Any]] = dataclasses.field(default_factory=dict)
+    #: One-shot notices by code, newest of each: {"code", "message", "at"}.
+    notices: dict[str, dict[str, Any]] = dataclasses.field(default_factory=dict)
     last_event_start: float | None = None
     persisted_state: dict[str, Any] | None = None
 
@@ -162,13 +166,36 @@ class ExternalSourceService:
         except Exception:
             logger.exception("external sources: could not load persisted state")
             return
+        moved: list[tuple[str, str, dict[str, Any], float]] = []
         for sid, rows in loaded.items():
             rt = self._rt[sid]
-            for key, (value, _at) in rows.items():
+            for key, (value, at) in rows.items():
                 if key.startswith("alert:") and isinstance(value, dict) and value.get("active"):
-                    rt.alerts[key[6:]] = value
+                    code = key[6:]
+                    if self._is_one_shot(sid, code):
+                        # Stored before one-shot notices stopped latching.
+                        notice = {"code": code, "message": str(value.get("message") or "")}
+                        rt.notices[code] = {**notice, "at": at}
+                        moved.append((sid, code, notice, at))
+                    else:
+                        rt.alerts[code] = value
+                elif key.startswith("notice:") and isinstance(value, dict):
+                    rt.notices[key[7:]] = {**value, "at": at}
                 elif key == "state" and isinstance(value, dict):
                     rt.persisted_state = value
+
+        def _move(conn: Any) -> None:
+            for sid, code, notice, at in moved:
+                store.set_state(conn, sid, f"notice:{code}", notice, at)
+                store.delete_state(conn, sid, f"alert:{code}")
+
+        if moved:
+            await self._persist(_move)
+
+    def _is_one_shot(self, source_id: str, code: str) -> bool:
+        """True for a code the source sends once and never clears: an event in
+        the past, not a condition that still holds."""
+        return code in getattr(self._by_id.get(source_id), "one_shot_alerts", ())
 
     # ----------------------------------------------------------------- polling
 
@@ -349,7 +376,13 @@ class ExternalSourceService:
             )
         elif isinstance(signal, AlertSignal):
             key = f"alert:{signal.code}"
-            if signal.active:
+            if signal.active and self._is_one_shot(sid, signal.code):
+                notice = {"code": signal.code, "message": signal.message}
+                rt.notices[signal.code] = {**notice, "at": now}
+                await self._persist(
+                    lambda c: store.set_state(c, sid, f"notice:{signal.code}", notice, now)
+                )
+            elif signal.active:
                 value = {"code": signal.code, "message": signal.message, "active": True}
                 rt.alerts[signal.code] = value
                 await self._persist(lambda c: store.set_state(c, sid, key, value, now))
@@ -416,6 +449,11 @@ class ExternalSourceService:
             else max(0.0, now - rt.last_event_start),
             "state_age_s": None if rt.state_at is None else max(0.0, now - rt.state_at),
             "alerts": sorted(rt.alerts),
+            "notices": [
+                n["message"] or n["code"]
+                for n in sorted(rt.notices.values(), key=lambda n: n["at"], reverse=True)
+                if now - n["at"] <= NOTICE_RECENT_S
+            ],
         }
 
     def health_checks(self) -> dict[str, Any]:
@@ -427,6 +465,7 @@ class ExternalSourceService:
             out[f"source:{sid}:last_event_age_s"] = h.get("last_event_age_s")
             out[f"source:{sid}:state_age_s"] = h.get("state_age_s")
             out[f"source:{sid}:alerts"] = h.get("alerts", [])
+            out[f"source:{sid}:notices"] = h.get("notices", [])
         return out
 
     def capabilities(self) -> dict[str, Any]:
