@@ -470,6 +470,31 @@ class MergeResult:
     carried_name: str | None
 
 
+def _repoint_dismissals(conn: sqlite3.Connection, source_id: int, into_id: int) -> None:
+    """Rewrite merge dismissals naming `source_id` to name `into_id` (low id
+    first), dropping the pair that would become (into, into) and ignoring
+    duplicates. Must run before the source row is deleted: the delete trigger
+    removes dismissals naming the deleted cluster."""
+    rows = conn.execute(
+        "SELECT id_low, id_high, dismissed_at FROM face_merge_dismissals "
+        "WHERE id_low = ? OR id_high = ?",
+        (source_id, source_id),
+    ).fetchall()
+    for r in rows:
+        other = int(r["id_high"]) if int(r["id_low"]) == source_id else int(r["id_low"])
+        if other == into_id:
+            continue
+        conn.execute(
+            "INSERT OR IGNORE INTO face_merge_dismissals (id_low, id_high, dismissed_at) "
+            "VALUES (?, ?, ?)",
+            (min(other, into_id), max(other, into_id), r["dismissed_at"]),
+        )
+    conn.execute(
+        "DELETE FROM face_merge_dismissals WHERE id_low = ? OR id_high = ?",
+        (source_id, source_id),
+    )
+
+
 def merge_clusters(
     conn: sqlite3.Connection,
     source_id: int,
@@ -521,6 +546,7 @@ def merge_clusters(
         "VALUES (?, ?, ?)",
         (source_id, into_id, time.time() if now is None else now),
     )
+    _repoint_dismissals(conn, source_id, into_id)
     conn.execute("DELETE FROM face_clusters WHERE cluster_id = ?", (source_id,))
     # Count falls back to the sum when no stored embedding lets the rebuild
     # recompute it; last_seen_at is never touched by rebuild_centroid.

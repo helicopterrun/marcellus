@@ -350,7 +350,9 @@ def results(conn: sqlite3.Connection) -> dict[str, Any]:
     for r in rows:
         if r["label"] not in LABELS:
             continue
-        d = float(r["distance"])
+        # Embeddings can give a tiny negative (-1e-16); clamp so the pair still
+        # lands in the first band instead of falling out of every one.
+        d = max(0.0, float(r["distance"]))
         for band in bands:
             if band["lo"] <= d < band["hi"]:
                 band[str(r["label"])] += 1

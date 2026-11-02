@@ -500,6 +500,25 @@ BEGIN
     DELETE FROM face_cluster_redirects WHERE new_id = OLD.cluster_id;
 END;
 
+-- Merge dismissals: a person said these two identities are NOT the same, so
+-- merge suggestions never offer the pair again. Stored low id first. A merge
+-- repoints rows naming its source at the survivor BEFORE deleting the source
+-- (the identity stays ruled out against whoever it was ruled out from); the
+-- trigger drops rows naming a deleted cluster, whichever code path deleted it.
+CREATE TABLE IF NOT EXISTS face_merge_dismissals (
+    id_low       INTEGER NOT NULL,
+    id_high      INTEGER NOT NULL,
+    dismissed_at REAL NOT NULL,
+    PRIMARY KEY (id_low, id_high)
+);
+CREATE INDEX IF NOT EXISTS idx_face_dismissal_high ON face_merge_dismissals(id_high);
+CREATE TRIGGER IF NOT EXISTS trg_face_merge_dismissal_cleanup
+AFTER DELETE ON face_clusters
+BEGIN
+    DELETE FROM face_merge_dismissals
+     WHERE id_low = OLD.cluster_id OR id_high = OLD.cluster_id;
+END;
+
 -- Blind face-pair labelling (faces/accuracy.py): pairs of EVENTS a person marks
 -- same / different without seeing what the model thinks. kind: split ("is this
 -- ID a duplicate of another?") | join ("is this sighting really this ID?").

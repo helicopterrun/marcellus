@@ -88,6 +88,9 @@ class PeopleCapabilities(_Wire):
     enabled: bool
     filters: list[str]
     sorts: list[str]
+    #: `GET /v1/people/merge-suggestions` and its `.../dismiss` exist (additive;
+    #: absent on older sidecars, false while `enabled` is false).
+    merge_suggestions: bool
 
 
 class ExternalSourceCapability(_Wire):
@@ -679,6 +682,28 @@ class PersonSightingPatchResponse(_Wire):
 
 class PeopleOkResponse(_Wire):
     ok: bool
+
+
+class MergeSuggestion(_Wire):
+    #: Full Person wires (2+). Merge every member except `survivor` into it.
+    members: list[Person]
+    #: The member to keep: for a named match, the named one; else most sightings.
+    survivor: int
+    #: Two members were seen on one camera within minutes of each other.
+    same_visit: bool
+    #: Widest centroid cosine distance in the suggestion.
+    max_distance: float
+
+
+class MergeSuggestionsResponse(_Wire):
+    threshold: float
+    suggestions: list[MergeSuggestion]
+
+
+class MergeDismissResponse(_Wire):
+    ok: bool
+    #: Pairs recorded (all pairs among the ids, including already-known ones).
+    dismissed: int
 
 
 class EncounterWithPeople(EncounterSummary):

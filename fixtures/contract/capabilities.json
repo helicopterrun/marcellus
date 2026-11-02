@@ -42,6 +42,7 @@
       "new",
       "followed"
     ],
+    "merge_suggestions": true,
     "sorts": [
       "recent",
       "days"

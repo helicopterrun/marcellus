@@ -194,7 +194,8 @@ def _encounters_capabilities(settings: Any) -> dict[str, Any]:
 def _people_capabilities(settings: Any) -> dict[str, Any]:
     """`people` block of `/v1/capabilities`: `enabled` mirrors
     `face_enrich.enabled`; `filters` / `sorts` list what `GET /v1/people`
-    accepts (empty while disabled)."""
+    accepts (empty while disabled); `merge_suggestions` says the merge
+    suggestion routes exist (same gate as `enabled`)."""
     from marcellus.faces import people
 
     enabled = bool(settings.face_enrich.enabled)
@@ -202,6 +203,7 @@ def _people_capabilities(settings: Any) -> dict[str, Any]:
         "enabled": enabled,
         "filters": list(people.FILTERS) if enabled else [],
         "sorts": list(people.SORTS) if enabled else [],
+        "merge_suggestions": enabled,
     }
 
 

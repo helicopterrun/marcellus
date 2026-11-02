@@ -369,6 +369,13 @@ def test_empty_table_has_no_results(rig: Rig) -> None:
     assert st == {"total": 0, "done": 0, "pair": None, "results": None}
 
 
+def test_tiny_negative_distance_lands_in_first_band(rig: Rig) -> None:
+    insert_pair(rig, "split", "a", "b", 1, 2, -1e-16, "different")
+    bands = accuracy.results(rig.conn)["bands"]
+    assert bands[0]["lo"] == 0.0 and bands[0]["different"] == 1
+    assert sum(b["different"] for b in bands) == 1
+
+
 def test_rates_and_no_data(rig: Rig) -> None:
     insert_pair(rig, "split", "a", "b", 1, 2, 0.3, "same")
     insert_pair(rig, "split", "c", "d", 1, 2, 0.3, "different")
