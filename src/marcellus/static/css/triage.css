@@ -1226,7 +1226,6 @@ body.map-full-open .me-toolbar {
   font-size: var(--text-sm); text-decoration: none;
 }
 .id-more:hover { color: var(--text); border-color: var(--muted-2); }
-@media (max-width: 720px) { .id-sighting, .id-more { width: 120px; } }
 
 /* Lightbox face stack: best face first and framed; dimmed = not used. */
 .id-lb-faces { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; width: min(88vw, 820px); }
@@ -1337,7 +1336,7 @@ body.map-full-open .me-toolbar {
   .id-name-form { flex: 1; }
   .id-name-form .cluster-name { flex: 1; width: auto; min-height: 44px; font-size: 16px; }
   .id-name-form .btn, .id-menu > summary, .id-similar { min-height: 44px; }
-  .id-sighting, .id-more { width: 84px; }
+  .id-sighting, .id-more { width: 120px; }
   .id-evict { opacity: 1; width: 32px; height: 32px; }
   .fc-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: var(--space-2); }
   .fc-actions .btn { min-height: 44px; }
