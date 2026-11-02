@@ -59,7 +59,6 @@ from marcellus.routes import push_settings as push_settings_routes
 from marcellus.routes import replay as replay_routes
 from marcellus.routes import score_histogram as score_histogram_routes
 from marcellus.routes import scrub as scrub_routes
-from marcellus.routes import scrub_ui as scrub_ui_routes
 from marcellus.routes import search as search_routes
 from marcellus.routes import settings_page as settings_page_routes
 from marcellus.routes import sources as sources_routes
@@ -906,7 +905,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.mount("/static", _CachedStaticFiles(directory=str(_STATIC_DIR)), name="static")
     app.include_router(health_routes.router)
     app.include_router(status_routes.router)
-    app.include_router(scrub_ui_routes.router)
     app.include_router(debug_routes.router)
     app.include_router(zone_hits_routes.router)
     app.include_router(triage_routes.router)
