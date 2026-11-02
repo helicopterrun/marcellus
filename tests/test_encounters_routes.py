@@ -3,6 +3,7 @@ the wire models, adjacency endpoint (docs/encounters.md "Tests" section)."""
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -495,3 +496,86 @@ def test_capabilities_encounters_block(settings: Settings, tmp_path: Path) -> No
         "tags": True,
         "filters": ["tag", "label", "place", "camera"],
     }
+
+
+# ---- batching, plain wording, times -------------------------------------
+
+
+def _seed_many(settings: Settings, n: int, camera: str = "alley-wide") -> None:
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    now = time.time()
+    try:
+        for i in range(n):
+            atom = Atom(
+                atom_id=f"bulk{i}",
+                camera=camera,
+                start_time=now - 3600 - i * 600,
+                end_time=now - 3590 - i * 600,
+                labels=("person",),
+                zones=(),
+                event_ids=(f"ev-bulk{i}",),
+                sub_labels=(),
+                severity="alert",
+            )
+            upsert_atom(conn, atom, LinkDecision(None, "new", 1.0), now)
+    finally:
+        conn.close()
+
+
+def test_encounters_page_caps_rows_and_offers_show_more(
+    client: TestClient, settings: Settings
+) -> None:
+    _seed_many(settings, 30)
+    html = client.get("/encounters", params={"camera": "alley-wide"}).text
+    assert html.count('class="capture-visit enc-row"') == 25
+    assert "Show more" in html
+    assert "25 of 30 encounters" in html
+    # Filters preserved, limit grown, lands on the first new row.
+    assert "camera=alley-wide" in html and "limit=50" in html and "#enc-" in html
+    full = client.get("/encounters", params={"camera": "alley-wide", "limit": 50}).text
+    assert full.count('class="capture-visit enc-row"') == 30
+    assert "Show more" not in full
+    assert "30 encounters" in full
+
+
+def test_encounters_page_no_show_more_when_all_fit(
+    client: TestClient, settings: Settings
+) -> None:
+    _seed_many(settings, 3)
+    html = client.get("/encounters").text
+    assert "Show more" not in html
+    assert "3 encounters" in html
+
+
+def test_encounters_page_out_of_range_limit_is_clamped(
+    client: TestClient, settings: Settings
+) -> None:
+    _seed_many(settings, 2)
+    for limit in ("0", "-5", "999999"):
+        r = client.get("/encounters", params={"limit": limit})
+        assert r.status_code == 200, limit
+
+
+def test_encounter_pages_say_sighting_not_atom(
+    client: TestClient, settings: Settings
+) -> None:
+    enc_id = _seed_encounter(settings)
+    for path in ("/encounters", f"/encounters/{enc_id}"):
+        text = client.get(path).text
+        visible = re.sub(r"<[^>]+>", " ", text)  # drop tags and their hrefs
+        assert not re.search(r"\batoms?\b", visible, re.I), path
+    assert "1 sighting" in client.get("/encounters").text
+
+
+def test_encounters_page_times_are_localisable(
+    client: TestClient, settings: Settings
+) -> None:
+    _seed_encounter(settings)
+    html = client.get("/encounters").text
+    assert '<time data-ts="' in html and 'data-fmt="when"' in html
+
+
+def test_encounters_adjacency_is_a_closed_details(client: TestClient) -> None:
+    html = client.get("/encounters").text
+    assert '<details class="capture-visit enc-adjacency">' in html
+    assert 'href="/settings#encounters"' in html

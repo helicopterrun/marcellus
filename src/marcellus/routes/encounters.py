@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import time
 from typing import Any, Literal
-from urllib.parse import parse_qsl, quote
+from urllib.parse import parse_qsl, quote, urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -35,6 +35,8 @@ v1_router = APIRouter(prefix="/v1", tags=["v1"])
 #: HTML page default window.
 _DEFAULT_WINDOW_S = 48 * 3600.0
 _MAX_LIMIT = 500
+#: HTML list: first batch, and how much each "Show more" adds.
+_PAGE_BATCH = 25
 
 
 def _csv(value: str | None) -> list[str]:
@@ -168,27 +170,50 @@ def _flash_redirect(path: str, msg: str) -> RedirectResponse:
 
 @router.get("/encounters", response_class=HTMLResponse)
 async def encounters_page(
-    request: Request, camera: str | None = None, since: float | None = None, msg: str | None = None
+    request: Request,
+    camera: str | None = None,
+    since: float | None = None,
+    msg: str | None = None,
+    limit: int = _PAGE_BATCH,
 ) -> Any:
     settings = _settings(request)
     window_since = since if since is not None else time.time() - _DEFAULT_WINDOW_S
+    # Out-of-range values are clamped, not rejected: this is a page, and a
+    # hand-edited URL should still render something.
+    limit = max(1, min(int(limit), _MAX_LIMIT))
 
-    def _load(conn: Any) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
-        rows = store.list_recent(conn, since=window_since, limit=200, camera=camera)
-        by_encounter = store.members_for(conn, [r["id"] for r in rows])
-        return [(row, by_encounter[row["id"]]) for row in rows]
+    def _load(
+        conn: Any,
+    ) -> tuple[list[tuple[dict[str, Any], list[dict[str, Any]]]], int, list[dict[str, Any]]]:
+        # One extra row tells us whether "Show more" has anything to show and
+        # which row it should land on.
+        rows = store.list_recent(conn, since=window_since, limit=limit + 1, camera=camera)
+        total = store.count_recent(conn, since=window_since, camera=camera)
+        by_encounter = store.members_for(conn, [r["id"] for r in rows[:limit]])
+        return [(row, by_encounter[row["id"]]) for row in rows[:limit]], total, rows[limit:]
 
-    loaded = await db.with_sidecar(settings.sidecar.db_path, _load)
+    loaded, total, extra = await db.with_sidecar(settings.sidecar.db_path, _load)
     encounters = [
         dict(_summary(row, member_rows), members=[_member(m) for m in member_rows])
         for row, member_rows in loaded
     ]
+    more_href = None
+    if extra and limit < _MAX_LIMIT:
+        query: dict[str, Any] = {}
+        if camera:
+            query["camera"] = camera
+        if since is not None:
+            query["since"] = since
+        query["limit"] = min(limit + _PAGE_BATCH, _MAX_LIMIT)
+        more_href = f"/encounters?{urlencode(query)}#enc-{extra[0]['id']}"
     external_sightings = await _external_sightings(request, window_since)
     return _templates(request).TemplateResponse(
         request,
         "encounters.html",
         {
             "encounters": encounters,
+            "total": total,
+            "more_href": more_href,
             "camera": camera or "",
             "since": window_since,
             "enabled": settings.encounters.enabled,
@@ -439,7 +464,9 @@ async def merge_encounters_page(encounter_id: str, request: Request) -> Any:
         count = await db.with_sidecar(settings.sidecar.db_path, _do)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=error_detail("invalid", str(exc))) from exc
-    return _flash_redirect(f"/encounters/{encounter_id}", f"Merged {count} atom(s) from {source}")
+    return _flash_redirect(
+        f"/encounters/{encounter_id}", f"Merged {count} sighting(s) from {source}"
+    )
 
 
 @router.post("/encounters/{encounter_id}/atoms/{atom_id}/undo")

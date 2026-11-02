@@ -1,12 +1,14 @@
 {# Shared header with cross-page nav, included by base.html's header block.
    Templates set `active_page` to one of: 'status', 'inbox', 'triage',
    'encounters', 'map', 'settings', 'replay', 'guide', 'debug', 'toybox',
-   'cameras', or one of the People/Tuning pages listed in `_people_pages` /
-   `_tuning_pages` below. #}
+   'cameras', 'tuning', or one of the People/Tuning pages listed in
+   `_people_pages` / `_tuning_pages` below. The Tools dropdown (desktop) and
+   Tools group (phone More sheet) hold Tuning, Wildlife, Replay, Guide and
+   Debug; the five tuning pages are tabs under /tuning, not menu items. #}
 {% set _active = active_page|default('') %}
 {% set _people_pages = ('face_captures', 'enrich') %}
-{% set _tuning_pages = ('score_histogram', 'motion', 'fps_budget', 'placement', 'zone_hits', 'wildlife') %}
-{% set _tools_pages = _tuning_pages + ('replay', 'guide', 'debug', 'toybox') %}
+{% set _tuning_pages = ('tuning', 'score_histogram', 'motion', 'fps_budget', 'placement', 'zone_hits') %}
+{% set _tools_pages = _tuning_pages + ('wildlife', 'replay', 'guide', 'debug', 'toybox') %}
 {# Inline icon sprite: line icons on currentColor, echoing the app's SF
    Symbols vocabulary (server.rack, film.stack, checklist, video, map). #}
 <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
@@ -51,11 +53,7 @@
     <details class="nav-group">
       <summary class="page-link{% if _active in _tools_pages %} active{% endif %}"{% if _active in _tools_pages %} aria-current="page"{% endif %}>Tools</summary>
       <div class="nav-drop">
-        <a href="/score-histogram" class="page-link{% if _active == 'score_histogram' %} active{% endif %}"{% if _active == 'score_histogram' %} aria-current="page"{% endif %}>Scores</a>
-        <a href="/motion" class="page-link{% if _active == 'motion' %} active{% endif %}"{% if _active == 'motion' %} aria-current="page"{% endif %}>Motion</a>
-        <a href="/fps-budget" class="page-link{% if _active == 'fps_budget' %} active{% endif %}"{% if _active == 'fps_budget' %} aria-current="page"{% endif %}>FPS budget</a>
-        <a href="/zone-hits" class="page-link{% if _active == 'zone_hits' %} active{% endif %}"{% if _active == 'zone_hits' %} aria-current="page"{% endif %}>Zone hits</a>
-        <a href="/placement" class="page-link{% if _active == 'placement' %} active{% endif %}"{% if _active == 'placement' %} aria-current="page"{% endif %}>Placement</a>
+        <a href="/tuning" class="page-link{% if _active in _tuning_pages %} active{% endif %}"{% if _active in _tuning_pages %} aria-current="page"{% endif %}>Tuning</a>
         <a href="/wildlife" class="page-link{% if _active == 'wildlife' %} active{% endif %}"{% if _active == 'wildlife' %} aria-current="page"{% endif %}>Wildlife</a>
         <div class="nav-sep" role="separator"></div>
         <a href="/replay" class="page-link{% if _active == 'replay' %} active{% endif %}"{% if _active == 'replay' %} aria-current="page"{% endif %}>Replay</a>
@@ -98,16 +96,9 @@
     <a href="/settings" class="page-link">Settings</a>
   </div>
   <div class="more-group">
-    <div class="more-heading">Tuning</div>
-    <a href="/score-histogram" class="page-link">Scores</a>
-    <a href="/motion" class="page-link">Motion</a>
-    <a href="/fps-budget" class="page-link">FPS budget</a>
-    <a href="/zone-hits" class="page-link">Zone hits</a>
-    <a href="/placement" class="page-link">Placement</a>
-    <a href="/wildlife" class="page-link">Wildlife</a>
-  </div>
-  <div class="more-group">
     <div class="more-heading">Tools</div>
+    <a href="/tuning" class="page-link">Tuning</a>
+    <a href="/wildlife" class="page-link">Wildlife</a>
     <a href="/replay" class="page-link">Replay</a>
     <a href="/guide" class="page-link">Guide</a>
     <a href="/debug" class="page-link">Debug</a>

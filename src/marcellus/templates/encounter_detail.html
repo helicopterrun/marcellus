@@ -9,8 +9,8 @@
     <a href="/encounters" class="page-link">&larr; Encounters</a>
     <span class="badge {{ 'ok' if encounter.sealed else 'recognized' }}">{{ 'sealed' if encounter.sealed else 'open' }}</span>
     <span class="mode">
-      {{ fmt_ts(encounter.start) }} &middot; {{ fmt_duration(encounter.start, encounter.end) if encounter.end else 'ongoing' }}
-      &middot; {{ encounter.atom_count }} atom{{ 's' if encounter.atom_count != 1 else '' }}
+      <time data-ts="{{ encounter.start }}" data-fmt="when">{{ fmt_ts(encounter.start) }}</time> &middot; {{ fmt_duration(encounter.start, encounter.end) if encounter.end else 'ongoing' }}
+      &middot; {{ encounter.atom_count }} sighting{{ 's' if encounter.atom_count != 1 else '' }}
     </span>
   </div>
 
@@ -36,7 +36,7 @@
       {% for m in members %}
         <tr>
           <td>{{ m.camera }}</td>
-          <td>{{ fmt_ts(m.start) }}{% if m.end %} &ndash; {{ fmt_duration(m.start, m.end) }}{% endif %}</td>
+          <td><time data-ts="{{ m.start }}" data-fmt="when">{{ fmt_ts(m.start) }}</time>{% if m.end %} &ndash; {{ fmt_duration(m.start, m.end) }}{% endif %}</td>
           <td>{{ m.labels|join(', ') }}</td>
           <td>{{ m.zones|join(', ') }}{% if m.direction %} <span class="badge">{{ m.direction }}</span>{% endif %}</td>
           <td>{{ m.link_reason }}</td>

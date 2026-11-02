@@ -192,9 +192,34 @@ def test_single_cluster_view_and_missing_cluster(client: TestClient) -> None:
 def test_pagination_offers_show_more(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The batch is "every named person, then N unnamed": with N = 1 and two
+    # unnamed clusters (#2 plus a busier one), the first page cuts one off.
     monkeypatch.setattr(enrich_routes, "_PAGE_SIZE", 1)
-    assert "Show more" in client.get("/enrich/clusters").text
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    busier = _add_cluster(settings, None, 3, "ev-busier")  # sorts ahead of #2
+    first = client.get("/enrich/clusters").text
+    assert "Show more" in first
+    assert "alice" in first  # named people are never cut
+    # The link keeps the view and lands on the first NEW card.
+    assert "page=2" in first and "#cluster-2" in first
+    assert f'id="cluster-{busier}"' in first and 'id="cluster-2"' not in first
     assert "Show more" not in client.get("/enrich/clusters?page=2").text
+
+
+def test_named_people_are_never_batched_away(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(enrich_routes, "_PAGE_SIZE", 1)
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    named = [_add_cluster(settings, f"person{i}", 1, f"ev-n{i}") for i in range(3)]
+    html = client.get("/enrich/clusters").text
+    for cid in named:
+        assert f'id="cluster-{cid}"' in html
+
+
+def test_out_of_range_page_does_not_error(client: TestClient) -> None:
+    for page in ("0", "-3", "100000"):
+        assert client.get(f"/enrich/clusters?page={page}").status_code == 200, page
 
 
 def test_cluster_index_lists_every_cluster_with_an_avatar(client: TestClient) -> None:

@@ -1091,7 +1091,12 @@ body.map-full-open .me-toolbar {
   padding: var(--space-6) var(--space-4); text-align: center; color: var(--muted);
   border: 1px dashed var(--stroke); border-radius: var(--radius-lg);
 }
-.pp-more { display: flex; justify-content: center; margin: var(--space-4) 0; }
+.pp-more { display: flex; justify-content: center; align-items: center; gap: var(--space-3); margin: var(--space-4) 0; }
+.pp-more-n { color: var(--muted); font-size: var(--text-sm); }
+.tuning-list { list-style: none; margin: 0; padding: 0; }
+.tuning-item { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); align-items: baseline; padding: var(--space-3) 0; border-bottom: 1px solid var(--stroke); }
+.tuning-name { flex: 0 0 9rem; font-weight: 600; font-size: var(--text-lg); }
+.tuning-desc { flex: 1 1 20rem; color: var(--muted); font-size: var(--text-base); line-height: 1.5; }
 
 /* Shared lightbox (util.js SC.lightbox). */
 .sc-lightbox {
@@ -1615,6 +1620,11 @@ body.map-full-open .me-toolbar {
    .capture-visit/.faces-bar/.badge tokens enrich.html established. */
 .enc-filter { display: flex; gap: 8px; align-items: center; }
 .enc-chips { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 .6rem .6rem; }
+.enc-adjacency > summary {
+  display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; cursor: pointer;
+  padding: .4rem .6rem; font-size: .9rem;
+}
+.enc-adjacency[open] > summary { border-bottom: 1px solid var(--line, #333); }
 .enc-members { padding: 0 .6rem .6rem; }
 .enc-members summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .enc-member-table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; }

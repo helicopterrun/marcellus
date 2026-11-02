@@ -68,6 +68,7 @@ from marcellus.routes import topology as topology_routes
 from marcellus.routes import toybox as toybox_routes
 from marcellus.routes import triage as triage_routes
 from marcellus.routes import tuning as tuning_routes
+from marcellus.routes import tuning_page as tuning_page_routes
 from marcellus.routes import wildlife as wildlife_routes
 from marcellus.routes import zone_hits as zone_hits_routes
 from marcellus.scrub.lock import ScrubCacheLock, ScrubLockHeld
@@ -920,6 +921,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(score_histogram_routes.router)
     app.include_router(fps_budget_routes.router)
     app.include_router(placement_routes.router)
+    app.include_router(tuning_page_routes.router)
     app.include_router(analysis_routes.router)
     app.include_router(face_capture_routes.router)
     app.include_router(wildlife_routes.router)
