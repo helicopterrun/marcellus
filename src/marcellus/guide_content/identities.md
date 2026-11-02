@@ -2,7 +2,7 @@
 title: Identities
 section: people
 order: 2
-routes: ["/enrich/clusters", "/v1/people", "/v1/people/{person_id}", "/v1/people/{person_id}/sightings", "/v1/people/{person_id}/similar", "/v1/people/{person_id}/avatar.jpg", "/v1/people/{person_id}/name", "/v1/people/{person_id}/merge", "/v1/people/{person_id}/follow", "/v1/people/{person_id}/note", "/v1/people/{person_id}/sightings/{event_id}", "/v1/faces/{event_id}/{rank}.jpg", "/v1/people/for-event/{event_id}", "/enrich/merge-proposals.json", "/enrich/clusters/{cluster_id}/faces.json"]
+routes: ["/enrich/clusters", "/enrich/accuracy", "/v1/people", "/v1/people/{person_id}", "/v1/people/{person_id}/sightings", "/v1/people/{person_id}/similar", "/v1/people/{person_id}/avatar.jpg", "/v1/people/{person_id}/name", "/v1/people/{person_id}/merge", "/v1/people/{person_id}/follow", "/v1/people/{person_id}/note", "/v1/people/{person_id}/sightings/{event_id}", "/v1/faces/{event_id}/{rank}.jpg", "/v1/people/for-event/{event_id}", "/enrich/merge-proposals.json", "/enrich/clusters/{cluster_id}/faces.json"]
 config: ["face_enrich"]
 ---
 
@@ -32,10 +32,10 @@ the same moment, so a sharp face capture is one tap from the cluster to name.
 
 A cluster starts **unknown**. The moment you give it a name, it becomes a
 **known person**: future sightings write that name into the Frigate event's
-`sub_label` (visible in Frigate, the Elsinore app, and notifications), and
+`sub_label` (visible in Frigate and the Elsinore app, never in notifications), and
 the name is retro-written onto the cluster's past events still in retention.
 Unnamed clusters that stop appearing expire on their own after
-`cluster_ttl_days`.
+`cluster_ttl_days`, unless you follow them or give them a note in the app.
 
 ## Walkthrough: name your first identity
 
@@ -110,6 +110,23 @@ sightings. Named identities are never proposed. From the host,
 `fsc face-enrich propose-merges` prints the group counts and cluster numbers
 (never names) without touching the running service.
 
+## Accuracy
+
+The **Accuracy** tab measures how well recognition is really working. It shows
+two faces at a time and you answer **Same person**, **Different people** or
+**Can't tell** (keys S, D, U; Z goes back). Nothing on the page says what the
+model thinks, and results stay hidden until the batch is done, so your answers
+are a fair test.
+
+Half the pairs ask whether an ID is really a duplicate of another: an ID's
+clearest sighting against the closest face in any other ID. The other half ask
+whether a sighting really belongs to its ID. Results show both rates with a
+likely range, and how often faces were the same person at each distance, which
+is the evidence for changing `cluster_threshold` or `match_threshold`. Labelling
+changes no identity: duplicates and wrong sightings are listed as links for you
+to fix by hand. Deleting a person, or an ID expiring, removes its labelled pairs
+too.
+
 ## Configuration
 
 The `face_enrich:` section (needs the `enrich` install extra): `enabled`,
@@ -148,7 +165,7 @@ sidecar is the sole author of `sub_label`, and two writers would fight.
   once you press **backfill stacks** on the page.
 - `crops_dir` — where the face crops of each enriched event are saved;
   must be writable by the service user. Crops are deleted with their
-  cluster (stale unnamed clusters are reaped after `cluster_ttl_days`).
+  cluster (stale unnamed clusters with no follow or note are reaped after `cluster_ttl_days`).
 - `crop_pad` — margin on each side of the face box, as a fraction of it (default 0.4),
   so the crop shows hair and chin.
 - `crop_max_edge` — longest edge of a stored crop in pixels (default 384);

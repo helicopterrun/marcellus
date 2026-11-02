@@ -500,6 +500,26 @@ BEGIN
     DELETE FROM face_cluster_redirects WHERE new_id = OLD.cluster_id;
 END;
 
+-- Blind face-pair labelling (faces/accuracy.py): pairs of EVENTS a person marks
+-- same / different without seeing what the model thinks. kind: split ("is this
+-- ID a duplicate of another?") | join ("is this sighting really this ID?").
+-- cluster_a/b and distance are as drawn; rows are about event pairs and are
+-- never rewritten by merges (results resolve clusters via the redirects).
+-- label: NULL (pending) | same | different | unsure | gone (a crop vanished).
+CREATE TABLE IF NOT EXISTS face_pair_labels (
+    pair_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL,
+    event_a    TEXT NOT NULL,
+    event_b    TEXT NOT NULL,
+    cluster_a  INTEGER NOT NULL,
+    cluster_b  INTEGER NOT NULL,
+    distance   REAL NOT NULL,
+    same_visit INTEGER NOT NULL,
+    drawn_at   REAL NOT NULL,
+    label      TEXT,
+    labeled_at REAL
+);
+
 -- One row per Frigate person event the enrichment worker has settled or is
 -- retrying — this table IS the queue state: enrich.find_candidates LEFT JOINs
 -- it against Frigate's event table over a lookback window (crosscam's

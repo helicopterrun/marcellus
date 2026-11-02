@@ -1066,7 +1066,7 @@ body.map-full-open .me-toolbar {
 
 /* --- People pages (/enrich/clusters, /faces/captures) --- */
 .pp { max-width: 1400px; }
-.pp-tabs { display: flex; gap: 4px; margin-bottom: var(--space-3); border-bottom: 1px solid var(--stroke); }
+.pp-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: var(--space-3); border-bottom: 1px solid var(--stroke); }
 .pp-tab {
   padding: 8px 14px; color: var(--muted); text-decoration: none; font-size: var(--text-lg);
   font-weight: 600; border-bottom: 2px solid transparent; margin-bottom: -1px;
@@ -1768,3 +1768,28 @@ body.map-full-open .me-toolbar {
   .ib-actions button, .ib-wrong button { min-height: 48px; font-size: 14px; }
   .ib-bar { width: 100px; }
 }
+
+/* --- Accuracy (/enrich/accuracy): blind face-pair labelling --- */
+.fa-progress { margin: 0 0 var(--space-2); color: var(--muted); font-family: var(--font-mono); }
+.fa-faces { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin-bottom: var(--space-3); }
+.fa-side { min-width: 0; display: flex; flex-direction: column; gap: var(--space-2); align-items: center; }
+.fa-main { width: 100%; max-width: 45vw; aspect-ratio: 1; object-fit: cover; border-radius: var(--radius-sm); background: var(--surface-2); }
+.fa-thumbs { display: flex; gap: var(--space-2); justify-content: center; }
+.fa-thumb { width: 64px; height: 64px; object-fit: cover; border-radius: var(--radius-sm); background: var(--surface-2); }
+.fa-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.fa-btn { flex: 1 1 140px; min-height: 48px; padding: 10px 8px; border: 0; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: var(--text-sm); font-weight: 600; cursor: pointer; background: var(--btn-neutral); color: var(--text); }
+.fa-btn:hover:not(:disabled) { filter: brightness(1.2); }
+.fa-btn:disabled { opacity: .45; cursor: default; }
+.fa-btn kbd { opacity: .7; font-family: inherit; font-weight: 400; }
+.fa-same { background: var(--ok-bg); color: var(--ok-text); }
+.fa-diff { background: var(--danger-bg); color: var(--danger-text); }
+.fa-error { color: var(--danger); margin: 0 0 var(--space-3); }
+.fa-h { font-size: var(--text-lg); margin: var(--space-4) 0 var(--space-2); }
+.fa-summary { padding-left: var(--space-4); line-height: 1.6; }
+.fa-table { border-collapse: collapse; width: 100%; max-width: 480px; margin: var(--space-3) 0; font-family: var(--font-mono); font-size: var(--text-sm); }
+.fa-table th, .fa-table td { padding: 4px 8px; text-align: right; border-bottom: 1px solid var(--stroke); }
+.fa-table th:first-child, .fa-table td:first-child { text-align: left; }
+.fa-links { padding-left: var(--space-4); line-height: 1.8; }
+.fa-links a { color: var(--accent); }
+.fa-links li:has(.fa-wrong) { list-style: none; margin-left: calc(-1 * var(--space-4)); }
+.fa-wrong { display: flex; gap: var(--space-2); margin-bottom: var(--space-1); }

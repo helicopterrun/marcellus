@@ -120,7 +120,7 @@ face_enrich:
   min_quality: 0.15
   match_threshold: 0.45       # cosine distance to a NAMED cluster -> sub_label
   cluster_threshold: 0.55     # cosine distance to join an unnamed cluster
-  cluster_ttl_days: 60        # unnamed clusters expire; named ones never do
+  cluster_ttl_days: 60        # unnamed clusters expire; named, followed and noted ones never do
   model_dir: /opt/marcellus/data/models   # buffalo_l cache, ~300 MB
   max_events_per_cycle: 10
   max_attempts: 3
