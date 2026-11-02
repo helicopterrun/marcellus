@@ -80,6 +80,12 @@
     setCell("scrub", s.scrub.enabled ? "on" : "off", s.scrub.enabled ? "ok" : "muted");
     setCell("push", s.push.enabled ? "on" : "off", s.push.enabled ? "ok" : "muted");
     setCell("devices", String(s.push.device_count));
+    var rec = s.recording || {};
+    var recStalled = rec.stalled || [];
+    setCell("recording", !rec.enabled ? "off" : recStalled.length ? recStalled.length + " stalled" : "ok",
+      !rec.enabled ? "muted" : recStalled.length ? "noise" : "ok");
+    var recDetail = document.querySelector('[data-k="recording-detail"]');
+    if (recDetail) recDetail.textContent = recStalled.map(function (c) { return c.camera; }).join(", ");
     setCell("last-cycle", s.scrub.last_cycle_s_ago !== null && s.scrub.last_cycle_s_ago !== undefined
       ? s.scrub.last_cycle_s_ago + "s ago" : "—");
     if (s.scrub.sheet_count !== undefined) setCell("sheets", String(s.scrub.sheet_count));

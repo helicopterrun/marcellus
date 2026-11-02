@@ -380,6 +380,13 @@ async def healthz(request: Request) -> JSONResponse:
             if protect_last_ring_at is not None:
                 checks["unifi_protect_last_ring_age_s"] = round(now - protect_last_ring_at, 1)
 
+    # Informational only, like `frigate`: cameras that stopped recording are
+    # an alert for a person, never a reason to 503 (and so restart) the
+    # sidecar. Absent when the watcher is disabled.
+    recording_watcher = getattr(app.state, "recording_watcher", None)
+    if settings.recording_watch.enabled and recording_watcher is not None:
+        checks["recording"] = recording_watcher.health(now)
+
     body: dict[str, Any] = {"status": "ok" if ok else "degraded", "checks": checks}
     if reason is not None:
         body["reason"] = reason

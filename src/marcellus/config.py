@@ -548,6 +548,30 @@ class WatchdogSection(BaseModel):
     max_restarts_per_hour: int = 3
 
 
+class RecordingWatchSection(BaseModel):
+    """The camera-stopped-recording watcher (`recording_watch.py`).
+
+    Frigate can keep detecting while its record stream delivers no video
+    (2026-10-30: five cameras lost recording for up to 18 hours while
+    `/api/stats` looked healthy), so the only reliable signal is the age of a
+    camera's newest row in Frigate's `recordings` table: 5 to 15 s when healthy.
+    Detection (healthz, the Status page) runs whenever `enabled`; the push card
+    additionally needs `notify` and push delivery on.
+    """
+
+    enabled: bool = True
+    # Send the single "Cameras not recording" system card. Independent of
+    # `enabled`: false keeps detection, /healthz and the Status page.
+    notify: bool = True
+    # Seconds between checks.
+    interval_s: float = 30.0
+    # A watched camera is stalled once its newest segment ended this long ago.
+    stall_after_s: float = 300.0
+    # A stalled camera counts as recovered only when its newest segment is
+    # this fresh. Between the two thresholds nothing changes: no flapping.
+    recover_within_s: float = 60.0
+
+
 class ScrubSection(BaseModel):
     """Uniform-cadence sprite-sheet scrub cache (docs/scrub-cache-and-proxy-spec.md).
 
@@ -1538,6 +1562,7 @@ class Settings(BaseSettings):
     triage: TriageSection = Field(default_factory=TriageSection)
     watchdog: WatchdogSection = Field(default_factory=WatchdogSection)
     scrub: ScrubSection = Field(default_factory=ScrubSection)
+    recording_watch: RecordingWatchSection = Field(default_factory=RecordingWatchSection)
     proxy: ProxySection = Field(default_factory=ProxySection)
     push: PushSection = Field(default_factory=PushSection)
     encounters: EncountersSection = Field(default_factory=EncountersSection)

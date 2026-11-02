@@ -239,6 +239,18 @@ def mark_kept_rows(
     conn.commit()
 
 
+def touch_card(conn: sqlite3.Connection, card_key: str, *, now: float) -> None:
+    """Bump an open card's `updated_at` without changing anything else: the
+    heartbeat of a long-lived system card, which `close_stale_cards` would
+    otherwise close after `push.card_resolution_s` of silence."""
+    conn.execute(
+        "UPDATE push_cards SET updated_at = ? "
+        "WHERE card_key = ? AND closed = 0 AND resolved = 0",
+        (now, card_key),
+    )
+    conn.commit()
+
+
 def mark_handled(conn: sqlite3.Connection, card_key: str, *, now: float) -> None:
     conn.execute(
         "UPDATE push_cards SET handled = 1, handled_at = ? WHERE card_key = ?",
