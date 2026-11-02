@@ -162,18 +162,17 @@ def _notification_examples() -> list[dict[str, str]]:
     from marcellus.push.delivery_wire import _copy, _glyph_for
 
     scenarios = [
-        # (subject, label, camera, zone, place, elapsed_s, identity, story)
-        ("stranger", "person", "doorbell", "front_door", "doors", 40, "", ""),
-        ("known", "person", "gate-face", "walkway", "doors", 0, "Sam", ""),
-        ("animal", "dog", "alley-wide", "back_yard", "yard", 130, "", ""),
-        ("thing", "car", "street", "driveway", "yard", 0, "", ""),
+        # (subject, label, camera, zone, place, elapsed_s, story). A known
+        # person reads exactly like a stranger: names never go in alert text.
+        ("stranger", "person", "doorbell", "front_door", "doors", 40, ""),
+        ("known", "person", "gate-face", "walkway", "doors", 0, ""),
+        ("animal", "dog", "alley-wide", "back_yard", "yard", 130, ""),
+        ("thing", "car", "street", "driveway", "yard", 0, ""),
     ]
     emoji = {"person": "🧍", "dog": "🐕", "car": "🚗", "package": "📦"}
     out = []
-    for subject, label, camera, zone, place, elapsed, identity, story in scenarios:
-        primary, secondary = _copy(
-            subject, label, camera, zone, elapsed, identity=identity, story=story
-        )
+    for subject, label, camera, zone, place, elapsed, story in scenarios:
+        primary, secondary = _copy(subject, label, camera, zone, elapsed, story=story)
         level, _ = ladder.base_level(subject, place, zone)
         out.append(
             {

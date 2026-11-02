@@ -40,6 +40,15 @@ configure the ladder in the Elsinore app (Settings → Alerts) and the app's
 choices sync to the sidecar. See your live matrix in
 [Settings → Push](/settings#push).
 
+## Names never leave your server
+
+A recognized person is described exactly like an unrecognized one ("Person near
+Front Door"). Names, generated handles and face numbers are never put in an
+alert title or body, a Live Activity, or anything sent through the push relay to
+Apple. Recognition still works for what it is for: it can relax a card's tier
+(see recognition under the ladder), and the app shows who it was once you open
+the event on your own server.
+
 ## Recent Decisions and quieting a cell
 
 Every routing decision is logged (`GET /v1/push/decisions`) with a `stage`

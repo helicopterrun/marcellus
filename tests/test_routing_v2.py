@@ -312,9 +312,9 @@ async def test_recognition_off_disables_modifier(sidecar_db_path: Path):
 # ── 3. Identity display ──────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_identity_in_copy_on_enrich(sidecar_db_path: Path):
-    """When a sub_label exists on the review message, the card copy
-    shows the identity: 'Sarah · at Pool'."""
+async def test_identity_never_in_copy_on_enrich(sidecar_db_path: Path):
+    """A sub_label on the review message never reaches the card copy: a
+    recognized person reads exactly like an unrecognized one."""
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     device = _device(push_to_start="")
@@ -335,7 +335,8 @@ async def test_identity_in_copy_on_enrich(sidecar_db_path: Path):
     )
     sends = _card_sends(transport)
     enrich = sends[-1]["payload"]
-    assert "Sarah" in enrich["primary"]
+    assert "Sarah" not in json.dumps(sends)
+    assert enrich["primary"].startswith("Person")
 
 
 # ── 4. Migration ────────────────────────────────────────────────────────
