@@ -592,5 +592,8 @@ async def proxy_websocket(path: str, websocket: WebSocket) -> None:
                 await task
     finally:
         await upstream_ws.close()
-        with contextlib.suppress(RuntimeError):
+        # RuntimeError: already closed. AttributeError: the client left during the
+        # handshake, so uvicorn's websockets protocol never opened and its close() has
+        # no transfer_data_task. Either way there is nothing left to close.
+        with contextlib.suppress(RuntimeError, AttributeError):
             await websocket.close()

@@ -146,3 +146,73 @@ def test_disabled_proxy_refuses_the_upgrade(
     client = TestClient(create_app(settings))
     with pytest.raises(WebSocketDisconnect), client.websocket_connect("/ws") as ws:
         ws.receive_text()
+
+
+def test_client_leaving_during_the_handshake_is_not_an_error(
+    frigate_db_path: Path,
+    sidecar_db_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A real uvicorn: its websockets protocol never opens if the client leaves mid-handshake,
+    and closing it then raises AttributeError (seen in bursts on production, 2026-11-01)."""
+    import socket
+
+    import uvicorn
+
+    from marcellus.routes import proxy
+
+    class Upstream:
+        subprotocol = None
+        closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+        def __aiter__(self) -> Upstream:
+            return self
+
+        async def __anext__(self) -> bytes:
+            await asyncio.sleep(3600)
+            raise StopAsyncIteration
+
+    upstream = Upstream()
+
+    async def connect(*_: object) -> Upstream:
+        # The client's disconnect lands while the upstream is still connecting.
+        await asyncio.sleep(0.2)
+        return upstream
+
+    monkeypatch.setattr(proxy, "_ws_connector", lambda: connect)
+    app = _client(frigate_db_path, sidecar_db_path, tmp_path, 9).app
+
+    async def scenario() -> None:
+        # log_config=None: uvicorn's default stops its loggers propagating to caplog.
+        config = uvicorn.Config(
+            app, host="127.0.0.1", port=0, ws="websockets", lifespan="off", log_config=None
+        )
+        server = uvicorn.Server(config)
+        task = asyncio.create_task(server.serve())
+        while not server.started:
+            await asyncio.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        with socket.create_connection(("127.0.0.1", port)) as raw:
+            raw.sendall(
+                b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            )
+            await asyncio.sleep(0.05)
+        for _ in range(300):
+            if upstream.closed:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)
+        server.should_exit = True
+        await task
+
+    with caplog.at_level("ERROR", logger="uvicorn.error"):
+        asyncio.run(scenario())
+
+    assert upstream.closed
+    assert "Exception in ASGI application" not in caplog.text
