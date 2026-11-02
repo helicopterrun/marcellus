@@ -486,13 +486,14 @@ async def send_card_mutation(
     if payload is None:
         return 0
 
-    # Resolve visibility (alerts-slice2 §E; ladder v3 §5.2): every resolve
-    # gets one final silent (`.passive`, no sound) update. A story that
-    # never left a kept row -- no Quiet (`silent`) or Urgent card push was
-    # ever delivered for it, and no zone override fired -- gets an
-    # *ephemeral* one (the app removes the delivered row at once); a story
-    # that did keeps a non-ephemeral resolve so its row is replaced in place,
-    # never removed (`ephemeral_exempt`).
+    # Resolve visibility (alerts-slice2 §E; ladder v3 §5.2): a resolve is one
+    # final silent (`.passive`, no sound) update to a row the device already
+    # has, so a device that never got a card for this story gets none (see
+    # the loop below). A story that never left a kept row -- no Quiet
+    # (`silent`) or Urgent card push was ever delivered for it, and no zone
+    # override fired -- gets an *ephemeral* one (the app removes the delivered
+    # row at once); a story that did keeps a non-ephemeral resolve so its row
+    # is replaced in place, never removed (`ephemeral_exempt`).
     if mutation == RESOLVE:
         payload = dict(payload)
         payload["aps"] = dict(payload["aps"])
@@ -520,6 +521,19 @@ async def send_card_mutation(
         if not _device_eligible(device, camera=camera, labels=labels, card_level=card.level):
             continue
         if _is_snoozed(conn, device, camera, now=now):
+            continue
+        # No card reached this device, so there is no row to update, and an
+        # alert push can't be silent: iOS would file it in Notification Center
+        # and the NSE can't drop it. That left a row behind every Glance story
+        # (its Live Activity is the whole surface, §5.3) and every Log one. A
+        # zone override still leaves its kept row, its one durable record.
+        if (
+            mutation == RESOLVE
+            and not card.zone_override_hit
+            and not store.has_delivered_card(
+                conn, apns_token=device.apns_token, card_key=card.card_key
+            )
+        ):
             continue
 
         dev_payload = payload

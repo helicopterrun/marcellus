@@ -193,9 +193,13 @@ explicit signal. It rides on `frigate/events`' object `end` message
 
 #### Resolve visibility (alerts-slice2 §E)
 
-Every resolve gets one final push: quiet (no sound, `interruption-level:
-passive`), same `apns-collapse-id` as the story it's closing. Whether that
-push is **ephemeral** (`ephemeral: true` — the app removes the delivered
+A device that was sent a card for the story gets one final push when it
+resolves: quiet (no sound, `interruption-level: passive`), same
+`apns-collapse-id` as the story it's closing. A device that was never sent one
+gets nothing, because it has no row to update and an alert push would create
+one (iOS files it and the NSE can't drop it). So a Glance story leaves a device
+with a Live Activity no Notification Center row. A zone override is the one
+exception, below. Whether that push is **ephemeral** (`ephemeral: true` — the app removes the delivered
 row from Notification Center at once) depends on whether the story ever
 left a kept row:
 
@@ -209,7 +213,8 @@ the resolve row on those devices only.
 
 | Story | Zone override ever hit | Resolve |
 |---|---|---|
-| never delivered a Quiet/Urgent card (e.g. Glance only) | no | `ephemeral: true` — removed, scoped to the event's lifetime |
+| this device was sent no card (e.g. Glance only, with a Live Activity) | no | no push |
+| sent a card, but never a Quiet/Urgent one | no | `ephemeral: true` — removed, scoped to the event's lifetime |
 | delivered a Quiet (`silent`) or Urgent card | — | `ephemeral: false` — row replaced in place, body `"…left after 4 min"`, kept until the person opens or clears it |
 | any | yes | `ephemeral: false` |
 
