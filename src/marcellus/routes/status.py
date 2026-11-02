@@ -21,6 +21,8 @@ from marcellus import __version__, db
 from marcellus.auth import _cache
 from marcellus.errors import error_detail
 from marcellus.push.stats import STATS
+from marcellus.routes.health import compute_health
+from marcellus.verdict import build_verdict
 
 router = APIRouter(tags=["status"])
 
@@ -303,6 +305,26 @@ def _camera_names(settings: Any) -> list[str]:
     return []
 
 
+async def _verdict(request: Request) -> dict[str, Any]:
+    """The status page's verdict, from the very same probes `/healthz` runs
+    (one `compute_health` call per poll; the Frigate probe inside is cached)."""
+    try:
+        health = await compute_health(request.app)
+    except Exception:  # noqa: BLE001 -- the status page must never 500 over this
+        return {
+            "level": "warn",
+            "problems": [
+                {
+                    "check": "health",
+                    "message": "Couldn't evaluate the health checks.",
+                    "level": "warn",
+                }
+            ],
+            "notes": [],
+        }
+    return build_verdict(health["checks"], health["ok"], health["failing"])
+
+
 async def _gather_status(request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     now = time.time()
@@ -314,8 +336,10 @@ async def _gather_status(request: Request) -> dict[str, Any]:
     hardware = await asyncio.to_thread(_frigate_hardware, settings)
     hardware["host"] = await asyncio.to_thread(_host_stats, settings)
     counts = await asyncio.to_thread(_counts, request, settings)
+    verdict = await _verdict(request)
     return {
         "version": __version__,
+        "verdict": verdict,
         "time": now,
         "cameras": _camera_names(settings),
         "frigate": await frigate_task,
