@@ -1,0 +1,40 @@
+{
+  "suggestions": [
+    {
+      "max_distance": 0.001,
+      "members": [
+        {
+          "avatar_path": "/v1/faces/e2a/0.jpg",
+          "days": 2,
+          "familiarity": "regular",
+          "first_seen": 1785903600.0,
+          "followed": false,
+          "handle": "Elm Kite",
+          "id": 2,
+          "last_camera": "shed",
+          "last_seen": 1785990000.0,
+          "name": null,
+          "note": null,
+          "sightings": 2
+        },
+        {
+          "avatar_path": "/v1/faces/e4a/0.jpg",
+          "days": 1,
+          "familiarity": "new",
+          "first_seen": 1785900600.0,
+          "followed": false,
+          "handle": "Lupine Tern",
+          "id": 4,
+          "last_camera": "doorbell",
+          "last_seen": 1785900600.0,
+          "name": null,
+          "note": null,
+          "sightings": 1
+        }
+      ],
+      "same_visit": false,
+      "survivor": 2
+    }
+  ],
+  "threshold": 0.45
+}

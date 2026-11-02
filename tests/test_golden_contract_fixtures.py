@@ -1341,6 +1341,19 @@ def _build_v1_person_sightings() -> dict[str, Any]:
     return _get_people("/v1/people/1/sightings")
 
 
+def _build_v1_people_merge_suggestions() -> dict[str, Any]:
+    return _get_people("/v1/people/merge-suggestions")
+
+
+def _build_v1_people_merge_suggestions_dismiss() -> dict[str, Any]:
+    with tempfile.TemporaryDirectory() as td:
+        client = _build_people_client(Path(td))
+        resp = client.post("/v1/people/merge-suggestions/dismiss", json={"ids": [4, 2]})
+        assert resp.status_code == 200, resp.text
+        body: dict[str, Any] = resp.json()
+        return body
+
+
 #: fixture filename -> zero-arg builder. MANIFEST.json is derived, not built.
 FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "la_content_state.json": _build_la_content_state,
@@ -1372,6 +1385,8 @@ FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "v1_people.json": _build_v1_people,
     "v1_person.json": _build_v1_person,
     "v1_person_sightings.json": _build_v1_person_sightings,
+    "v1_people_merge_suggestions.json": _build_v1_people_merge_suggestions,
+    "v1_people_merge_suggestions_dismiss.json": _build_v1_people_merge_suggestions_dismiss,
     "v1_sightings.json": _build_v1_sightings,
     "v1_sighting_detail.json": _build_v1_sighting_detail,
 }

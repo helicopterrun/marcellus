@@ -165,13 +165,18 @@ def test_capabilities_people_block(client: TestClient) -> None:
         "enabled": True,
         "filters": ["all", "named", "regular", "new", "followed"],
         "sorts": ["recent", "days"],
+        "merge_suggestions": True,
+        "encounter_filter": True,
     }
 
 
 def test_capabilities_people_disabled(world: World) -> None:
     world.settings.face_enrich.enabled = False
     people = TestClient(create_app(world.settings)).get("/v1/capabilities").json()["people"]
-    assert people == {"enabled": False, "filters": [], "sorts": []}
+    assert people == {"enabled": False, "filters": [], "sorts": [],
+        "merge_suggestions": False,
+        "encounter_filter": False,
+    }
 
 
 # --------------------------------------------------------------------------

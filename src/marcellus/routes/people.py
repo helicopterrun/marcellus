@@ -13,6 +13,7 @@ import sqlite3
 import time
 from collections.abc import Callable
 from datetime import tzinfo
+from itertools import combinations
 from typing import Any, Literal, TypeVar
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -21,8 +22,10 @@ from pydantic import BaseModel
 
 from marcellus import db
 from marcellus.errors import error_detail
-from marcellus.faces import enrich, people
+from marcellus.faces import consolidate, enrich, people
 from marcellus.models.wire import (
+    MergeDismissResponse,
+    MergeSuggestionsResponse,
     PeopleOkResponse,
     PeopleResponse,
     PersonDetail,
@@ -99,6 +102,33 @@ async def list_people(
 
     total, page = await _run(request, _do)
     return {"t": time.time(), "total": total, "people": page}
+
+
+@v1_router.get("/people/merge-suggestions", response_model=MergeSuggestionsResponse)
+async def merge_suggestions(request: Request, tz: str = "UTC") -> dict[str, Any]:
+    """Identities that look like one person: unnamed clusters near a named one
+    (merge into the named), and groups of unnamed clusters. Read-only. Declared
+    before `/people/{person_id}` so that path never captures it."""
+    zone = _tz(tz)
+    threshold = _settings(request).face_enrich.consolidate_threshold
+
+    def _do(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+        everyone = people.load_people(conn, zone)
+        found = consolidate.propose_named_matches(
+            conn, threshold=threshold, tz=zone, everyone=everyone
+        ) + consolidate.propose_merges(conn, threshold=threshold, tz=zone, everyone=everyone)
+        found.sort(key=lambda m: (not m.same_visit, m.max_distance, m.survivor_id))
+        return [
+            {
+                "members": [everyone[m.id].wire() for m in p.members],
+                "survivor": p.survivor_id,
+                "same_visit": p.same_visit,
+                "max_distance": p.max_distance,
+            }
+            for p in found
+        ]
+
+    return {"threshold": threshold, "suggestions": await _run(request, _do)}
 
 
 @v1_router.get("/people/for-event/{event_id}", response_model=PersonForEventResponse)
@@ -201,6 +231,10 @@ def face_crop(event_id: str, rank: int, request: Request) -> FileResponse:
 # --------------------------------------------------------------------------
 
 
+class DismissBody(BaseModel):
+    ids: list[int]
+
+
 class NameBody(BaseModel):
     name: str
 
@@ -274,6 +308,33 @@ async def merge_person(
             enrich.retro_label(conn, settings, target, result.carried_name)
             conn.commit()
         return _live_person(conn, target, zone).wire()
+
+    return await _run(request, _do)
+
+
+@v1_router.post("/people/merge-suggestions/dismiss", response_model=MergeDismissResponse)
+async def dismiss_merge_suggestion(body: DismissBody, request: Request) -> dict[str, Any]:
+    """Record "these are not the same person": record every pair among `ids` so merge
+    suggestions never offer it again. Idempotent. Ids follow merge redirects."""
+
+    def _do(conn: sqlite3.Connection) -> dict[str, Any]:
+        resolved = sorted({_resolve(conn, i) for i in body.ids})
+        if len(resolved) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail=error_detail(
+                    "invalid_dismissal", "need at least two distinct people to dismiss"
+                ),
+            )
+        now = time.time()
+        pairs = list(combinations(resolved, 2))
+        conn.executemany(
+            "INSERT OR IGNORE INTO face_merge_dismissals (id_low, id_high, dismissed_at) "
+            "VALUES (?, ?, ?)",
+            [(a, b, now) for a, b in pairs],
+        )
+        conn.commit()
+        return {"ok": True, "dismissed": len(pairs)}
 
     return await _run(request, _do)
 

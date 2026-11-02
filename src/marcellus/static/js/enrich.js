@@ -574,6 +574,21 @@ function confirmGroup(group) {
     'Merge group', () => mergeGroup(group));
 }
 
+async function dismissGroup(group, card, btn) {
+  btn.disabled = true;
+  try {
+    await post('/v1/people/merge-suggestions/dismiss', { ids: group.members.map(m => m.id) });
+  } catch (e) {
+    btn.disabled = false;
+    SC.toast('dismiss failed: ' + e.message, true);
+    return;
+  }
+  const box = document.getElementById('merge-proposals');
+  card.remove();
+  if (box && !box.querySelector('.id-prop')) box.hidden = true;
+  SC.toast('will not suggest these again');
+}
+
 function renderProposal(group) {
   const members = SC.el('div', { class: 'id-prop-members' }, group.members.map(m => {
     const meta = proposalMeta(m);
@@ -589,7 +604,11 @@ function renderProposal(group) {
   ]);
   const btn = SC.el('button', { type: 'button', class: 'btn btn-primary', text: 'Merge group' }, []);
   btn.addEventListener('click', () => confirmGroup(group));
-  return SC.el('div', { class: 'id-prop' }, [members, info, btn]);
+  const notSame = SC.el('button', { type: 'button', class: 'btn', text: 'Not the same',
+    title: 'these are different people: stop suggesting this merge' }, []);
+  const card = SC.el('div', { class: 'id-prop' }, [members, info, btn, notSame]);
+  notSame.addEventListener('click', () => dismissGroup(group, card, notSame));
+  return card;
 }
 
 (async function loadProposals() {

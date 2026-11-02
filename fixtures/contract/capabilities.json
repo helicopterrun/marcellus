@@ -35,6 +35,7 @@
   },
   "people": {
     "enabled": true,
+    "encounter_filter": true,
     "filters": [
       "all",
       "named",
@@ -42,6 +43,7 @@
       "new",
       "followed"
     ],
+    "merge_suggestions": true,
     "sorts": [
       "recent",
       "days"

@@ -470,6 +470,31 @@ class MergeResult:
     carried_name: str | None
 
 
+def _repoint_dismissals(conn: sqlite3.Connection, source_id: int, into_id: int) -> None:
+    """Rewrite merge dismissals naming `source_id` to name `into_id` (low id
+    first), dropping the pair that would become (into, into) and ignoring
+    duplicates. Must run before the source row is deleted: the delete trigger
+    removes dismissals naming the deleted cluster."""
+    rows = conn.execute(
+        "SELECT id_low, id_high, dismissed_at FROM face_merge_dismissals "
+        "WHERE id_low = ? OR id_high = ?",
+        (source_id, source_id),
+    ).fetchall()
+    for r in rows:
+        other = int(r["id_high"]) if int(r["id_low"]) == source_id else int(r["id_low"])
+        if other == into_id:
+            continue
+        conn.execute(
+            "INSERT OR IGNORE INTO face_merge_dismissals (id_low, id_high, dismissed_at) "
+            "VALUES (?, ?, ?)",
+            (min(other, into_id), max(other, into_id), r["dismissed_at"]),
+        )
+    conn.execute(
+        "DELETE FROM face_merge_dismissals WHERE id_low = ? OR id_high = ?",
+        (source_id, source_id),
+    )
+
+
 def merge_clusters(
     conn: sqlite3.Connection,
     source_id: int,
@@ -521,6 +546,7 @@ def merge_clusters(
         "VALUES (?, ?, ?)",
         (source_id, into_id, time.time() if now is None else now),
     )
+    _repoint_dismissals(conn, source_id, into_id)
     conn.execute("DELETE FROM face_clusters WHERE cluster_id = ?", (source_id,))
     # Count falls back to the sum when no stored embedding lets the rebuild
     # recompute it; last_seen_at is never touched by rebuild_centroid.
@@ -892,13 +918,14 @@ def _record(
     embedding: list[float] | None = None,
     sub_label_written: str | None = None,
     detail: str | None = None,
+    rejected_best_quality: float | None = None,
 ) -> None:
     conn.execute(
         "INSERT INTO face_enrichments "
         "(event_id, camera, event_start_ts, cluster_id, distance, faces_found, faces_used, "
         " best_quality, embedding, sub_label_written, status, attempts, detail, processed_at, "
-        " best_frame_ts, best_bbox, best_crop_path) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " best_frame_ts, best_bbox, best_crop_path, rejected_best_quality) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(event_id) DO UPDATE SET "
         " cluster_id=excluded.cluster_id, distance=excluded.distance, "
         " faces_found=excluded.faces_found, faces_used=excluded.faces_used, "
@@ -906,7 +933,8 @@ def _record(
         " sub_label_written=excluded.sub_label_written, status=excluded.status, "
         " attempts=excluded.attempts, detail=excluded.detail, "
         " processed_at=excluded.processed_at, best_frame_ts=excluded.best_frame_ts, "
-        " best_bbox=excluded.best_bbox, best_crop_path=excluded.best_crop_path",
+        " best_bbox=excluded.best_bbox, best_crop_path=excluded.best_crop_path, "
+        " rejected_best_quality=excluded.rejected_best_quality",
         (
             cand.event_id,
             cand.camera,
@@ -925,6 +953,7 @@ def _record(
             best.frame_ts if best is not None else None,
             json.dumps([round(v, 5) for v in best.bbox]) if best is not None else None,
             best_crop_path,
+            rejected_best_quality,
         ),
     )
 
@@ -1003,7 +1032,15 @@ def process_event(
         return "no_frames"
     usable = _usable(faces, cfg=cfg)
     if not usable:
-        _record(conn, cand, status="no_faces", faces_found=len(faces))
+        _record(
+            conn,
+            cand,
+            status="no_faces",
+            faces_found=len(faces),
+            # Faces passed the detection/area gates but all fell under
+            # min_quality: keep the best quality seen (data only).
+            rejected_best_quality=max((f.quality for f in faces), default=None),
+        )
         return "no_faces"
     best = usable[0]  # == kept[0][0]: same stable order over the same faces
     best_path = _write_stack(conn, cand.event_id, kept, len(usable), cfg=cfg)

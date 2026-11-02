@@ -581,6 +581,7 @@ def list_recent(
     tag: str | None = None,
     labels: Sequence[str] | None = None,
     places: Sequence[str] | None = None,
+    person_cluster: int | None = None,
 ) -> list[dict[str, Any]]:
     """Newest first by `start_time` (ties broken by `id`, so a page is stable).
 
@@ -592,7 +593,9 @@ def list_recent(
     Filters combine with AND. `camera` is one name or any-of a sequence;
     `tag` is "notable" (which also matches never-stamped NULL rows) or
     "background"; `labels` matches case-insensitively against the labels or
-    recognised identities; `places` matches the stamped place class.
+    recognised identities; `places` matches the stamped place class;
+    `person_cluster` keeps encounters with a live (non-excluded) face sighting
+    of that cluster id on any member event.
     """
     clauses: list[str] = []
     params: list[Any] = []
@@ -634,6 +637,14 @@ def list_recent(
         marks = ",".join("?" for _ in place_values)
         clauses.append(f"place IN ({marks})")
         params.extend(place_values)
+    if person_cluster is not None:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM encounter_members m, json_each(m.event_ids_json) j "
+            "JOIN face_enrichments fe ON fe.event_id = j.value "
+            "WHERE m.encounter_id = encounters.id AND fe.cluster_id = ? "
+            "AND fe.excluded_at IS NULL)"
+        )
+        params.append(person_cluster)
     sql = "SELECT * FROM encounters"
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)

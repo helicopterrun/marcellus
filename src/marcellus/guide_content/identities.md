@@ -2,7 +2,7 @@
 title: Identities
 section: people
 order: 2
-routes: ["/enrich/clusters", "/enrich/accuracy", "/v1/people", "/v1/people/{person_id}", "/v1/people/{person_id}/sightings", "/v1/people/{person_id}/similar", "/v1/people/{person_id}/avatar.jpg", "/v1/people/{person_id}/name", "/v1/people/{person_id}/merge", "/v1/people/{person_id}/follow", "/v1/people/{person_id}/note", "/v1/people/{person_id}/sightings/{event_id}", "/v1/faces/{event_id}/{rank}.jpg", "/v1/people/for-event/{event_id}", "/enrich/merge-proposals.json", "/enrich/clusters/{cluster_id}/faces.json"]
+routes: ["/enrich/clusters", "/enrich/accuracy", "/v1/people", "/v1/people/{person_id}", "/v1/people/{person_id}/sightings", "/v1/people/{person_id}/similar", "/v1/people/{person_id}/avatar.jpg", "/v1/people/{person_id}/name", "/v1/people/{person_id}/merge", "/v1/people/{person_id}/follow", "/v1/people/{person_id}/note", "/v1/people/{person_id}/sightings/{event_id}", "/v1/faces/{event_id}/{rank}.jpg", "/v1/people/for-event/{event_id}", "/enrich/merge-proposals.json", "/v1/people/merge-suggestions", "/v1/people/merge-suggestions/dismiss", "/enrich/clusters/{cluster_id}/faces.json"]
 config: ["face_enrich"]
 ---
 
@@ -106,7 +106,12 @@ nothing is written to compute them. Each group shows the faces, handles,
 sightings, days, the widest distance in the group, and a **same visit** tag when
 two of them were seen on the same camera minutes apart (the strongest hint).
 **Merge group** asks once, then merges the others into the one with the most
-sightings. Named identities are never proposed. From the host,
+sightings. Named identities are never proposed in a group. **Not the same**
+records that the group are different people, and that pair is never suggested
+again (the ruling follows an identity through later merges). The app's
+`GET /v1/people/merge-suggestions` also offers an unnamed identity that is close
+to a named one, to be merged into the named one; `POST
+/v1/people/merge-suggestions/dismiss` with `{"ids": [...]}` is the same ruling. From the host,
 `fsc face-enrich propose-merges` prints the group counts and cluster numbers
 (never names) without touching the running service.
 
@@ -149,6 +154,9 @@ sidecar is the sole author of `sub_label`, and two writers would fight.
   frame, to be considered (default 4000).
 - `min_quality` — minimum quality score (sharpness × size × frontality) for
   a sampled face (default 0.15).
+  When an event finds faces but every one falls under this gate, the best
+  quality seen is kept (internally, never shown) so the gate can be tuned
+  from real data.
 - `min_det_score` — face detector confidence a box needs (default 0.6) to
   count as a face at all. Quality can't keep junk out on its own: leaves and
   wheel spokes are very sharp. `fsc face-enrich regate` applies it to older

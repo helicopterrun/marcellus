@@ -26,7 +26,7 @@ from marcellus.models.wire import EncounterPeopleResponse, EncountersPeopleRespo
 from marcellus.push import policy_settings
 from marcellus.routes._deps import settings_of as _settings
 from marcellus.routes._deps import templates_of as _templates
-from marcellus.routes.people import _tz
+from marcellus.routes.people import _resolve, _tz
 from marcellus.routes.sources import sightings_page_context
 
 router = APIRouter(tags=["encounters"])
@@ -270,12 +270,15 @@ async def encounters_list(
     tag: Literal["notable", "background"] | None = None,
     label: str | None = None,
     place: str | None = None,
+    person: int | None = None,
     tz: str = "UTC",
 ) -> dict[str, Any]:
     """Newest first. Page by passing the last row's `start` as `before`. The
     48 h default window applies only when neither `since` nor `before` is
     given; with `before` alone there is no lower bound. `camera`, `label`
-    and `place` take comma-separated lists (any-of); all filters AND."""
+    and `place` take comma-separated lists (any-of); all filters AND. `person`
+    is a person id (merged-away ids resolve; unknown is 404): only encounters
+    with a live sighting of that person; 400 while face_enrich is disabled."""
     settings = _settings(request)
     zone = _tz(tz)
     with_people = bool(settings.face_enrich.enabled)
@@ -295,11 +298,17 @@ async def encounters_list(
                 f"unknown place {unknown[0]!r}; expected one of {list(policy_settings.PLACES)}",
             ),
         )
+    if person is not None and not with_people:
+        raise HTTPException(
+            status_code=400,
+            detail=error_detail("invalid", "person filter needs face_enrich.enabled"),
+        )
     window_since = since
     if since is None and before is None:
         window_since = time.time() - _DEFAULT_WINDOW_S
 
     def _load(conn: Any) -> list[dict[str, Any]]:
+        cluster = _resolve(conn, person) if person is not None else None
         rows = store.list_recent(
             conn,
             since=window_since,
@@ -310,6 +319,7 @@ async def encounters_list(
             tag=tag,
             labels=labels,
             places=places,
+            person_cluster=cluster,
         )
         by_encounter = store.members_for(conn, [r["id"] for r in rows])
         out = [_summary(r, by_encounter[r["id"]]) for r in rows]
