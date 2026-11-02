@@ -82,28 +82,113 @@ async function doMerge(fromId, intoId) {
   window.location.reload();
 }
 
-// Merge confirm for a "looks like" suggestion: show both clusters.
-async function confirmMerge(fromId, intoId) {
-  let from, into;
-  try {
-    [from, into] = await Promise.all([clusterMeta(fromId), clusterMeta(intoId)]);
-  } catch (e) {
-    SC.toast('could not load identities: ' + e.message, true);
+// ---- merge evidence dialog ---------------------------------------------
+// Every merge confirmation shows each side's title, sighting count and a row of
+// its best face crops (/enrich/clusters/{id}/faces.json), because a merge can't
+// be cleanly undone and a number alone is no basis to judge by. The dialog
+// opens at once; Merge stays disabled until every side has finished loading
+// (or failed), so nobody merges blind on a slow connection.
+
+const FACES_SHOWN = 6;
+
+function openFace(url) {
+  const img = SC.el('img', { src: url, alt: 'face', class: 'id-ev-big' }, []);
+  SC.lightbox([SC.el('div', { class: 'sc-lb-body' }, [img])]);
+}
+
+function renderFaces(box, faces) {
+  box.textContent = '';
+  if (!faces.length) {
+    box.appendChild(SC.el('span', { class: 'id-ev-note', text: 'no face crops stored for this identity' }, []));
     return;
   }
-  if (!from || !into) { SC.toast('that identity no longer exists, reload the page', true); return; }
-  // The named cluster survives; otherwise the bigger one does.
-  let loser = from, winner = into;
-  if ((from.name && !into.name) || (!from.name === !into.name && from.count > into.count)) {
-    loser = into; winner = from;
-  }
-  SC.dialog('Merge these two identities?', [
-    clusterRow(loser, 'goes away'),
-    clusterRow(winner, 'keeps everything'),
-  ], [
+  faces.forEach(f => {
+    const img = SC.el('img', { src: f.url, alt: '', loading: 'lazy', class: 'id-ev-face', tabindex: '0',
+      title: 'tap to enlarge' }, []);
+    img.addEventListener('click', () => openFace(f.url));
+    img.addEventListener('keydown', e => { if (e.key === 'Enter') openFace(f.url); });
+    box.appendChild(img);
+  });
+}
+
+// sides: [{ id, meta (or null: looked up), role, title?, count? }]. `summary`
+// is a plain sentence naming what will be merged into what. `onMerge` runs on
+// the Merge button.
+function evidenceDialog(heading, summary, sides, mergeLabel, onMerge, autoEnable = true) {
+  const rows = sides.map(side => {
+    const head = SC.el('div', { class: 'id-ev-head' }, []);
+    const faces = SC.el('div', { class: 'id-ev-faces' }, [
+      SC.el('span', { class: 'id-ev-note', text: 'loading faces…' }, []),
+    ]);
+    return { side, head, faces, node: SC.el('div', { class: 'id-ev-side' }, [head, faces]) };
+  });
+  const content = [];
+  if (summary) content.push(SC.el('p', { class: 'id-ev-summary', text: summary }, []));
+  rows.forEach(r => content.push(r.node));
+  const overlay = SC.dialog(heading, content, [
     { label: 'Cancel' },
-    { label: 'Merge', kind: 'btn-primary', onclick: () => doMerge(loser.id, winner.id) },
+    { label: mergeLabel, kind: 'btn-primary', onclick: onMerge },
   ]);
+  overlay.firstChild.classList.add('id-evidence');
+  const mergeBtn = overlay.querySelectorAll('.me-actions button')[1];
+  mergeBtn.disabled = true;
+
+  const loads = rows.map(async r => {
+    const meta = r.side.meta || await clusterMeta(r.side.id).catch(() => null);
+    if (meta) {
+      r.head.textContent = '';
+      r.head.appendChild(clusterRow(meta, r.side.role));
+    } else {
+      r.head.textContent = '';
+      r.head.appendChild(SC.el('b', { text: r.side.title || ('#' + r.side.id) }, []));
+    }
+    try {
+      const data = await SC.fetchJson('/enrich/clusters/' + r.side.id + '/faces.json?limit=' + FACES_SHOWN);
+      renderFaces(r.faces, data.faces || []);
+    } catch (e) {
+      r.faces.textContent = '';
+      r.faces.appendChild(SC.el('span', { class: 'id-ev-note',
+        text: 'could not load faces (' + e.message + ')' }, []));
+    }
+    return meta;
+  });
+  // Enable Merge only once every side has settled (loaded or failed). A caller
+  // that still has to work out who survives passes autoEnable=false.
+  if (autoEnable) Promise.all(loads).then(() => { mergeBtn.disabled = false; });
+  return { overlay, rows, loads };
+}
+
+// Merge confirm for a "looks like" suggestion: show both clusters.
+async function confirmMerge(fromId, intoId) {
+  // Roles depend on who is named / bigger, which needs the index; the dialog
+  // opens first with neutral labels and fills the roles in when it arrives.
+  const sides = [{ id: String(fromId), role: '' }, { id: String(intoId), role: '' }];
+  let loser = sides[0], winner = sides[1];
+  const dlg = evidenceDialog('Merge these two identities?',
+    'One goes away and everything moves into the other. Merging cannot be cleanly undone.',
+    sides, 'Merge', () => doMerge(loser.id, winner.id), false);
+  const mergeBtn = dlg.overlay.querySelectorAll('.me-actions button')[1];
+  mergeBtn.disabled = true;
+  const metas = await Promise.all(dlg.loads);
+  const [from, into] = metas;
+  if (!from || !into) {
+    dlg.overlay.querySelector('.id-ev-summary').textContent =
+      'That identity no longer exists. Close this and reload the page.';
+    return;
+  }
+  // The named cluster survives; otherwise the bigger one does.
+  if ((from.name && !into.name) || (!from.name === !into.name && from.count > into.count)) {
+    loser = sides[1]; winner = sides[0];
+  }
+  const roleOf = {};
+  roleOf[loser.id] = 'goes away';
+  roleOf[winner.id] = 'keeps everything';
+  dlg.rows.forEach((r, i) => {
+    r.head.textContent = '';
+    r.head.appendChild(clusterRow(metas[i], roleOf[r.side.id]));
+    r.node.classList.add(roleOf[r.side.id] === 'goes away' ? 'id-ev-goes' : 'id-ev-keeps');
+  });
+  mergeBtn.disabled = false;
 }
 
 // Manual merge: search for the surviving cluster.
@@ -474,14 +559,19 @@ async function mergeGroup(group) {
 }
 
 function confirmGroup(group) {
-  const rows = group.members.map(m => clusterRow(
-    proposalMeta(m),
-    m.id === group.survivor ? 'keeps everything' : 'goes away',
-  ));
-  SC.dialog('Merge these ' + group.members.length + ' identities?', rows, [
-    { label: 'Cancel' },
-    { label: 'Merge group', kind: 'btn-primary', onclick: () => mergeGroup(group) },
-  ]);
+  const losers = group.members.filter(m => m.id !== group.survivor);
+  const keeper = group.members.find(m => m.id === group.survivor);
+  const keepTitle = keeper.handle + ' · #' + keeper.id;
+  const summary = losers.length + ' identit' + (losers.length === 1 ? 'y' : 'ies') + ' ('
+    + losers.map(m => '#' + m.id).join(', ') + ') will be merged into ' + keepTitle
+    + ', the one with the most sightings. Merging cannot be cleanly undone.';
+  const sides = group.members.map(m => ({
+    id: String(m.id),
+    meta: proposalMeta(m),
+    role: m.id === group.survivor ? 'keeps everything' : 'goes away',
+  }));
+  evidenceDialog('Merge ' + group.members.length + ' identities into one?', summary, sides,
+    'Merge group', () => mergeGroup(group));
 }
 
 function renderProposal(group) {

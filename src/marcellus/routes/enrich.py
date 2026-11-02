@@ -241,6 +241,7 @@ def _similar_pairs(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
             best[rows[i][0]] = {
                 "cluster_id": rows[j][0],
                 "name": rows[j][1],
+                "handle": handle_for(rows[j][0]),
                 "distance": round(d, 3),
             }
     return best
@@ -264,9 +265,45 @@ def _similar_pairs_py(rows: list[tuple[int, Any, bytes]]) -> dict[int, dict[str,
                     best[cid] = {
                         "cluster_id": other_id,
                         "name": other_name,
+                        "handle": handle_for(other_id),
                         "distance": round(dist, 3),
                     }
     return best
+
+
+def _attach_partner_avatars(conn: sqlite3.Connection, similar: dict[int, dict[str, Any]]) -> None:
+    """Give each "looks like" partner an `avatar` URL: ONE query for every
+    distinct partner (a partner is often not on the current page), preferring
+    its best live sighting that has a rendered crop, else that sighting's
+    Frigate thumbnail -- the same choice `_cluster_index` makes."""
+    partners = sorted({int(v["cluster_id"]) for v in similar.values()})
+    best: dict[int, str] = {}
+    has_crop: set[int] = set()
+    for i in range(0, len(partners), 500):
+        chunk = partners[i : i + 500]
+        for r in conn.execute(
+            "SELECT e.cluster_id, e.event_id, f.rank AS rank "
+            "  FROM face_enrichments e LEFT JOIN face_crops f "
+            "    ON f.event_id = e.event_id AND f.rank = 0 AND f.crop_path IS NOT NULL "
+            " WHERE e.excluded_at IS NULL AND e.cluster_id IN ("
+            + ",".join("?" * len(chunk))
+            + ") ORDER BY e.best_quality DESC",
+            chunk,
+        ):
+            cid = int(r["cluster_id"])
+            url = (
+                f"/enrich/face/{r['event_id']}/0.jpg"
+                if r["rank"] is not None
+                else f"/enrich/thumb/{r['event_id']}"
+            )
+            # First row per cluster is its best sighting; a later one only
+            # wins by having a crop where the best doesn't.
+            if cid not in best or (cid not in has_crop and r["rank"] is not None):
+                best[cid] = url
+                if r["rank"] is not None:
+                    has_crop.add(cid)
+    for v in similar.values():
+        v["avatar"] = best.get(int(v["cluster_id"]))
 
 
 def _stats(conn: sqlite3.Connection, request: Request) -> dict[str, Any]:
@@ -313,6 +350,7 @@ def clusters_view(
             sort=sort,
         )
         similar = _similar_pairs(conn)
+        _attach_partner_avatars(conn, similar)
         stats = _stats(conn, request)
         backfill = enrich.backfill_status(conn)
         counts = _view_counts(conn)
@@ -368,6 +406,45 @@ def clusters_json(request: Request, show_excluded: int = 0) -> JSONResponse:
                 "stats": _stats(conn, request),
             }
         )
+    finally:
+        conn.close()
+
+
+@router.get("/enrich/clusters/{cluster_id}/faces.json")
+def cluster_faces(
+    cluster_id: int, request: Request, limit: int = Query(6, ge=1, le=24)
+) -> JSONResponse:
+    """Up to `limit` best face crops of one identity's LIVE sightings (best
+    quality first), for the merge confirmation: enough evidence to judge by."""
+    conn = open_sidecar(_settings(request).sidecar.db_path)
+    try:
+        if not conn.execute(
+            "SELECT 1 FROM face_clusters WHERE cluster_id = ?", (cluster_id,)
+        ).fetchone():
+            raise HTTPException(
+                status_code=404,
+                detail=error_detail("cluster_not_found", "cluster not found"),
+            )
+        faces = [
+            {
+                "event_id": r["event_id"],
+                "rank": int(r["rank"]),
+                "url": f"/enrich/face/{r['event_id']}/{int(r['rank'])}.jpg",
+                "quality": r["best_quality"],
+            }
+            for r in conn.execute(
+                "SELECT e.event_id, e.best_quality, "
+                "       (SELECT MIN(f.rank) FROM face_crops f "
+                "         WHERE f.event_id = e.event_id AND f.crop_path IS NOT NULL) AS rank "
+                "  FROM face_enrichments e "
+                " WHERE e.cluster_id = ? AND e.excluded_at IS NULL "
+                "   AND EXISTS (SELECT 1 FROM face_crops f WHERE f.event_id = e.event_id "
+                "                AND f.crop_path IS NOT NULL) "
+                " ORDER BY e.best_quality DESC, e.event_start_ts DESC LIMIT ?",
+                (cluster_id, limit),
+            )
+        ]
+        return JSONResponse({"cluster_id": cluster_id, "faces": faces})
     finally:
         conn.close()
 

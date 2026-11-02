@@ -159,12 +159,12 @@ def test_people_view_hides_single_sightings_and_once_view_shows_them(
     settings = client.app.state.settings  # type: ignore[attr-defined]
     once = _add_cluster(settings, None, 1, "ev-once")
     people = client.get("/enrich/clusters").text
-    assert f"{handle_for(once)} · #{once}" not in people and f"{handle_for(2)} · #2" in people
+    assert f'id="cluster-{once}"' not in people and f"{handle_for(2)} · #2" in people
     # Tab counts: alice + unknown #2 under People, the new one under Seen once.
     assert '<span class="pp-n">2</span>' in people and '<span class="pp-n">1</span>' in people
     seen_once = client.get("/enrich/clusters?view=once").text
     cards = seen_once.split("</datalist>", 1)[1]  # the name datalist lists alice
-    assert f"{handle_for(once)} · #{once}" in cards and "alice" not in cards
+    assert f'id="cluster-{once}"' in cards and "alice" not in cards
     # A bogus view falls back to People rather than erroring.
     assert f"{handle_for(2)} · #2" in client.get("/enrich/clusters?view=nope").text
 
@@ -1000,3 +1000,99 @@ def test_regate_dry_run_changes_nothing(tmp_path: Path) -> None:
     finally:
         conn.close()
     assert (tmp_path / "crops" / "leaf.jpg").exists()
+
+
+# --- merge-hint preview: partner handle/avatar, faces.json, button text --------
+
+
+def _close_pair(client: TestClient) -> None:
+    conn = sqlite3.connect(client.app.state.settings.sidecar.db_path)  # type: ignore[attr-defined]
+    conn.execute(
+        "UPDATE face_clusters SET centroid = ? WHERE cluster_id = 2",
+        (enrich.pack_embedding(enrich.l2_normalize([0.95, 0.05])),),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _crop(client: TestClient, event_id: str, quality: float, *, excluded: bool = False,
+          cluster: int | None = None, rank: int = 0) -> None:
+    conn = sqlite3.connect(client.app.state.settings.sidecar.db_path)  # type: ignore[attr-defined]
+    conn.execute(
+        "INSERT OR IGNORE INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+        "embedding, best_quality, status, processed_at, excluded_at) "
+        "VALUES (?, 'gate-face', 1, ?, ?, ?, 'enriched', '', ?)",
+        (event_id, cluster, enrich.pack_embedding([1.0, 0.0]), quality, "x" if excluded else None),
+    )
+    if cluster is None:
+        conn.execute("UPDATE face_enrichments SET best_quality = ? WHERE event_id = ?",
+                     (quality, event_id))
+    conn.execute(
+        "INSERT INTO face_crops (event_id, rank, quality, frame_ts, bbox, used, crop_path) "
+        "VALUES (?, ?, ?, 0, '[0,0,1,1]', 1, ?)",
+        (event_id, rank, quality, f"{event_id}/{rank}.jpg"),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_similar_carries_handle_and_avatar(client: TestClient) -> None:
+    _close_pair(client)
+    # Cluster 1 (alice) has a better sighting with a crop than ev-a's none.
+    _crop(client, "ev-a", 0.9)
+    sim = client.get("/enrich/clusters.json").json()["similar"]
+    assert sim["2"]["handle"] == handle_for(1)
+    assert "avatar" not in sim["2"]  # additive handle only on the JSON route
+    html = client.get("/enrich/clusters").text
+    assert 'src="/enrich/face/ev-a/0.jpg"' in html and 'class="id-sim-av"' in html
+    # Partner without a crop falls back to its Frigate thumbnail.
+    assert 'src="/enrich/thumb/ev-b"' in html  # cluster 1 looks like cluster 2 too
+
+
+def test_button_text_has_handle_and_never_unknown_number(client: TestClient) -> None:
+    _close_pair(client)
+    html = client.get("/enrich/clusters").text
+    assert "unknown #" not in html.lower()
+    assert "Unknown #" not in html
+    # Cluster 2 is unnamed; its partner (alice) shows by name, and alice's
+    # partner (cluster 2) shows as "Handle · #2".
+    assert "Looks like alice, merge?" in html
+    assert f"Looks like {handle_for(2)} · #2, merge?" in html
+
+
+def test_faces_json_order_limit_and_exclusions(client: TestClient) -> None:
+    for i, q in enumerate((0.2, 0.9, 0.5, 0.7, 0.6, 0.4, 0.3, 0.8)):
+        _crop(client, f"f{i}", q, cluster=2)
+    _crop(client, "gone", 0.99, cluster=2, excluded=True)
+    body = client.get("/enrich/clusters/2/faces.json").json()
+    assert [f["event_id"] for f in body["faces"]] == ["f1", "f7", "f3", "f4", "f2", "f5"]
+    assert body["faces"][0]["url"] == "/enrich/face/f1/0.jpg"
+    assert len(client.get("/enrich/clusters/2/faces.json?limit=2").json()["faces"]) == 2
+    assert client.get("/enrich/clusters/2/faces.json?limit=0").status_code == 422
+    # A live sighting with no stored crop is skipped (ev-b has none).
+    assert "ev-b" not in [f["event_id"] for f in body["faces"]]
+    assert client.get("/enrich/clusters/99/faces.json").status_code == 404
+
+
+def test_faces_json_is_behind_the_auth_gate(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path
+) -> None:
+    cfg = tmp_path / "c.yml"
+    cfg.write_text("cameras: {}\n")
+    settings = Settings(
+        frigate=FrigateSection(config_path=cfg, db_path=frigate_db_path),
+        sidecar=SidecarSection(db_path=sidecar_db_path, bind_port=5001, require_frigate_auth=True),
+        face_enrich=FaceEnrichSection(enabled=True),
+    )
+    anon = TestClient(create_app(settings))
+    sibling = anon.get("/enrich/clusters/index.json").status_code
+    assert sibling in (401, 403)
+    assert anon.get("/enrich/clusters/1/faces.json").status_code == sibling
+
+
+def test_no_unknown_number_wording_left(client: TestClient) -> None:
+    from pathlib import Path as P
+
+    root = P(__file__).resolve().parent.parent / "src" / "marcellus"
+    for rel in ("templates/enrich.html", "templates/face_captures.html", "static/js/enrich.js"):
+        assert "unknown #" not in (root / rel).read_text().lower(), rel

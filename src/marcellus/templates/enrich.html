@@ -119,7 +119,8 @@
         <button type="button" class="id-similar" data-id="{{ c.cluster_id }}"
                 data-other="{{ sim.cluster_id }}"
                 title="centroid distance {{ sim.distance }}">
-          Looks like {{ sim.name or 'unknown #' ~ sim.cluster_id }}, merge?
+          {% if sim.avatar %}<img class="id-sim-av" src="{{ sim.avatar }}" alt="" loading="lazy">{% endif %}
+          <span>Looks like {{ sim.name or (sim.handle ~ ' · #' ~ sim.cluster_id) }}, merge?</span>
         </button>
         {% endif %}
         <form class="id-name-form"{{ ' hidden' if c.name }} data-id="{{ c.cluster_id }}">

@@ -1150,7 +1150,7 @@ body.map-full-open .me-toolbar {
 .id-card:target { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .id-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
 .id-avatar {
-  width: 56px; height: 56px; border-radius: 50%; object-fit: cover; flex: none;
+  width: 72px; height: 72px; border-radius: 50%; object-fit: cover; flex: none;
   background: var(--deep); border: 2px solid var(--stroke);
 }
 .id-named .id-avatar { border-color: var(--accent); }
@@ -1194,7 +1194,7 @@ body.map-full-open .me-toolbar {
 
 .id-strip { display: flex; gap: var(--space-2); overflow-x: auto; padding-top: var(--space-3); scrollbar-width: thin; }
 .id-strip-wrap { flex-wrap: wrap; overflow: visible; }
-.id-sighting { position: relative; margin: 0; flex: none; width: 96px; }
+.id-sighting { position: relative; margin: 0; flex: none; width: 160px; }
 .id-open {
   display: block; position: relative; width: 100%; padding: 0; border: 0; background: var(--deep);
   border-radius: var(--radius-md); overflow: hidden; cursor: zoom-in; aspect-ratio: 1;
@@ -1221,7 +1221,7 @@ body.map-full-open .me-toolbar {
 .id-sighting:hover .id-evict, .id-evict:focus-visible, .id-include { opacity: 1; }
 .id-evict:hover { border-color: var(--danger); color: var(--danger); }
 .id-more {
-  flex: none; width: 96px; aspect-ratio: 1; display: flex; align-items: center; justify-content: center;
+  flex: none; width: 160px; aspect-ratio: 1; display: flex; align-items: center; justify-content: center;
   border: 1px dashed var(--stroke); border-radius: var(--radius-md); color: var(--muted);
   font-size: var(--text-sm); text-decoration: none;
 }
@@ -1248,6 +1248,18 @@ body.map-full-open .me-toolbar {
   border: 1px solid var(--stroke); border-radius: var(--radius-sm); padding: 8px 10px; font-size: var(--text-base);
 }
 .id-pick-list { max-height: 55vh; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.id-similar { display: inline-flex; align-items: center; gap: 8px; }
+.id-sim-av { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; flex: none; border: 1px solid var(--stroke-soft); }
+.me-dialog.id-evidence { max-width: min(560px, calc(100vw - 24px)); width: 100%; max-height: calc(100vh - 24px); overflow-y: auto; }
+.id-ev-summary { margin: 0; font-size: var(--text-sm); color: var(--muted); }
+.id-ev-side { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--stroke-soft); border-radius: var(--radius-sm); }
+.id-ev-goes { border-color: var(--warn, #e8a735); }
+.id-ev-keeps { border-color: var(--accent); }
+.id-ev-faces { display: flex; flex-wrap: wrap; gap: 6px; min-height: 40px; align-items: center; }
+.id-ev-face { width: 72px; height: 72px; object-fit: cover; border-radius: var(--radius-sm); border: 1px solid var(--stroke-soft); cursor: zoom-in; }
+.id-ev-big { max-width: 100%; max-height: 80vh; object-fit: contain; }
+.id-ev-note { color: var(--muted); font-size: var(--text-xs); }
+@media (max-width: 480px) { .id-ev-face { width: calc((100% - 12px) / 3 - 4px); height: auto; aspect-ratio: 1; } }
 .id-proposals { display: block; }
 .id-proposals[hidden] { display: none; }
 .id-prop-title { font-size: var(--text-base); margin: 0 0 var(--space-2); }
@@ -1324,7 +1336,7 @@ body.map-full-open .me-toolbar {
   .id-name-form { flex: 1; }
   .id-name-form .cluster-name { flex: 1; width: auto; min-height: 44px; font-size: 16px; }
   .id-name-form .btn, .id-menu > summary, .id-similar { min-height: 44px; }
-  .id-sighting, .id-more { width: 84px; }
+  .id-sighting, .id-more { width: 120px; }
   .id-evict { opacity: 1; width: 32px; height: 32px; }
   .fc-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: var(--space-2); }
   .fc-actions .btn { min-height: 44px; }
