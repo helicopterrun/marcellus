@@ -1150,7 +1150,7 @@ body.map-full-open .me-toolbar {
 .id-card:target { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .id-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
 .id-avatar {
-  width: 56px; height: 56px; border-radius: 50%; object-fit: cover; flex: none;
+  width: 72px; height: 72px; border-radius: 50%; object-fit: cover; flex: none;
   background: var(--deep); border: 2px solid var(--stroke);
 }
 .id-named .id-avatar { border-color: var(--accent); }
@@ -1194,7 +1194,8 @@ body.map-full-open .me-toolbar {
 
 .id-strip { display: flex; gap: var(--space-2); overflow-x: auto; padding-top: var(--space-3); scrollbar-width: thin; }
 .id-strip-wrap { flex-wrap: wrap; overflow: visible; }
-.id-sighting { position: relative; margin: 0; flex: none; width: 96px; }
+.id-sighting { position: relative; margin: 0; flex: none; width: 160px; }
+@media (max-width: 720px) { .id-sighting { width: 120px; } }
 .id-open {
   display: block; position: relative; width: 100%; padding: 0; border: 0; background: var(--deep);
   border-radius: var(--radius-md); overflow: hidden; cursor: zoom-in; aspect-ratio: 1;
