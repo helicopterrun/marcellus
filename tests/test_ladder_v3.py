@@ -513,11 +513,20 @@ class TestDeliveryPerLevel:
         assert _device_eligible(alert, camera="c", labels=(), card_level="urgent")
 
 
-async def _send(tmp_path: Path, card: Card, mutation: str, devices: list[Device]):
+async def _send(
+    tmp_path: Path, card: Card, mutation: str, devices: list[Device],
+    *, had_card: list[Device] | None = None,
+):
+    """`had_card`: devices already sent this story's card, so a resolve has a row."""
     conn = db.open_sidecar(tmp_path / "marcellus.db")
     transport = LogTransport()
     fallback: list[str] = []
     try:
+        for device in had_card or []:
+            store.record_card_send(
+                conn, apns_token=device.apns_token, card_key=card.card_key, mutation="create",
+                sent_at=0.0, ok=True, error=None,
+            )
         await send_card_mutation(
             conn, transport, devices, card, mutation, _payload(card, mutation),
             camera="cam", subject_kind="person", now=0.0, fallback_out=fallback,
@@ -552,9 +561,9 @@ class TestGlanceDelivery:
 
     @pytest.mark.asyncio
     async def test_glance_fallback_resolve_is_kept(self, sidecar_db_path, tmp_path):
+        devices = [_dev("a", la=True), _dev("mac", la=False)]
         sent, _ = await _send(
-            tmp_path, _card("quiet", fallback_row=True), "resolve",
-            [_dev("a", la=True), _dev("mac", la=False)],
+            tmp_path, _card("quiet", fallback_row=True), "resolve", devices, had_card=devices,
         )
         assert sent["d_a"]["ephemeral"] is True
         assert sent["d_mac"]["ephemeral"] is False
@@ -585,8 +594,63 @@ class TestEphemeralRule:
     @pytest.mark.asyncio
     async def test_resolve_ephemeral(self, sidecar_db_path, tmp_path, card_kw, ephemeral):
         card = _card(card_kw.pop("level"), **card_kw)
-        sent, _ = await _send(tmp_path, card, "resolve", [_dev("a", la=True)])
+        device = _dev("a", la=True)
+        sent, _ = await _send(tmp_path, card, "resolve", [device], had_card=[device])
         assert sent["d_a"]["ephemeral"] is ephemeral
+
+
+class TestResolveNeedsARow:
+    """A resolve updates a Notification Center row. Without one it would create it,
+    since an alert push can't be silent and the NSE can't drop it."""
+
+    @pytest.mark.parametrize("level", ["quiet", "log", "silent", "urgent"])
+    @pytest.mark.asyncio
+    async def test_no_card_sent_means_no_resolve(self, sidecar_db_path, tmp_path, level):
+        sent, _ = await _send(tmp_path, _card(level), "resolve", [_dev("a", la=True)])
+        assert sent == {}
+
+    @pytest.mark.asyncio
+    async def test_only_the_device_with_a_row_gets_it(self, sidecar_db_path, tmp_path):
+        has_row, no_row = _dev("a", la=True), _dev("b", la=True)
+        sent, _ = await _send(
+            tmp_path, _card("silent"), "resolve", [has_row, no_row], had_card=[has_row],
+        )
+        assert set(sent) == {"d_a"}
+
+    @pytest.mark.asyncio
+    async def test_a_failed_send_left_no_row(self, sidecar_db_path, tmp_path):
+        device = _dev("a", la=True)
+        card = _card("silent")
+        conn = db.open_sidecar(tmp_path / "marcellus.db")
+        store.record_card_send(
+            conn, apns_token=device.apns_token, card_key=card.card_key, mutation="create",
+            sent_at=0.0, ok=False, error="BadDeviceToken",
+        )
+        conn.commit()
+        conn.close()
+        sent, _ = await _send(tmp_path, card, "resolve", [device])
+        assert sent == {}
+
+    @pytest.mark.asyncio
+    async def test_an_earlier_resolve_is_not_a_row(self, sidecar_db_path, tmp_path):
+        device = _dev("a", la=True)
+        card = _card("quiet")
+        conn = db.open_sidecar(tmp_path / "marcellus.db")
+        store.record_card_send(
+            conn, apns_token=device.apns_token, card_key=card.card_key, mutation="resolve",
+            sent_at=0.0, ok=True, error=None,
+        )
+        conn.commit()
+        conn.close()
+        sent, _ = await _send(tmp_path, card, "resolve", [device])
+        assert sent == {}
+
+    @pytest.mark.asyncio
+    async def test_a_zone_override_keeps_its_row_regardless(self, sidecar_db_path, tmp_path):
+        sent, _ = await _send(
+            tmp_path, _card("quiet", zone_hit=True), "resolve", [_dev("a", la=True)],
+        )
+        assert sent["d_a"]["ephemeral"] is False
 
 
 async def _story(tmp_path: Path, levels: list[str], devices: list[Device]) -> dict:
@@ -624,9 +688,10 @@ class TestKeptRowSurvivesTheStory:
         assert sent["d_a"]["ephemeral"] is False
 
     @pytest.mark.asyncio
-    async def test_glance_only_resolve_is_ephemeral(self, sidecar_db_path, tmp_path):
-        sent = await _story(tmp_path, ["quiet"], [_dev("a", la=True)])
-        assert sent["d_a"]["ephemeral"] is True
+    async def test_glance_only_story_leaves_a_live_activity_device_no_row(
+        self, sidecar_db_path, tmp_path
+    ):
+        assert await _story(tmp_path, ["quiet"], [_dev("a", la=True)]) == {}
 
     @pytest.mark.asyncio
     async def test_urgent_resolve_is_kept(self, sidecar_db_path, tmp_path):
@@ -638,7 +703,7 @@ class TestKeptRowSurvivesTheStory:
         self, sidecar_db_path, tmp_path
     ):
         sent = await _story(tmp_path, ["quiet"], [_dev("a", la=True), _dev("mac", la=False)])
-        assert sent["d_a"]["ephemeral"] is True
+        assert "d_a" not in sent
         assert sent["d_mac"]["ephemeral"] is False
 
 

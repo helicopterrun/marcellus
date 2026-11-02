@@ -446,6 +446,16 @@ def test_delivery_enabled_defaults_true():
 # ---------------------------------------------------------------------------
 
 
+def _had_card(conn, device, card) -> None:
+    """The device got this story's card earlier, so a resolve has a row to update."""
+    from marcellus.push import store
+
+    store.record_card_send(
+        conn, apns_token=device.apns_token, card_key=card.card_key, mutation="create",
+        sent_at=0.0, ok=True, error=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_la_covered_resolve_row_is_deferred(
     sidecar_db_path: Path, monkeypatch,
@@ -468,6 +478,7 @@ async def test_la_covered_resolve_row_is_deferred(
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
 
+    _had_card(conn, device, card)
     await send_card_mutation(
         conn, transport, [device], card, RESOLVE, payload,
         subject_kind="person", camera="doorbell", now=10.0,
@@ -499,6 +510,7 @@ async def test_non_covered_device_resolve_row_is_immediate(sidecar_db_path: Path
         resolved=True, closed=True, kept_row=True,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
+    _had_card(conn, device, card)
     await send_card_mutation(
         conn, transport, [device], card, RESOLVE, payload,
         subject_kind="person", camera="doorbell", now=10.0,
@@ -537,6 +549,7 @@ async def test_deferred_resolve_exception_is_logged_not_lost(
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
 
     with caplog.at_level(logging.ERROR, logger="marcellus.push.delivery"):
+        _had_card(conn, device, card)
         await send_card_mutation(
             conn, transport, [device], card, RESOLVE, payload,
             subject_kind="person", camera="doorbell", now=10.0,
@@ -573,6 +586,7 @@ async def test_cancel_deferred_cancels_pending_tasks(sidecar_db_path: Path, monk
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
 
+    _had_card(conn, device, card)
     await send_card_mutation(
         conn, transport, [device], card, RESOLVE, payload,
         subject_kind="person", camera="doorbell", now=10.0,
@@ -611,6 +625,7 @@ async def test_resolve_push_not_ephemeral_for_silent_peak_story(sidecar_db_path:
         resolved=True, closed=True, kept_row=True,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
+    _had_card(conn, device, card)
     await send_card_mutation(
         conn, transport, [device], card, RESOLVE, payload,
         subject_kind="person", camera="doorbell", now=10.0,
@@ -637,6 +652,7 @@ async def test_resolve_push_is_ephemeral_for_quiet_peak_story(sidecar_db_path: P
         resolved=True, closed=True,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
+    _had_card(conn, device, card)
     await send_card_mutation(
         conn, transport, [device], card, RESOLVE, payload,
         subject_kind="person", camera="doorbell", now=10.0,
@@ -663,6 +679,7 @@ async def test_resolve_push_not_ephemeral_for_urgent_peak_story(sidecar_db_path:
         resolved=True, closed=True, kept_row=True,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
+    _had_card(conn, device, card)
     await send_card_mutation(
         conn, transport, [device], card, RESOLVE, payload,
         subject_kind="person", camera="doorbell", now=10.0,
@@ -688,6 +705,7 @@ async def test_resolve_push_not_ephemeral_for_zone_override_story(sidecar_db_pat
         resolved=True, closed=True, zone_override_hit=True,
     )
     payload = {"aps": {"alert": {"title": "Person at Doorbell", "body": "8s"}}}
+    _had_card(conn, device, card)
     await send_card_mutation(
         conn, transport, [device], card, RESOLVE, payload,
         subject_kind="person", camera="doorbell", now=10.0,
