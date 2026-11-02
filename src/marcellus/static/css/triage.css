@@ -1195,7 +1195,6 @@ body.map-full-open .me-toolbar {
 .id-strip { display: flex; gap: var(--space-2); overflow-x: auto; padding-top: var(--space-3); scrollbar-width: thin; }
 .id-strip-wrap { flex-wrap: wrap; overflow: visible; }
 .id-sighting { position: relative; margin: 0; flex: none; width: 160px; }
-@media (max-width: 720px) { .id-sighting { width: 120px; } }
 .id-open {
   display: block; position: relative; width: 100%; padding: 0; border: 0; background: var(--deep);
   border-radius: var(--radius-md); overflow: hidden; cursor: zoom-in; aspect-ratio: 1;
@@ -1222,11 +1221,12 @@ body.map-full-open .me-toolbar {
 .id-sighting:hover .id-evict, .id-evict:focus-visible, .id-include { opacity: 1; }
 .id-evict:hover { border-color: var(--danger); color: var(--danger); }
 .id-more {
-  flex: none; width: 96px; aspect-ratio: 1; display: flex; align-items: center; justify-content: center;
+  flex: none; width: 160px; aspect-ratio: 1; display: flex; align-items: center; justify-content: center;
   border: 1px dashed var(--stroke); border-radius: var(--radius-md); color: var(--muted);
   font-size: var(--text-sm); text-decoration: none;
 }
 .id-more:hover { color: var(--text); border-color: var(--muted-2); }
+@media (max-width: 720px) { .id-sighting, .id-more { width: 120px; } }
 
 /* Lightbox face stack: best face first and framed; dimmed = not used. */
 .id-lb-faces { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; width: min(88vw, 820px); }
