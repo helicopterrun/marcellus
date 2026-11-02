@@ -13,7 +13,8 @@ from marcellus import db
 from marcellus.config import FrigateSection, Settings, SidecarSection
 from marcellus.encounters.linker import Atom, LinkDecision
 from marcellus.encounters.store import upsert_atom
-from marcellus.models.wire import EncounterResponse, EncountersResponse
+from marcellus.models.wire import EncounterPeopleResponse as EncounterResponse
+from marcellus.models.wire import EncountersPeopleResponse as EncountersResponse
 from marcellus.server import create_app
 
 

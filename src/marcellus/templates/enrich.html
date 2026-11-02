@@ -70,6 +70,14 @@
     {% for n in known_names %}<option value="{{ n }}"></option>{% endfor %}
   </datalist>
 
+  {% if single is none and enabled %}
+  {# Filled by enrich.js from /enrich/merge-proposals.json; hidden when there is nothing to propose. #}
+  <section id="merge-proposals" class="pp-notice id-proposals" hidden>
+    <h2 class="id-prop-title">Proposed merges</h2>
+    <div class="id-prop-list"></div>
+  </section>
+  {% endif %}
+
   {% if not clusters %}
     <div class="pp-empty">
       {% if single is not none %}

@@ -364,6 +364,56 @@ def face_enrich_regate(
     typer.echo(json.dumps(enrich.regate(load_settings(), dry_run=dry_run)))
 
 
+@face_enrich_app.command("propose-merges")
+def face_enrich_propose_merges(
+    threshold: float | None = typer.Option(
+        None, help="Centroid distance; default face_enrich.consolidate_threshold."
+    ),
+) -> None:
+    """Print merge proposals (counts, group sizes, cluster ids; never names).
+
+    Read-only: opens the sidecar DB with mode=ro, writes nothing, and does not
+    touch the running service."""
+    import sqlite3
+    from pathlib import Path
+
+    from marcellus.faces import consolidate
+
+    s = load_settings()
+    path = Path(s.sidecar.db_path)
+    if not path.exists():
+        typer.echo(f"sidecar DB not found: {path}", err=True)
+        raise typer.Exit(code=1)
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        proposals = consolidate.propose_merges(
+            conn,
+            threshold=s.face_enrich.consolidate_threshold if threshold is None else threshold,
+        )
+    finally:
+        conn.close()
+    typer.echo(
+        json.dumps(
+            {
+                "groups": len(proposals),
+                "same_visit_groups": sum(p.same_visit for p in proposals),
+                "clusters_involved": sum(len(p.members) for p in proposals),
+                "largest_group": max((len(p.members) for p in proposals), default=0),
+                "proposals": [
+                    {
+                        "ids": [m.id for m in p.members],
+                        "survivor": p.survivor_id,
+                        "max_distance": p.max_distance,
+                        "same_visit": p.same_visit,
+                    }
+                    for p in proposals
+                ],
+            }
+        )
+    )
+
+
 @face_capture_app.command("prune")
 def face_capture_prune() -> None:
     """Drop captures past face_capture.retention_days."""
