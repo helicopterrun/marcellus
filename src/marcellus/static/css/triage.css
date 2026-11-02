@@ -1259,7 +1259,11 @@ body.map-full-open .me-toolbar {
 .id-ev-face { width: 168px; height: 168px; object-fit: cover; border-radius: var(--radius-sm); border: 1px solid var(--stroke-soft); cursor: zoom-in; }
 .id-ev-big { width: min(80vw, 80vh); height: auto; max-height: 80vh; object-fit: contain; }
 .id-ev-note { color: var(--muted); font-size: var(--text-xs); }
-@media (max-width: 480px) { .id-ev-face { width: calc(50% - 3px); height: auto; aspect-ratio: 1; } }
+/* Sides stack when narrow, so each swipes sideways: two people stay on screen together. */
+@media (max-width: 800px) {
+  .id-ev-faces { flex-wrap: nowrap; overflow-x: auto; align-items: flex-start; }
+  .id-ev-face { flex: none; }
+}
 /* The decision stays in reach however many faces there are to scroll past. */
 .id-evidence .me-actions { position: sticky; bottom: 0; padding-block: var(--space-2); background: var(--surface, var(--panel)); }
 .id-ev-sides { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: var(--space-2); align-items: start; }
