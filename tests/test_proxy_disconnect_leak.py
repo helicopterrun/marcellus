@@ -23,6 +23,7 @@ so `pool_stats()` sees httpcore's real connection state.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import socket
 import time
@@ -254,9 +255,112 @@ def test_pool_check_recycles_a_wedged_pool_without_healthz(monkeypatch: Any) -> 
     full = {"connections": health._STREAM_LIMITS.max_connections, "active": 64, "idle": 0}
     monkeypatch.setattr(health, "pool_stats", lambda client: full)
     recycled: list[Any] = []
-    monkeypatch.setattr(health, "_recycle_stream_client", lambda a: recycled.append(a))
+    monkeypatch.setattr(health, "_recycle_stream_client", lambda a, *_: recycled.append(a))
 
     stats, saturated = health.check_stream_pool(app, 100.0)
     assert saturated and stats == full and not recycled
     health.check_stream_pool(app, 100.0 + health._STALLED_POOL_RECYCLE_S)
     assert recycled == [app]
+
+
+def _small_body_handler(header_delay: float) -> Any:
+    """Frigate answering an image/JSON request: headers after `header_delay`,
+    then a small body sent whole -- so httpx has the complete response (and
+    starts closing it) on its very first body read."""
+
+    def handler(conn: socket.socket) -> None:
+        _read_request_path(conn)
+        time.sleep(header_delay)
+        body = b"j" * 800
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\ncontent-type: image/jpeg\r\ncontent-length: "
+            + str(len(body)).encode()
+            + b"\r\n\r\n"
+            + body
+        )
+        # Keep-alive, as Frigate's nginx does: the socket stays open, so a
+        # connection httpcore never released is never closed out from under it.
+        time.sleep(5.0)
+
+    return handler
+
+
+def test_burst_of_cancelled_small_requests_releases_every_connection(
+    tmp_path: Path, frigate_db_path: Path, sidecar_db_path: Path
+) -> None:
+    """2026-10-19 wedge: rapid Previous/Next taps fired bursts of event
+    thumbnails, snapshots and `/api/events`, and the app cancelled most of
+    them in flight. Each request's body was small enough to arrive whole, so
+    the client's disconnect cancelled the response while httpx was *closing*
+    it. On Python 3.10 `asyncio.wait_for` ran that body read in a child task
+    and delivered the cancel natively, which anyio's shield (httpcore's only
+    protection for the close) cannot block: every layer had already marked
+    itself closed, the connection stayed ACTIVE, and the pool lost a slot for
+    good -- 37 of 64 by the evening, then a burst finished it off."""
+    upstream = FakeUpstream(_small_body_handler(header_delay=0.05))
+    try:
+        settings = _settings(tmp_path, frigate_db_path, sidecar_db_path, upstream.port)
+        with TestClient(create_app(settings)) as client:
+            app = client.app
+
+            async def burst() -> None:
+                async with anyio.create_task_group() as tg:
+                    for i in range(30):
+                        tg.start_soon(
+                            functools.partial(
+                                _drive_until_disconnect,
+                                app,
+                                f"/api/events/{i}.0-abc/thumbnail.jpg",
+                                disconnect_after_body=False,
+                                disconnect_at_once=True,
+                            )
+                        )
+
+            for _ in range(2):
+                client.portal.call(burst)
+            busy = _await_released(client.app.state.stream_http_client)
+    finally:
+        upstream.close()
+    assert busy == 0, f"{busy} upstream connection(s) left open"
+
+
+def test_interrupted_close_is_finished_by_the_release_check() -> None:
+    """The backstop on its own: a native `Task.cancel()` landing inside
+    httpx's close (what `asyncio.wait_for` did on 3.10) leaves the connection
+    ACTIVE with every later `aclose()` a no-op; `_finish_interrupted_close`
+    must notice and release it, and must leave a cleanly closed response alone."""
+    import asyncio
+
+    import httpx
+
+    from marcellus.routes import proxy as proxy_module
+
+    upstream = FakeUpstream(_small_body_handler(header_delay=0.0))
+
+    async def scenario() -> tuple[int, bool, int, int, bool]:
+        async with httpx.AsyncClient() as client:
+            url = f"http://127.0.0.1:{upstream.port}/api/events/1.0-abc/thumbnail.jpg"
+            resp = await client.send(client.build_request("GET", url), stream=True)
+            closing = asyncio.ensure_future(resp.aclose())
+            await asyncio.sleep(0)  # let the close start, then cut it short
+            closing.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await closing
+            await resp.aclose()  # a no-op now: everything says "closed"
+            leaked = _open_busy(client)
+            stepped_in = await proxy_module._finish_interrupted_close(resp, "t")
+            after = _open_busy(client)
+
+            clean = await client.send(client.build_request("GET", url), stream=True)
+            await clean.aread()
+            await clean.aclose()
+            untouched = not await proxy_module._finish_interrupted_close(clean, "t")
+            return leaked, stepped_in, after, len(client._transport._pool._requests), untouched
+
+    try:
+        leaked, stepped_in, after, pending, untouched = anyio.run(scenario)
+    finally:
+        upstream.close()
+    assert leaked == 1, "the simulated interruption should strand the connection"
+    assert stepped_in and after == 0 and pending == 0
+    assert untouched
