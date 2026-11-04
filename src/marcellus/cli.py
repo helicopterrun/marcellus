@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 from collections.abc import Iterator
-from typing import Any
+from typing import Annotated, Any
 
 import typer
 
@@ -25,11 +25,18 @@ face_capture_app = typer.Typer(
     help="High-res cross-camera face capture: grab the ID camera's full-res frame "
     "when a front camera sees a person."
 )
+wildlife_app = typer.Typer(
+    help="Wildlife finder: MegaDetector + SpeciesNet over segments where Frigate "
+    "tracked nothing."
+)
+face_enrich_app = typer.Typer(help="Face enrichment: the identities behind /enrich/clusters.")
 scrub_app = typer.Typer(help="Uniform-cadence scrub-cache generation (sprite sheets).")
 encounters_app = typer.Typer(help="Encounters: linked chains of Frigate review segments.")
 app.add_typer(triage_app, name="triage")
 app.add_typer(analysis_app, name="analysis")
 app.add_typer(face_capture_app, name="face-capture")
+app.add_typer(face_enrich_app, name="face-enrich")
+app.add_typer(wildlife_app, name="wildlife")
 app.add_typer(scrub_app, name="scrub")
 app.add_typer(encounters_app, name="encounters")
 
@@ -334,6 +341,79 @@ def face_capture_scan() -> None:
         raise typer.Exit(code=2)
 
 
+@face_capture_app.command("regate")
+def face_capture_regate(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Count only; change nothing."),
+) -> None:
+    """Apply the face gate to stored captures: drop faceless frames, re-crop the rest."""
+    from marcellus.faces import crosscam
+
+    out = crosscam.regate(load_settings(), dry_run=dry_run)
+    typer.echo(json.dumps(out))
+    if out.get("error"):
+        raise typer.Exit(code=2)
+
+
+@face_enrich_app.command("regate")
+def face_enrich_regate(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Count only; change nothing."),
+) -> None:
+    """Apply min_det_score to clustered sightings: detach the ones whose face isn't one."""
+    from marcellus.faces import enrich
+
+    typer.echo(json.dumps(enrich.regate(load_settings(), dry_run=dry_run)))
+
+
+@face_enrich_app.command("propose-merges")
+def face_enrich_propose_merges(
+    threshold: float | None = typer.Option(
+        None, help="Centroid distance; default face_enrich.consolidate_threshold."
+    ),
+) -> None:
+    """Print merge proposals (counts, group sizes, cluster ids; never names).
+
+    Read-only: opens the sidecar DB with mode=ro, writes nothing, and does not
+    touch the running service."""
+    import sqlite3
+    from pathlib import Path
+
+    from marcellus.faces import consolidate
+
+    s = load_settings()
+    path = Path(s.sidecar.db_path)
+    if not path.exists():
+        typer.echo(f"sidecar DB not found: {path}", err=True)
+        raise typer.Exit(code=1)
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        proposals = consolidate.propose_merges(
+            conn,
+            threshold=s.face_enrich.consolidate_threshold if threshold is None else threshold,
+        )
+    finally:
+        conn.close()
+    typer.echo(
+        json.dumps(
+            {
+                "groups": len(proposals),
+                "same_visit_groups": sum(p.same_visit for p in proposals),
+                "clusters_involved": sum(len(p.members) for p in proposals),
+                "largest_group": max((len(p.members) for p in proposals), default=0),
+                "proposals": [
+                    {
+                        "ids": [m.id for m in p.members],
+                        "survivor": p.survivor_id,
+                        "max_distance": p.max_distance,
+                        "same_visit": p.same_visit,
+                    }
+                    for p in proposals
+                ],
+            }
+        )
+    )
+
+
 @face_capture_app.command("prune")
 def face_capture_prune() -> None:
     """Drop captures past face_capture.retention_days."""
@@ -508,6 +588,83 @@ def face_capture_stats(days: int = typer.Option(7, min=1)) -> None:
                 "by_review": by_review,
                 "bytes": total_bytes,
                 "last_run": crosscam.read_last_run(s),
+            },
+            indent=2,
+        )
+    )
+
+
+# ----- Wildlife finder subcommands -----
+
+
+def _parse_when(value: str | None) -> float | None:
+    """ISO-8601 (`2026-10-17T13:00-07:00`) or a unix timestamp."""
+    if value is None:
+        return None
+    from datetime import datetime
+
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except ValueError as exc:
+        raise typer.BadParameter(f"not an ISO time or unix timestamp: {value!r}") from exc
+
+
+@wildlife_app.command("scan")
+def wildlife_scan(
+    start: str | None = typer.Option(
+        None, help="Backfill window start (ISO-8601 or unix ts); default: lookback_s ago."
+    ),
+    end: str | None = typer.Option(
+        None, help="Backfill window end; default: now - process_delay_s."
+    ),
+    camera: Annotated[
+        list[str] | None,
+        typer.Option("--camera", "-c", help="Limit to these configured cameras (repeatable)."),
+    ] = None,
+    max_runtime: float | None = typer.Option(
+        None, help="Override wildlife.max_runtime_s for this run, in seconds."
+    ),
+) -> None:
+    """Scan due motion-only segments for animals Frigate missed."""
+    from marcellus.wildlife import finder
+
+    s = load_settings()
+    summary = finder.scan(
+        s,
+        lower=_parse_when(start),
+        upper=_parse_when(end),
+        cameras=camera or None,
+        max_runtime_s=max_runtime,
+    )
+    typer.echo(json.dumps(summary))
+    if summary.get("problems"):
+        raise typer.Exit(code=2)
+
+
+@wildlife_app.command("prune")
+def wildlife_prune() -> None:
+    """Drop finder rows and images past wildlife.retention_days."""
+    from marcellus.wildlife import finder
+
+    typer.echo(json.dumps(finder.prune(load_settings())))
+
+
+@wildlife_app.command("stats")
+def wildlife_stats(days: int = typer.Option(7, min=1)) -> None:
+    """Per-camera scoreboard (Frigate caught vs finder found) plus the last run."""
+    from marcellus.wildlife import finder
+
+    s = load_settings()
+    typer.echo(
+        json.dumps(
+            {
+                "days": days,
+                "scoreboard": finder.scoreboard(s, days=days),
+                "last_run": finder.read_last_run(s),
             },
             indent=2,
         )

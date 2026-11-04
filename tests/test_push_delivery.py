@@ -86,7 +86,7 @@ def test_delivery_case(case):
 
 def test_golden_delivery_suite_is_complete():
     """Guards against a silently truncated fixture file."""
-    assert len(CASES) == 6
+    assert len(CASES) == 8
 
 
 def test_simultaneous_cards_on_same_camera_stay_distinct():

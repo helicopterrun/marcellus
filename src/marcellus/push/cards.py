@@ -32,24 +32,35 @@ RESOLVE = "resolve"
 SUPPRESSED = "suppressed"
 
 #: One sound per story: a card that sounded at create doesn't sound again
-#: at escalation. If create was silent (quiet level), escalation can still
-#: sound. The urgent re-sound cadence is separate (`Card.resound_count`).
+#: at escalation. If create was silent (a Quiet or Glance level), escalation
+#: can still sound. The urgent re-sound cadence is separate
+#: (`Card.resound_count`).
 SOUND_BUDGET = 1
 
-#: Levels the level->APNs mapping (`delivery.py`) sends a push for at all.
-#: `log` and `suppressed` never reach a card as a *visible* mutation; `log`
-#: cards are still recorded (for the timeline/digest, out of scope this
-#: phase) but never pushed.
-PUSHABLE_LEVELS = ("quiet", "notify", "urgent")
+#: The ONE definition of which ladder levels carry a card push (ladder v3
+#: §5.1; `delivery.LEVEL_APNS` derives its `push` flags from this, so the two
+#: can no longer disagree). `silent` is a passive, kept Notification Center
+#: row; `urgent` the time-sensitive banner. `quiet` (Glance) is a Live
+#: Activity and pushes no card -- except to a device that can't show a Live
+#: Activity, where it is delivered as a `silent` card instead
+#: (`GLANCE_FALLBACK_LEVELS`, `delivery.send_card_mutation`). `log` and
+#: `suppressed` never push.
+PUSHABLE_LEVELS = ("silent", "urgent")
+
+#: Levels whose card push exists only as the Glance fallback (§5.3): built
+#: and sent, as a `silent` card, to devices without Live Activity support.
+GLANCE_FALLBACK_LEVELS = ("quiet",)
 
 #: Levels that carry sound on their *own* push (subject to the budget above).
-#: `quiet` never sounds, at create or on any mutation, per the level->APNs
-#: mapping table.
-SOUNDED_LEVELS = ("notify", "urgent")
+#: Only `urgent` (v3 §5.1): `silent` never sounds, at create or on any
+#: mutation, and `quiet` pushes no card at all.
+SOUNDED_LEVELS = ("urgent",)
 
 
 def _level_index(level: str) -> int:
-    return policy.LEVELS.index(level)
+    # `canonical_level`: a card row persisted before ladder v3 may still read
+    # `notify` -- §6 translates it to `silent` at this boundary.
+    return policy.LEVELS.index(policy.canonical_level(level))
 
 
 @dataclass
@@ -106,6 +117,14 @@ class Card:
     #: cleared otherwise -- an escalate/resolve mutation mints no media of
     #: its own but the story keeps its picture. `""` means "none minted yet".
     media_handle: str = ""
+    #: Sticky (ladder v3 §5.2): a Quiet (`silent`) or Urgent card push was
+    #: delivered for this story -- it left a Notification Center row that
+    #: stays until opened/cleared, so its resolve is never ephemeral. Set by
+    #: `delivery.send_card_mutation`, never cleared.
+    kept_row: bool = False
+    #: Sticky: a Glance card reached a device without Live Activities as its
+    #: silent fallback (§5.3) -- a kept row on *those* devices only.
+    fallback_row: bool = False
 
     @property
     def sound_budget_remaining(self) -> bool:
@@ -151,12 +170,15 @@ def should_sound(card: Card, mutation: str, new_level: str) -> bool:
     """Whether *this* mutation spends a sound, against the per-card budget
     (`SOUND_BUDGET = 1`: one sound per story). A card that sounded at create
     doesn't sound again at escalation; if create was silent (quiet level),
-    escalation can still sound. `quiet` never sounds even when budget
-    remains. Deescalate/enrich/resolve never sound by definition.
+    escalation can still sound. `silent`/`quiet` never sound even when budget
+    remains. Deescalate/enrich/resolve never sound by definition. Only
+    `urgent` sounds at all (`SOUNDED_LEVELS`).
     """
     if mutation not in (CREATE, ESCALATE):
         return False
-    if new_level not in SOUNDED_LEVELS:
+    # A system card is not a ladder level: it keeps its own delivery, an
+    # active push with sound (v3 §6).
+    if new_level not in SOUNDED_LEVELS and new_level != policy.SYSTEM_CARD_LEVEL:
         return False
     return card.sound_budget_remaining
 

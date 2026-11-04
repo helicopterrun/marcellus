@@ -29,15 +29,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
+import anyio
 import httpx
 from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
-from starlette.types import Send
+from starlette.types import Receive, Scope, Send
 
 from marcellus.errors import error_detail
-from marcellus.frigate_api import get_stream_client, pool_stats
+from marcellus.frigate_api import get_stream_client, get_vod_stream_client, pool_stats
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +109,120 @@ assert _IDLE_CHUNK_TIMEOUT_S < _LATE_HEADER_ABANDON_S
 _CLIENT_STALL_TIMEOUT_S = 30.0
 _STREAM_MAX_DURATION_S = 600.0
 
+# Releasing the upstream must survive the response being cancelled. uvicorn
+# advertises ASGI spec 2.3, so Starlette runs the body next to
+# `listen_for_disconnect` in a task group and cancels it the moment the client
+# goes away (a player seeking, an app killed mid-segment). anyio cancellation
+# is level-triggered: every later `await` in that task is cancelled too, so an
+# unshielded `await resp.aclose()` in a `finally` never completes and the
+# connection stays ACTIVE in the pool -- in CLOSE-WAIT once Frigate hangs up.
+# On 2026-10-17 that filled all 64 stream-pool slots in ~45 minutes of
+# simulator testing (Python 3.10 / Starlette 1.0.0 / anyio 4.13 in prod; the
+# newer stack on the dev Mac did not reproduce it). The release is therefore
+# shielded, and bounded so a hung close can never pin the response either.
+#
+# The shield only holds against *anyio* cancellation. On 2026-10-19 the pool
+# still leaked (2 -> 37 of 64 slots over 40 h, then a burst of event-chip
+# taps filled it and recorded playback 503'd for 30 s): the idle-chunk bound
+# was `asyncio.wait_for(chunks.__anext__())`, which on Python 3.10 runs the
+# read in a child task and, when Starlette cancels the response, cancels that
+# task natively. A small image/JSON body arrives whole on the first read, so a
+# client that hung up early caught httpx mid-close: httpx, httpcore's pool
+# stream and the HTTP/1.1 stream each mark themselves closed *before*
+# awaiting, the native cancel cut `_response_closed()` short inside
+# httpcore's own shield, and the connection stayed ACTIVE with every later
+# `aclose()` a no-op -- and already out of the reaper's registry. (3.12+
+# `wait_for` runs in-task, which is why the dev Mac never saw it.) Nothing may
+# therefore read or close an upstream response under `asyncio.wait_for`; those
+# time limits are anyio scopes in the same task, and `_finish_interrupted_close`
+# checks after every release that httpcore really let go.
+_RELEASE_TIMEOUT_S = 5.0
+
+# Backstop for any path that still leaks: every upstream response is
+# registered while open, and `reap_stale_upstreams` (run by the server's
+# proxy watchdog) closes one still open this long after it was opened. No
+# legitimate response outlives `_STREAM_MAX_DURATION_S`, so anything past it
+# plus a minute is a leak -- logged with its path and progress so the next
+# one names its own cause, and closed so it can't hold a pool slot for good.
+_REAP_AFTER_S = _STREAM_MAX_DURATION_S + 60.0
+
+
+@dataclass
+class _OpenUpstream:
+    path: str
+    opened: float
+    resp: httpx.Response
+    body_started: bool = False
+    bytes_relayed: int = 0
+
+
+def _open_upstreams(app: Any) -> dict[int, _OpenUpstream]:
+    registry = getattr(app.state, "proxy_open_upstreams", None)
+    if registry is None:
+        registry = {}
+        app.state.proxy_open_upstreams = registry
+    return registry
+
+
+async def _finish_interrupted_close(resp: httpx.Response, path: str) -> bool:
+    """Release the connection behind `resp` if an earlier close was cut short.
+
+    Call after `resp.aclose()`. A completed close removes the request from
+    httpcore's pool; one interrupted mid-way (the 2026-10-19 leak, see
+    `_RELEASE_TIMEOUT_S`) leaves the request in the pool holding an ACTIVE
+    connection, and every further `aclose()` is a no-op. This finishes that
+    close the way httpcore's own `PoolByteStream.aclose` would have: close
+    the connection, drop the request, let the pool prune and reassign.
+
+    Reaches into httpx/httpcore internals, so any shape change on an upgrade
+    degrades this to a no-op rather than an error. Returns True if it had to
+    step in.
+    """
+    try:
+        stream: Any = resp.stream
+        pool_stream = stream._stream._httpcore_stream
+        pool = pool_stream._pool
+        pool_request = pool_stream._pool_request
+        if pool_request not in pool._requests:
+            return False
+        connection = pool_request.connection
+        logger.warning(
+            "proxy: upstream close was interrupted, force-releasing its connection path=%s",
+            path,
+        )
+        if connection is not None:
+            await connection.aclose()
+        with pool._optional_thread_lock:
+            if pool_request in pool._requests:
+                pool._requests.remove(pool_request)
+            closing = pool._assign_requests_to_connections()
+        await pool._close_connections(closing)
+        return True
+    except Exception:
+        logger.debug("proxy: could not check upstream release for %s", path, exc_info=True)
+        return False
+
+
+async def reap_stale_upstreams(app: Any, now: float | None = None) -> int:
+    """Close upstream responses open longer than `_REAP_AFTER_S`; returns how many."""
+    registry = _open_upstreams(app)
+    now = asyncio.get_event_loop().time() if now is None else now
+    stale = [(key, entry) for key, entry in registry.items() if now - entry.opened > _REAP_AFTER_S]
+    for key, entry in stale:
+        registry.pop(key, None)
+        logger.warning(
+            "proxy: reaped leaked upstream path=%s age=%.0fs body_started=%s bytes=%d",
+            entry.path,
+            now - entry.opened,
+            entry.body_started,
+            entry.bytes_relayed,
+        )
+        with anyio.move_on_after(_RELEASE_TIMEOUT_S, shield=True):
+            with contextlib.suppress(Exception):
+                await entry.resp.aclose()
+            await _finish_interrupted_close(entry.resp, entry.path)
+    return len(stale)
+
 
 class _BoundedStreamingResponse(StreamingResponse):
     """StreamingResponse that also bounds the client side and the total
@@ -117,9 +234,45 @@ class _BoundedStreamingResponse(StreamingResponse):
     upstream connection is always released back to the pool.
     """
 
-    def __init__(self, *args: Any, log_path: str, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        log_path: str,
+        release_upstream: Callable[[], Awaitable[None]] | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._log_path = log_path
+        self._release_upstream = release_upstream
+        self._released = False
+
+    async def _release(self) -> None:
+        """Close the body iterator and the upstream response, exactly once,
+        shielded from cancellation and bounded by `_RELEASE_TIMEOUT_S`.
+
+        Both steps matter: `aclose()` on a body iterator that never produced a
+        chunk does not run its `finally` (an un-started async generator), so
+        the upstream response is closed directly as well.
+        """
+        if self._released:
+            return
+        self._released = True
+        with anyio.move_on_after(_RELEASE_TIMEOUT_S, shield=True):
+            aclose = getattr(self.body_iterator, "aclose", None)
+            if aclose is not None:
+                with contextlib.suppress(Exception):
+                    await aclose()
+            if self._release_upstream is not None:
+                with contextlib.suppress(Exception):
+                    await self._release_upstream()
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # Covers the paths `stream_response` never reaches or never finishes:
+        # cancelled before it starts, or `send` of the start message failing.
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._release()
 
     async def stream_response(self, send: Send) -> None:
         loop = asyncio.get_event_loop()
@@ -140,26 +293,20 @@ class _BoundedStreamingResponse(StreamingResponse):
                 if loop.time() >= deadline:
                     reason = "max_duration"
                     break
-                try:
-                    await asyncio.wait_for(
-                        send({"type": "http.response.body", "body": chunk, "more_body": True}),
-                        timeout=_CLIENT_STALL_TIMEOUT_S,
-                    )
-                except asyncio.TimeoutError:
+                with anyio.move_on_after(_CLIENT_STALL_TIMEOUT_S) as stall:
+                    await send({"type": "http.response.body", "body": chunk, "more_body": True})
+                if stall.cancelled_caught:
                     reason = "client_stall"
                     break
                 bytes_sent += len(chunk)
         finally:
             # Always release the upstream connection regardless of how the
-            # loop above ended -- client disconnect, any exception raised out
-            # of `send`/iteration, or a normal fall-through -- not just the
-            # stall/deadline paths. This is what actually returns the
-            # connection to the pool; skipping it on an unexpected exception
-            # is exactly what let CLOSE-WAIT sockets pile up.
-            aclose = getattr(self.body_iterator, "aclose", None)
-            if aclose is not None:
-                with contextlib.suppress(Exception):
-                    await aclose()
+            # loop above ended -- client disconnect (a cancellation, see
+            # `_RELEASE_TIMEOUT_S`), any exception raised out of
+            # `send`/iteration, or a normal fall-through. This is what returns
+            # the connection to the pool; skipping it is exactly what let
+            # CLOSE-WAIT sockets pile up.
+            await self._release()
 
         if reason is not None:
             logger.warning(
@@ -173,11 +320,8 @@ class _BoundedStreamingResponse(StreamingResponse):
         # to terminate the response cleanly; on a stall/deadline abort the
         # client is presumably not reading anyway, so a failure here is
         # expected and harmless.
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(
-                send({"type": "http.response.body", "body": b"", "more_body": False}),
-                timeout=_CLIENT_STALL_TIMEOUT_S,
-            )
+        with contextlib.suppress(Exception), anyio.move_on_after(_CLIENT_STALL_TIMEOUT_S):
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
 
 
 def _upstream_url(settings: Any, path: str, query: str, *, scheme_ws: bool = False) -> str:
@@ -266,7 +410,12 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
 
     body = await request.body()
 
-    client = get_stream_client(request.app)
+    # Recorded playback never shares a pool with the app's image/JSON bursts
+    # (see `frigate_api._VOD_STREAM_LIMITS`).
+    if path.startswith("vod/"):
+        client = get_vod_stream_client(request.app)
+    else:
+        client = get_stream_client(request.app)
     try:
         req = client.build_request(
             request.method,
@@ -295,6 +444,12 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
         send_task = asyncio.ensure_future(client.send(req, stream=True))
         try:
             resp = await asyncio.wait_for(asyncio.shield(send_task), timeout=_HEADER_WAIT_TIMEOUT_S)
+        except asyncio.CancelledError:
+            # This handler cancelled mid-wait (shutdown, or any future
+            # middleware that cancels on disconnect): the shielded send still
+            # lands, and its response would hold a slot with no one to close it.
+            _reap_late_send(send_task, upstream)
+            raise
         except (asyncio.TimeoutError, httpx.ReadTimeout) as exc:
             logger.warning(
                 "proxy: header wait timed out (%.0fs) streaming %s pool_stats=%s",
@@ -338,33 +493,49 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
         headers.pop("content-encoding", None)
         headers.pop("content-length", None)
 
+    registry = _open_upstreams(request.app)
+    entry = _OpenUpstream(path=path, opened=asyncio.get_event_loop().time(), resp=resp)
+    registry[id(resp)] = entry
+
+    async def release_upstream() -> None:
+        registry.pop(id(resp), None)
+        await resp.aclose()
+        await _finish_interrupted_close(resp, path)
+
     async def stream_body() -> Any:
         try:
+            entry.body_started = True
             if buffered:
                 yield resp.content
             else:
                 chunks = resp.aiter_raw()
                 while True:
-                    try:
-                        chunk = await asyncio.wait_for(
-                            chunks.__anext__(), timeout=_IDLE_CHUNK_TIMEOUT_S
-                        )
-                    except StopAsyncIteration:
-                        break
-                    except asyncio.TimeoutError:
+                    # An anyio scope, never `asyncio.wait_for`: on Python 3.10
+                    # `wait_for` runs the read in a child task and cancels it
+                    # with a native `Task.cancel()`, which anyio's shield cannot
+                    # block. A client disconnect landing while httpx closes a
+                    # small, fully read body then left the connection ACTIVE
+                    # for good -- see the 2026-10-19 note at `_RELEASE_TIMEOUT_S`.
+                    with anyio.move_on_after(_IDLE_CHUNK_TIMEOUT_S) as idle:
+                        try:
+                            chunk = await chunks.__anext__()
+                        except StopAsyncIteration:
+                            break
+                    if idle.cancelled_caught:
                         logger.warning(
                             "proxy: idle read timeout (%.0fs) streaming %s; ending response",
                             _IDLE_CHUNK_TIMEOUT_S,
                             upstream,
                         )
                         break
+                    entry.bytes_relayed += len(chunk)
                     yield chunk
         finally:
             # A cancelled `__anext__` (e.g. from `_BoundedStreamingResponse`'s
             # own stall/duration watchdog reaching in and closing this
             # generator) must never skip releasing the upstream connection.
             try:
-                await resp.aclose()
+                await release_upstream()
             except Exception:
                 logger.debug("proxy: resp.aclose() raised closing %s", upstream, exc_info=True)
 
@@ -374,6 +545,7 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
         headers=headers,
         media_type=resp.headers.get("content-type"),
         log_path=path,
+        release_upstream=release_upstream,
     )
     # Set-Cookie is the one header Frigate can legitimately send more than once
     # (login sets both the session and its refresh companion); reading it off
@@ -487,5 +659,8 @@ async def proxy_websocket(path: str, websocket: WebSocket) -> None:
                 await task
     finally:
         await upstream_ws.close()
-        with contextlib.suppress(RuntimeError):
+        # RuntimeError: already closed. AttributeError: the client left during the
+        # handshake, so uvicorn's websockets protocol never opened and its close() has
+        # no transfer_data_task. Either way there is nothing left to close.
+        with contextlib.suppress(RuntimeError, AttributeError):
             await websocket.close()

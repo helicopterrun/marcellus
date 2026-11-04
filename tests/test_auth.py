@@ -111,10 +111,12 @@ def test_valid_session_passes_and_is_cached(
     for _ in range(3):
         r = client.get("/", headers={"cookie": "frigate_token=abc"})
         assert r.status_code == 200
-    # Validated once upstream, then served from the TTL cache.
-    assert len(upstream_calls) == 1
-    assert upstream_calls[0].url.path == "/api/version"
-    assert upstream_calls[0].headers["cookie"] == "frigate_token=abc"
+    # Validated once upstream, then served from the TTL cache. (`/` also runs
+    # the cookie-less /healthz Frigate probe for its verdict; not a validation.)
+    validations = [c for c in upstream_calls if "cookie" in c.headers]
+    assert len(validations) == 1
+    assert validations[0].url.path == "/api/version"
+    assert validations[0].headers["cookie"] == "frigate_token=abc"
 
 
 def test_invalid_session_is_rejected(
@@ -173,7 +175,10 @@ def test_gate_can_be_disabled_for_an_unauthenticated_frigate(
         require_frigate_auth=False,
     )
     assert client.get("/").status_code == 200
-    assert not upstream_calls
+    # No session validation upstream. The only call allowed is the single
+    # /healthz Frigate probe the status page's verdict makes (cached 10 s).
+    assert len(upstream_calls) <= 1
+    assert all(c.url.path == "/api/version" for c in upstream_calls)
 
 
 def test_session_cache_is_bounded() -> None:

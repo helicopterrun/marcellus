@@ -12,29 +12,64 @@ evaluator in `ladder.py` never branches on any of these values by name.
 
 from __future__ import annotations
 
-#: Ordinal, low -> high. Index arithmetic in `ladder.py` (clamp, nudge, cap,
-#: floor) all assume this order.
-LEVELS = ("log", "quiet", "notify", "urgent")
+#: Ordinal, low -> high (attention ladder v3, `docs/ladder-v3.md` §1). Index
+#: arithmetic in `ladder.py` (clamp, nudge, cap, floor) all assume this order.
+#:   log    -- Ignore: recorded, shown in the app only
+#:   silent -- Quiet: passive card push, never a sound, kept in Notification
+#:             Center (new in v3; deliberately not `quiet`, which is Glance)
+#:   quiet  -- Glance: a Live Activity, no card push
+#:   urgent -- Urgent: time-sensitive banner, sound per mute
+#: `notify` is retired from routing: legacy input carrying it is translated to
+#: `silent` at the boundary (`LEGACY_LEVEL_MAP`); system cards keep their own
+#: `SYSTEM_CARD_LEVEL` path outside this tuple.
+LEVELS = ("log", "silent", "quiet", "urgent")
 
-#: subject x place -> base level, before nudges/floor/caps.
+#: The four places (v3). `private` is retired and read as `yard` wherever it
+#: still appears in input (`canonical_place`).
+PLACES = ("street", "yard", "doors", "off_limits")
+
+#: Pre-v3 level words that may still arrive from legacy input, stored cards
+#: or fixtures -> their v3 engine level (§6: `notify` -> `silent`).
+LEGACY_LEVEL_MAP = {"notify": "silent"}
+
+
+def canonical_place(place: str) -> str:
+    """`private` (retired in v3) reads as `yard`; everything else as-is."""
+    return "yard" if place == "private" else place
+
+
+def canonical_level(level: str) -> str:
+    """A level word from anywhere (stored card, legacy body) as a v3 engine
+    level: `notify` -> `silent`; anything else unchanged."""
+    return LEGACY_LEVEL_MAP.get(level, level)
+
+
+#: subject x place -> base level, before nudges/floor/caps. The evaluator's
+#: own built-in baseline, used when no settings were ever applied (the golden
+#: suite's table); the live, user-edited table comes from `policy_settings`
+#: via `set_table`. It agrees with the v3 default ladder, the owner-approved
+#: Balanced preset (`policy_settings.DEFAULT_LADDER`, `docs/ladder-v3.md`
+#: §2.1), in engine levels; `stranger` is the person row, and `known` (no
+#: preset counterpart) keeps its pre-v3 row.
 TABLE: dict[str, dict[str, str]] = {
-    "stranger": {
-        "street": "log", "yard": "quiet", "doors": "notify",
-        "private": "notify", "off_limits": "urgent",
-    },
-    "known": {
-        "street": "log", "yard": "log", "doors": "quiet",
-        "private": "quiet", "off_limits": "quiet",
-    },
-    "animal": {
-        "street": "log", "yard": "quiet", "doors": "quiet",
-        "private": "quiet", "off_limits": "quiet",
-    },
-    "thing": {
-        "street": "log", "yard": "log", "doors": "log",
-        "private": "log", "off_limits": "quiet",
-    },
+    "person": {"street": "log", "yard": "quiet", "doors": "quiet", "off_limits": "urgent"},
+    "stranger": {"street": "log", "yard": "quiet", "doors": "quiet", "off_limits": "urgent"},
+    "known": {"street": "log", "yard": "log", "doors": "quiet", "off_limits": "quiet"},
+    "vehicle": {"street": "log", "yard": "silent", "doors": "silent", "off_limits": "quiet"},
+    "animal": {"street": "log", "yard": "silent", "doors": "silent", "off_limits": "quiet"},
+    "package": {"street": "log", "yard": "silent", "doors": "quiet", "off_limits": "quiet"},
+    "opening": {"street": "log", "yard": "silent", "doors": "quiet", "off_limits": "urgent"},
+    "bin": {"street": "log", "yard": "log", "doors": "silent", "off_limits": "silent"},
+    "thing": {"street": "log", "yard": "log", "doors": "silent", "off_limits": "silent"},
 }
+
+#: The Balanced preset's Ignore cells for non-person subjects: suppressed
+#: before evaluation (v3 §4.1 step 6), the built-in counterpart of what
+#: `policy_settings.apply_settings` derives from a user's ladder.
+DEFAULT_OFF_CELLS: frozenset[tuple[str, str]] = frozenset(
+    {(s, "street") for s in ("vehicle", "animal", "package", "opening", "bin", "thing")}
+    | {(s, "yard") for s in ("bin", "thing")}
+)
 
 #: Frigate labels that reclassify `subject` as `stranger` regardless of its
 #: upstream classification (a bear or skunk on the property outranks whatever
@@ -53,8 +88,10 @@ WORRY_REASONS = (
 CALM_REASONS = ("known_role", "low_confidence", "no_recognition_capability", "leaving_scene")
 
 #: Fixed level for `source == "system"` cards (camera offline, disk full,
-#: etc.) -- these have no subject or place, so they never touch the table,
-#: nudge, floor, or caps.
+#: test pushes, the Connection Doctor round trip) -- these have no subject or
+#: place, so they never touch the table, nudge, floor, or caps. Deliberately
+#: NOT one of `LEVELS` (v3 §6): system cards keep their own delivery (active
+#: push with sound, `delivery.SYSTEM_CARD_APNS`), outside the ladder.
 SYSTEM_CARD_LEVEL = "notify"
 
 #: `{zone: {subject: level}}` (Elsinore Phase 4 addendum, `push/
@@ -74,11 +111,12 @@ def set_zone_overrides(overrides: dict[str, dict[str, str]]) -> None:
     ZONE_OVERRIDES = overrides
 
 
-#: Subject x place cells the merged outcome ladder marks "off": the
+#: Subject x place cells the evaluator suppresses outright: Ignore for a
+#: non-person subject (v3 §4.1 step 6; the pre-v3 `off` outcome). The
 #: evaluator answers SUPPRESSED for them before nudges can raise anything.
 #: Zone overrides still outrank this -- an explicit per-zone rule is the
 #: user's most specific statement.
-OFF_CELLS: set[tuple[str, str]] = set()
+OFF_CELLS: set[tuple[str, str]] = set(DEFAULT_OFF_CELLS)
 
 
 def set_off_cells(cells: set[tuple[str, str]]) -> None:

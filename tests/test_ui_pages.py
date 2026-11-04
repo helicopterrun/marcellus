@@ -1,4 +1,4 @@
-"""New UI surfaces: status dashboard, debug index, devices, zone-hits, scrub viewer."""
+"""New UI surfaces: status dashboard, debug index, devices, zone-hits, nav."""
 
 from __future__ import annotations
 
@@ -107,7 +107,29 @@ def test_settings_page_renders_with_off_cell(client: TestClient) -> None:
     finally:
         ladder_policy.set_off_cells(before)
     assert r.status_code == 200
-    assert "Off" in r.text
+    assert "Ignore" in r.text
+
+
+def test_ladder_matrix_prefers_ladder_and_falls_back_to_outcomes(monkeypatch) -> None:
+    from marcellus.routes import settings_page
+
+    base = {"zone_overrides": {"yard_z": {"person": "weird"}}}
+    ladder = {"person": {"street": "ignore", "yard": "urgent", "doors": "glance",
+                         "off_limits": "mystery"}}
+    monkeypatch.setattr(settings_page.policy_settings, "get_active",
+                        lambda: {**base, "ladder": ladder})
+    m = settings_page._ladder_matrix()
+    assert m["places"] == ["Public", "Grounds", "Entrances", "Restricted"]
+    assert [c["label"] for c in m["rows"][0]["cells"]] == [
+        "Ignore", "Urgent", "Glance", "mystery"]
+    assert m["overrides"][0]["label"] == "weird"
+
+    legacy = {"person": {"street": "off", "yard": "glance", "private": "alarm",
+                         "doors": "notify", "off_limits": "log"}}
+    monkeypatch.setattr(settings_page.policy_settings, "get_active",
+                        lambda: {**base, "outcomes": legacy})
+    cells = settings_page._ladder_matrix()["rows"][0]["cells"]
+    assert [c["label"] for c in cells] == ["Ignore", "Urgent", "Quiet", "Ignore"]
 
 
 def test_devices_page_lists_registered(
@@ -133,40 +155,63 @@ def test_devices_page_lists_registered(
     assert "btn-primary" in r.text
 
 
-def test_scrub_viewer_disabled(client: TestClient) -> None:
-    r = client.get("/scrub")
+def test_scrub_page_redirects_to_status(client: TestClient) -> None:
+    r = client.get("/scrub", follow_redirects=False)
+    assert r.status_code == 307
+    assert r.headers["location"] == "/"
+
+
+def test_nav_has_tools_dropdown_and_no_scrub_link(client: TestClient) -> None:
+    html = client.get("/").text
+    assert 'href="/scrub"' not in html
+    nav = html[html.index('<nav class="pages"') : html.index("</header>")]
+    tools = nav[nav.index(">Tools</summary>") :]
+    # Tuning is one entry; its five pages are tabs under /tuning.
+    for href in ("/tuning", "/wildlife", "/replay", "/guide", "/debug"):
+        assert f'href="{href}"' in tools, href
+    for href in ("/score-histogram", "/motion", "/fps-budget", "/zone-hits", "/placement"):
+        assert f'href="{href}"' not in tools, href
+    assert ">Tuning</summary>" not in html
+    tabbar = html[html.index('<nav class="tabbar"') : html.index('class="more-backdrop"')]
+    assert 'href="/encounters"' in tabbar
+    assert "i-scrub" not in html
+    # Phone More sheet: one Tools group, no separate Tuning group.
+    sheet = html[html.index('<nav class="more-sheet"') : html.index('class="search-backdrop"')]
+    assert '>Tools</div>' in sheet and '>Tuning</div>' not in sheet
+    for href in ("/tuning", "/wildlife", "/replay", "/guide", "/debug"):
+        assert f'href="{href}"' in sheet, href
+    assert 'href="/score-histogram"' not in sheet
+
+
+def test_tuning_landing_lists_the_five_pages(client: TestClient) -> None:
+    r = client.get("/tuning")
     assert r.status_code == 200
-    assert "disabled" in r.text
+    assert "<h1" in r.text and "Tuning" in r.text
+    body = r.text[r.text.index('<main id="main-content"') :]
+    for href in ("/score-histogram", "/motion", "/fps-budget", "/zone-hits", "/placement"):
+        assert f'class="tuning-name" href="{href}"' in body, href
+    assert "/wildlife" not in body  # Wildlife is a Tools page, not a tuning tab
+    assert 'aria-label="Tuning"' in body  # the tab row
 
 
-def test_scrub_page_carries_every_mount_point_the_reel_binds_to() -> None:
-    """The template/JS contract, which fails silently in both directions.
-
-    `scrub.js` returns early if `#sv-reel` is missing and throws on the rest,
-    and neither shows up in a server-side test -- the page still renders 200
-    with a dead canvas. The previous strip left exactly that trap behind: it
-    bound `#sv-timeline`, an id no longer in the template.
-    """
-    from jinja2 import Environment, FileSystemLoader, select_autoescape
-
-    env = Environment(
-        loader=FileSystemLoader(TEMPLATES_DIR), autoescape=select_autoescape(["html"])
-    )
-    html = env.get_template("scrub.html").render(
-        cameras=["gate-face"], camera="gate-face", enabled=True, counts={}, asset_v="t",
-        request=None,
-    )
-    for element_id in (
-        "sv-camera", "sv-frame", "sv-moment", "sv-reel",
-        "sv-rungs", "sv-lanes", "sv-status", "sv-frigate-link", "sv-clock",
-    ):
-        assert f'id="{element_id}"' in html, element_id
-
-    js = (JS_DIR / "scrub.js").read_text()
-    for element_id in ("sv-reel", "sv-rungs", "sv-lanes", "sv-moment"):
-        assert f'getElementById("{element_id}")' in js, element_id
-    # The strip's id must be gone from both sides, not just one.
-    assert "sv-timeline" not in html and "sv-timeline" not in js
+@pytest.mark.parametrize(
+    ("path", "label"),
+    [
+        ("/tuning", "Overview"),
+        ("/score-histogram", "Scores"),
+        ("/motion", "Motion"),
+        ("/fps-budget", "FPS budget"),
+        ("/zone-hits", "Zone hits"),
+        ("/placement", "Placement"),
+    ],
+)
+def test_tuning_tab_row_marks_current_page(client: TestClient, path: str, label: str) -> None:
+    html = client.get(path).text
+    tabs = html[html.index('<nav class="pp-tabs" aria-label="Tuning">') :]
+    tabs = tabs[: tabs.index("</nav>")]
+    assert tabs.count('aria-current="page"') == 1
+    assert f'class="pp-tab active" aria-current="page">{label}</a>' in tabs
+    assert "Wildlife" not in tabs
 
 
 def test_triage_moved_to_slash_triage(client: TestClient) -> None:
@@ -241,3 +286,90 @@ def test_settings_page_unifies_surfaces(client: TestClient) -> None:
                        "export-btn", "import-file"):
         assert element_id in r.text, element_id
 
+
+
+_TITLED_PAGES = [
+    ("/", "Status"),
+    ("/cameras", "Cameras"),
+    ("/triage", "All events"),
+    ("/encounters", "Encounters"),
+    ("/faces/captures", "Face captures"),
+    ("/enrich/clusters", "Identities"),
+    ("/enrich/accuracy", "Face accuracy"),
+    ("/score-histogram", "Scores"),
+    ("/motion", "Motion"),
+    ("/fps-budget", "FPS budget"),
+    ("/zone-hits", "Zone hits"),
+    ("/placement", "Placement"),
+    ("/wildlife", "Wildlife"),
+    ("/settings", "Settings"),
+    ("/replay", "Push replay"),
+    ("/debug", "Debug"),
+    ("/inbox/coverage", "Inbox coverage"),
+]
+
+
+@pytest.mark.parametrize(("path", "title"), _TITLED_PAGES)
+def test_titled_pages_render_page_title(client: TestClient, path: str, title: str) -> None:
+    r = client.get(path)
+    # /fps-budget answers 503 (still rendering the page) when Frigate is down.
+    assert r.status_code == (503 if path == "/fps-budget" else 200)
+    assert r.text.count('class="page-title"') == 1
+    assert f'<h1 class="page-title">{title}</h1>' in r.text
+
+
+@pytest.mark.parametrize("path", ["/inbox", "/map", "/guide", "/toybox"])
+def test_exempt_pages_have_no_page_title(client: TestClient, path: str) -> None:
+    r = client.get(path)
+    assert 'class="page-title"' not in r.text
+
+
+_SETTINGS_PANELS = [
+    "zones", "routing", "notifications", "cameras", "alignment",
+    "push", "tuning", "config", "data", "about",
+]
+
+
+def test_settings_page_has_tab_row_and_all_panels(client: TestClient) -> None:
+    """Settings shows one panel at a time (settings_tabs.js), but the server
+    renders every panel and a plain-anchor tab per panel, so the page still
+    works without JS and `/settings#<panel>` deep links resolve."""
+    import re
+
+    r = client.get("/settings")
+    assert r.status_code == 200
+    html = r.text
+    assert 'id="settings-nav"' in html
+    assert "/static/js/settings_tabs.js" in html
+    for pid in _SETTINGS_PANELS:
+        assert f'href="#{pid}"' in html, pid
+        assert re.search(rf'<section id="{pid}"[^>]*data-settings-panel', html), pid
+    assert html.count("data-settings-panel") == len(_SETTINGS_PANELS)
+    # Help folds into About rather than being its own (nav-less) section.
+    about = html[html.index('<section id="about"'):]
+    assert 'id="help"' in about
+    # Ids are unique: the tuning "push" section must not collide with the
+    # Push panel.
+    ids = re.findall(r'\bid="([^"]+)"', html)
+    assert len(ids) == len(set(ids)), sorted({i for i in ids if ids.count(i) > 1})
+
+
+def test_settings_tuning_section_ids_sit_inside_tuning_panel(client: TestClient) -> None:
+    html = client.get("/settings").text
+    start = html.index('<section id="tuning"')
+    end = html.index('<section id="config"')
+    tuning_panel = html[start:end]
+    # `/settings#encounters` (encounters.html) targets a Tuning section.
+    assert 'id="encounters"' in tuning_panel
+    assert 'id="tuning-push"' in tuning_panel
+    assert 'id="tuning-sections"' in tuning_panel
+    assert 'id="tuning-save"' in tuning_panel
+
+
+def test_settings_shared_save_bar_outside_panels(client: TestClient) -> None:
+    """The one Save button PUTs zones + neighbors + routing + notifications,
+    so it must not live inside a single panel."""
+    html = client.get("/settings").text
+    assert html.count('id="save-btn"') == 1
+    pos = html.index('id="save-btn"')
+    assert pos > html.rindex("</section>")

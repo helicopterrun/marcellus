@@ -2,7 +2,7 @@
 title: Identities
 section: people
 order: 2
-routes: ["/enrich/clusters"]
+routes: ["/enrich/clusters", "/enrich/accuracy", "/v1/people", "/v1/people/{person_id}", "/v1/people/{person_id}/sightings", "/v1/people/{person_id}/similar", "/v1/people/{person_id}/avatar.jpg", "/v1/people/{person_id}/name", "/v1/people/{person_id}/merge", "/v1/people/{person_id}/follow", "/v1/people/{person_id}/note", "/v1/people/{person_id}/sightings/{event_id}", "/v1/faces/{event_id}/{rank}.jpg", "/v1/people/for-event/{event_id}", "/enrich/merge-proposals.json", "/v1/people/merge-suggestions", "/v1/people/merge-suggestions/dismiss", "/enrich/clusters/{cluster_id}/faces.json"]
 config: ["face_enrich"]
 ---
 
@@ -14,24 +14,38 @@ recurring people into **clusters** — no training, no photo upload.
 Right now there are **{{stat:clusters_total}}** clusters,
 **{{stat:clusters_named}}** of them named.
 
+## Reading the page
+
+The **People** tab lists everyone you've named, then every unknown seen at
+least twice, most-seen first: the top of the unknowns is who's worth naming
+next. **Seen once** holds the long tail of single sightings, mostly
+passers-by. Each card shows the identity's best face and a strip of its best
+sightings; tap a sighting to open it full size (arrow keys step through the
+strip), with links to the event and its snapshot. **+N more** (or **See more
+sightings** in the ⋯ menu) opens one identity on its own page with up to 32
+sightings. Times are in your own timezone.
+
+[Face captures](/faces/captures) links each visit to the identities seen at
+the same moment, so a sharp face capture is one tap from the cluster to name.
+
 ## How it becomes recognition
 
 A cluster starts **unknown**. The moment you give it a name, it becomes a
 **known person**: future sightings write that name into the Frigate event's
-`sub_label` (visible in Frigate, the Elsinore app, and notifications), and
+`sub_label` (visible in Frigate and the Elsinore app, never in notifications), and
 the name is retro-written onto the cluster's past events still in retention.
 Unnamed clusters that stop appearing expire on their own after
-`cluster_ttl_days`.
+`cluster_ttl_days`, unless you follow them or give them a note in the app.
 
 ## Walkthrough: name your first identity
 
 ```walkthrough
 - Wait until a cluster shows several sightings of the same person
 - Check the sighting strip is coherent — every thumbnail is the same person
-- Exclude any wrong sighting with its ✕ button
-- Type the person's name and tap "name"
+- Exclude any wrong sighting with its ✕ button (or "Not this person" in the viewer)
+- Type the person's name in "Who is this?" and tap "Name"
 - Watch the toast confirm how many past events were relabeled
-- If a second cluster of the same person exists, use "merge" to fold it in
+- If a second cluster of the same person exists, use ⋯ → "Merge into…" to fold it in
 ```
 
 ## Repair tools
@@ -39,16 +53,85 @@ Unnamed clusters that stop appearing expire on their own after
 - **✕ on a sighting** — soft-**excludes** it: the sighting stays in the
   cluster's history but no longer feeds its face signature (centroid),
   sub_label matching, or the pipeline stats. A toast offers **Undo**
-  right away, and the **Show excluded** link at the top of the page lists
+  right away, and the **Show excluded sightings** link at the top of the page lists
   everything you've excluded (dimmed, with an "include" action) if you
   change your mind later. This is different from the hard "remove" the
   API still exposes, which fully detaches a sighting and can empty (and
   delete) a cluster — that stays available for repairing a bad join, but
   the page no longer uses it directly.
-- **merge** — combine two clusters of the same person; the named one
-  survives. "Looks like…" hints appear when two clusters are suspiciously
-  similar.
-- **delete** — dissolve a cluster entirely (events keep their history).
+- **⋯ → Merge into…** — combine two clusters of the same person: search
+  by name or #number and pick the survivor. "Looks like…" hints appear when
+  two clusters are suspiciously similar; accepting one keeps the named (or
+  bigger) cluster.
+- **⋯ → Rename** — change a named identity's name (relabels again).
+- **⋯ → Delete identity** — dissolve a cluster entirely (events keep their
+  history).
+
+## People in the app
+
+The Elsinore app's People view reads the same identities over `/v1/people`.
+Every cluster keeps a permanent number; a name is just an optional label on
+it, so you can follow, annotate, or correct a face without naming it. The app
+shows each person as **named**, **regular** (unnamed, seen on two or more
+days) or **new** (unnamed, seen on one day), counted in your own timezone.
+
+Every face number also has a generated **handle** such as "Alder Wren", so an
+unnamed face is easier to talk about than "#183". A handle is not a name: it
+never changes whether someone counts as named, and it is never written to
+Frigate, encounters or notifications. It stays the same for a number forever.
+
+- **Follow** an unknown face and it is exempt from the `cluster_ttl_days`
+  expiry; unfollow and it goes back on the normal clock.
+- **Note** is a short free-text reminder ("probably the courier").
+- **Not this person** on a sighting is the same soft-exclude as the web page's
+  ✕, and can be undone.
+- **Merge** from the app is the same as **Merge into…** here, with one extra
+  guard: if both people already have different names the app is told to pick
+  one first. A merged-away number keeps pointing at the survivor, so the app
+  never ends up with a dead link. Deleting a person also removes the old
+  numbers that pointed at them.
+
+The app also shows **who was recognized** on each encounter and event. The
+encounter lists (`/v1/encounters`) carry a `people` list read live from the
+face data, so it stays right after a rename, merge, exclusion or delete, and
+`/v1/people/for-event/{event_id}` answers the same for a single event. Both are
+empty while `face_enrich` is off.
+
+## Proposed merges
+
+The **Proposed merges** section at the top of the Identities page lists groups
+of *unnamed* identities whose faces have drifted together since they were
+created, so they are probably one person. Nothing is merged automatically and
+nothing is written to compute them. Each group shows the faces, handles,
+sightings, days, the widest distance in the group, and a **same visit** tag when
+two of them were seen on the same camera minutes apart (the strongest hint).
+Hover a face to enlarge it. **Compare**, or tapping a face, shows each identity's
+faces large, side by side, with the decision there: **Merge group** merges the
+others into the one with the most sightings. Named identities are never proposed
+in a group. **Not the same** records that the group are different people, and that pair is never suggested
+again (the ruling follows an identity through later merges). The app's
+`GET /v1/people/merge-suggestions` also offers an unnamed identity that is close
+to a named one, to be merged into the named one; `POST
+/v1/people/merge-suggestions/dismiss` with `{"ids": [...]}` is the same ruling. From the host,
+`fsc face-enrich propose-merges` prints the group counts and cluster numbers
+(never names) without touching the running service.
+
+## Accuracy
+
+The **Accuracy** tab measures how well recognition is really working. It shows
+two faces at a time and you answer **Same person**, **Different people** or
+**Can't tell** (keys S, D, U; Z goes back). Nothing on the page says what the
+model thinks, and results stay hidden until the batch is done, so your answers
+are a fair test.
+
+Half the pairs ask whether an ID is really a duplicate of another: an ID's
+clearest sighting against the closest face in any other ID. The other half ask
+whether a sighting really belongs to its ID. Results show both rates with a
+likely range, and how often faces were the same person at each distance, which
+is the evidence for changing `cluster_threshold` or `match_threshold`. Labelling
+changes no identity: duplicates and wrong sightings are listed as links for you
+to fix by hand. Deleting a person, or an ID expiring, removes its labelled pairs
+too.
 
 ## Configuration
 
@@ -57,6 +140,8 @@ The `face_enrich:` section (needs the `enrich` install extra): `enabled`,
 Keep Frigate's own face recognition **disabled** on enrolled cameras — the
 sidecar is the sole author of `sub_label`, and two writers would fight.
 
+- `consolidate_threshold` — distance under which unnamed identities are proposed for merging (default 0.45).
+  Tighter than `cluster_threshold` on purpose: it folds whole identities together, which is harder to undo.
 - `interval_s` — worker cadence for the enrichment cycle (default 15s).
 - `process_delay_s` — how long after an event ends before it's processed,
   so its last segment has committed (default 45s).
@@ -70,18 +155,49 @@ sidecar is the sole author of `sub_label`, and two writers would fight.
   frame, to be considered (default 4000).
 - `min_quality` — minimum quality score (sharpness × size × frontality) for
   a sampled face (default 0.15).
+  When an event finds faces but every one falls under this gate, the best
+  quality seen is kept (internally, never shown) so the gate can be tuned
+  from real data.
+- `min_det_score` — face detector confidence a box needs (default 0.6) to
+  count as a face at all. Quality can't keep junk out on its own: leaves and
+  wheel spokes are very sharp. `fsc face-enrich regate` applies it to older
+  sightings.
 - `match_threshold` — cosine-distance threshold for matching a face to a
   NAMED cluster (default 0.45).
 - `cluster_threshold` — cosine-distance threshold for folding a face into
   an unnamed cluster (default 0.55).
 - `model_dir` — where the insightface model pack is cached, ~300MB on
   first download.
+- `crop_keep` — faces saved per enriched event, best first (default 5); the
+  Identities page shows them as a stack, best on top.
+- `backfill_per_cycle` — older events given face stacks per idle cycle (default 1),
+  once you press **backfill stacks** on the page.
+- `crops_dir` — where the face crops of each enriched event are saved;
+  must be writable by the service user. Crops are deleted with their
+  cluster (stale unnamed clusters with no follow or note are reaped after `cluster_ttl_days`).
+- `crop_pad` — margin on each side of the face box, as a fraction of it (default 0.4),
+  so the crop shows hair and chin.
+- `crop_max_edge` — longest edge of a stored crop in pixels (default 384);
+  smaller faces are never upscaled.
 - `max_events_per_cycle` — bound on events processed per cycle (default
   10).
 - `max_attempts` — cap on retries for a transport/inference failure
   (default 3).
 - `http_timeout_s` — timeout for the Frigate HTTP fetch of each sampled
   frame (default 15s).
+
+## Face stacks
+
+Each sighting keeps up to five face crops from that event. The strip shows
+the best one, with a count when there are more; opening the sighting shows
+them all, best first and framed, each with its quality score (sharpness ×
+size × frontality). Faces that didn't feed the identity embedding are
+dimmed. Older sightings from before stacks existed show Frigate's
+whole-person thumbnail (and the full snapshot when opened) until you press
+**Build face crops** in the banner: the worker then rebuilds their stacks
+oldest first, one event per idle cycle, without touching clusters or names.
+**Pause** stops it; pressing it again picks up where it left off and retries
+failures. Events whose recordings have aged out can't be backfilled.
 
 ## If it goes wrong
 

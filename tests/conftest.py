@@ -103,6 +103,23 @@ def _reset_ladder_policy() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _no_host_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never let `load_settings()` discover the host's real config.
+
+    `DEFAULT_CONFIG_PATHS` starts with /etc/marcellus/sidecar.yml, which
+    exists on the deployment box: a test that builds `create_app()` or calls
+    `load_settings()` bare there ran against PROD settings (live Frigate,
+    real sources, tuned knobs) and failed on prod values -- while CI, with
+    no /etc/marcellus, passed. Tests that want a file still set
+    MARCELLUS_CONFIG themselves; that runs after this and wins.
+    """
+    from marcellus import config
+
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATHS", ())
+    monkeypatch.delenv("MARCELLUS_CONFIG", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _default_frigate_reachable(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Default `/healthz`'s frigate probe to reachable ("ok").
 

@@ -1,28 +1,53 @@
 {
   "decisions": [
     {
-      "camera": "street",
-      "card_key": "",
-      "event_id": "1755550002.654321-def456",
-      "family": "activity",
-      "id": "dec-00000002",
-      "la_reason": "level=log",
-      "la_started": false,
-      "label": "car",
-      "level": "log",
+      "camera": "doorbell",
+      "card_key": "doorbell:person:1755550003.111111-ghi789",
+      "event_id": "1755550003.111111-ghi789",
+      "family": "person",
+      "id": "dec-00000003",
+      "la_reason": "started",
+      "la_started": true,
+      "label": "person",
+      "level": "quiet",
       "modifiers": [],
-      "mutation": "",
-      "place": "street",
+      "mutation": "create",
+      "place": "doors",
       "reasons": [
-        "outcomes[vehicle][street]=log"
+        "routing_table"
       ],
       "sent": 0,
       "silenced": null,
       "sound": false,
       "stage": "table",
+      "subject": "person",
+      "ts": "2026-08-19T20:38:05Z",
+      "zone": "front_door",
+      "zones": [
+        "front_door"
+      ]
+    },
+    {
+      "camera": "street",
+      "card_key": "street:vehicle:1755550002.654321-def456",
+      "event_id": "1755550002.654321-def456",
+      "id": "dec-00000002",
+      "label": "car",
+      "level": "off",
+      "modifiers": [],
+      "mutation": "suppressed",
+      "place": "street",
+      "reasons": [
+        "routing_table",
+        "suppressed"
+      ],
+      "sent": 0,
+      "silenced": null,
+      "sound": false,
+      "stage": "off_cell",
       "subject": "vehicle",
       "ts": "2026-08-19T20:37:41Z",
-      "zone": "",
+      "zone": "nw_49th_st",
       "zones": [
         "nw_49th_st"
       ]
@@ -31,27 +56,26 @@
       "camera": "doorbell",
       "card_key": "doorbell:package:t_1755550001-abc123",
       "event_id": "1755550001.123456-abc123",
-      "family": "package",
       "id": "dec-00000001",
-      "la_reason": "family=package",
-      "la_started": true,
+      "la_reason": "cell_below_glance",
+      "la_started": false,
       "label": "package",
-      "level": "notify",
+      "level": "silent",
       "modifiers": [
         "nudge_up"
       ],
       "mutation": "create",
       "place": "doors",
       "reasons": [
-        "outcomes[package][doors]=notify"
+        "routing_table"
       ],
       "sent": 1,
       "silenced": {
-        "level": "quiet",
+        "level": "silent",
         "subject": "package",
         "zone": "front_door"
       },
-      "sound": true,
+      "sound": false,
       "stage": "table",
       "subject": "package",
       "ts": "2026-08-19T20:37:02Z",

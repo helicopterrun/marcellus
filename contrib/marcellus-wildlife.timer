@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the wildlife finder every 10 minutes
+Documentation=https://github.com/helicopterrun/marcellus
+
+[Timer]
+OnBootSec=5min
+# wildlife.max_runtime_s (540s) stays under this interval, and systemd never
+# starts a oneshot that is still running, so runs cannot pile up.
+OnUnitActiveSec=10min
+RandomizedDelaySec=30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

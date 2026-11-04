@@ -14,15 +14,19 @@ Auth (§3.2 -- `/v1` is never less protected than `/api`) is applied centrally i
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import io
 import json
 import sqlite3
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
+from PIL import Image
 
 from marcellus import __version__, db, zones
 from marcellus.analysis import clock_offset
@@ -42,6 +46,7 @@ from marcellus.models.wire import (
 from marcellus.push import policy_settings
 from marcellus.scrub import grid
 from marcellus.scrub.motion import aggregate_motion, safe_fetch_scale
+from marcellus.scrub.motion_flight import MotionFlight
 
 router = APIRouter(prefix="/v1", tags=["v1"])
 
@@ -94,6 +99,27 @@ def _known_cameras(app_state: Any, conn: Any) -> set[str]:
     return cameras
 
 
+async def known_cameras_async(app_state: Any, settings: Any) -> set[str]:
+    """`_known_cameras` without touching sqlite on the event loop.
+
+    A fresh cached set is returned inline; a miss opens `frigate.db` and runs
+    the query on a worker thread (the `db.with_sidecar` pattern), so a slow
+    or busy-locked Frigate DB stalls only this request, not the loop.
+    """
+    cached = getattr(app_state, "scrub_known_cameras_cache", None)
+    if cached is not None and time.time() - cached[0] < _CAMERA_CACHE_TTL_S:
+        return cast("set[str]", cached[1])
+
+    def _run() -> set[str]:
+        conn = db.open_frigate_ro(settings.frigate.db_path)
+        try:
+            return _known_cameras(app_state, conn)
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_run)
+
+
 def _bad_range(message: str) -> HTTPException:
     return HTTPException(status_code=400, detail={"error": _ERR_BAD_RANGE, "message": message})
 
@@ -115,13 +141,8 @@ def _require_series(start: float, end: float, scale: float) -> None:
         )
 
 
-def _require_known_camera(request: Request, camera: str) -> None:
-    settings = request.app.state.settings
-    conn = db.open_frigate_ro(settings.frigate.db_path)
-    try:
-        known = _known_cameras(request.app.state, conn)
-    finally:
-        conn.close()
+async def _require_known_camera(request: Request, camera: str) -> None:
+    known = await known_cameras_async(request.app.state, request.app.state.settings)
     if camera not in known:
         raise HTTPException(
             status_code=404,
@@ -170,6 +191,54 @@ def _encounters_capabilities(settings: Any) -> dict[str, Any]:
     }
 
 
+def _people_capabilities(settings: Any) -> dict[str, Any]:
+    """`people` block of `/v1/capabilities`: `enabled` mirrors
+    `face_enrich.enabled`; `filters` / `sorts` list what `GET /v1/people`
+    accepts (empty while disabled); `merge_suggestions` says the merge
+    suggestion routes exist (same gate as `enabled`); `encounter_filter` says
+    `GET /v1/encounters` accepts `person=` (same gate)."""
+    from marcellus.faces import people
+
+    enabled = bool(settings.face_enrich.enabled)
+    return {
+        "enabled": enabled,
+        "filters": list(people.FILTERS) if enabled else [],
+        "sorts": list(people.SORTS) if enabled else [],
+        "merge_suggestions": enabled,
+        "encounter_filter": enabled,
+    }
+
+
+def _external_sources_capabilities(settings: Any, state: Any) -> dict[str, Any]:
+    """`external_sources` block of `/v1/capabilities` (guide_content's
+    `external-sources.md`): which non-Frigate sources this build serves
+    sightings for. Per-source `healthy` is a hint from cached service state;
+    `/healthz` is authoritative. Before the service is up (or when it failed
+    to start) the configured sources are listed as not healthy."""
+    section = settings.external_sources
+    if not section.enabled:
+        return {"enabled": False, "sources": []}
+    service = getattr(state, "external_sources", None)
+    if service is not None:
+        caps: dict[str, Any] = service.capabilities()
+        return caps
+    return {
+        "enabled": True,
+        "sources": [
+            {
+                "id": cfg.id,
+                "kind": cfg.kind,
+                "name": cfg.name,
+                "enabled": cfg.enabled,
+                "healthy": False,
+                "subjects": [],
+                "media": [],
+            }
+            for cfg in section.sources
+        ],
+    }
+
+
 @router.get("/capabilities", response_model=CapabilitiesResponse)
 async def capabilities(request: Request) -> dict[str, Any]:
     """No auth required -- this is the one `/v1` endpoint the client probes
@@ -214,6 +283,7 @@ async def capabilities(request: Request) -> dict[str, Any]:
             "cameras": generated_cameras,
             "generated": generated,
             "intervals": intervals,
+            "cells": settings.scrub.enabled,
         },
         "proxy": {"enabled": settings.proxy.enabled},
         "push": {
@@ -223,11 +293,18 @@ async def capabilities(request: Request) -> dict[str, Any]:
             # accept. The app hides the V3 ladder rows -- and omits their
             # keys from PUTs -- unless this list says they're routable.
             "attention_subjects": list(policy_settings.SUBJECTS_V3),
+            # Attention ladder v3 (`docs/ladder-v3.md` §2.7): settings carry
+            # the authoritative `ladder` (4 levels x 4 places). The app uses
+            # `ladder` only when it sees this; otherwise it treats the
+            # sidecar as v2. Additive.
+            "ladder_version": policy_settings.SETTINGS_VERSION,
         },
         "decisions": {"enabled": True},
         "search": {"enabled": True, "related_events": True},
         "unifi_protect": _protect_capabilities(settings, request.app.state),
         "encounters": _encounters_capabilities(settings),
+        "people": _people_capabilities(settings),
+        "external_sources": _external_sources_capabilities(settings, request.app.state),
     }
 
 
@@ -238,16 +315,21 @@ async def coverage(camera: str, start: float, end: float, request: Request) -> A
     settings = request.app.state.settings
     _require_window(start, end)
 
-    conn = db.open_frigate_ro(settings.frigate.db_path)
-    try:
-        if camera not in _known_cameras(request.app.state, conn):
-            raise HTTPException(
-                status_code=404,
-                detail={"error": _ERR_CAMERA_UNKNOWN, "message": f"no such camera: {camera}"},
-            )
-        result = db.recording_coverage(conn, camera, start, end, now=time.time())
-    finally:
-        conn.close()
+    def _read() -> dict[str, Any] | None:
+        conn = db.open_frigate_ro(settings.frigate.db_path)
+        try:
+            if camera not in _known_cameras(request.app.state, conn):
+                return None
+            return db.recording_coverage(conn, camera, start, end, now=time.time())
+        finally:
+            conn.close()
+
+    result = await asyncio.to_thread(_read)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": _ERR_CAMERA_UNKNOWN, "message": f"no such camera: {camera}"},
+        )
 
     # Named for what it is. `retention_days` here was the *scrub cache's*
     # horizon on an endpoint otherwise entirely about what Frigate recorded, and
@@ -284,7 +366,7 @@ async def scrub_coverage(camera: str, start: float, end: float, request: Request
     """
     settings = request.app.state.settings
     _require_window(start, end)
-    _require_known_camera(request, camera)
+    await _require_known_camera(request, camera)
 
     # Derived tiers (settings.scrub.derived_intervals_s) deliberately overlap
     # the recent/aged decode tiers in time, and each other. `list_scrub_buckets`
@@ -334,7 +416,7 @@ async def scrub_sheets(
     """
     settings = request.app.state.settings
     _require_window(start, end)
-    _require_known_camera(request, camera)
+    await _require_known_camera(request, camera)
 
     sheet_rows = await db.with_sidecar(
         settings.sidecar.db_path,
@@ -372,14 +454,11 @@ async def scrub_sheets(
     return response
 
 
-@router.get("/scrub/{camera}/sheet/{spec}")
-async def scrub_sheet_image(camera: str, spec: str, request: Request) -> Any:
-    """Serve one sheet image (§4.3). `spec` is `{start}-{interval}-{count}.jpg`
-    -- every version of a still-filling sheet is its own immutable object, so
-    the header is unconditional (no freshness reasoning exists anywhere in
-    this path)."""
+async def _resolve_sheet(request: Request, camera: str, spec: str) -> tuple[dict[str, Any], Path]:
+    """Shared lookup for the whole-sheet and single-cell routes: camera check,
+    spec parse, DB row, on-disk path. Raises 404 for anything unknown/missing."""
     settings = request.app.state.settings
-    _require_known_camera(request, camera)
+    await _require_known_camera(request, camera)
     try:
         start, interval, count = grid.parse_sheet_spec(spec)
     except ValueError as exc:
@@ -403,6 +482,16 @@ async def scrub_sheet_image(camera: str, spec: str, request: Request) -> Any:
             status_code=404,
             detail={"error": _ERR_NOT_GENERATED, "message": "sheet file missing on disk"},
         )
+    return row, path
+
+
+@router.get("/scrub/{camera}/sheet/{spec}")
+async def scrub_sheet_image(camera: str, spec: str, request: Request) -> Any:
+    """Serve one sheet image (§4.3). `spec` is `{start}-{interval}-{count}.jpg`
+    -- every version of a still-filling sheet is its own immutable object, so
+    the header is unconditional (no freshness reasoning exists anywhere in
+    this path)."""
+    _, path = await _resolve_sheet(request, camera, spec)
     # `FileResponse` stats lazily in `__call__` (send time) when it isn't given
     # a `stat_result` up front -- and on a missing file it raises RuntimeError
     # there, not FileNotFoundError, which is both untimely (after we've
@@ -426,6 +515,102 @@ async def scrub_sheet_image(camera: str, spec: str, request: Request) -> Any:
         stat_result=stat_result,
         headers={"Cache-Control": _IMMUTABLE},
     )
+
+
+# --- single-cell crops (`GET .../sheet/{spec}/cell/{index}`) ----------------
+
+_CELL_CACHE_MAX = 128
+_CELL_CROP_SLOTS = 2  # the NVR has 4 cores and runs Frigate
+_cell_crop_sem = asyncio.Semaphore(_CELL_CROP_SLOTS)
+#: (camera, spec, index) -> (encoded bytes, media type). Specs are
+#: content-addressed, so entries never go stale.
+_cell_cache: OrderedDict[tuple[str, str, int], tuple[bytes, str]] = OrderedDict()
+_cell_inflight: dict[tuple[str, str, int], asyncio.Future[tuple[bytes, str]]] = {}
+
+
+def _crop_cell(path: Path, index: int, cols: int, cell_w: int, cell_h: int) -> tuple[bytes, str]:
+    """Blocking: open the sheet, crop one cell, re-encode in the sheet's format
+    (quality matches `scrub.tiling`'s defaults: JPEG 85, WebP 75)."""
+    x = (index % cols) * cell_w
+    y = (index // cols) * cell_h
+    webp = path.suffix == ".webp"
+    with Image.open(path) as sheet:
+        cell = sheet.crop((x, y, x + cell_w, y + cell_h)).convert("RGB")
+    buf = io.BytesIO()
+    if webp:
+        cell.save(buf, format="WEBP", quality=75, lossless=False)
+    else:
+        cell.save(buf, format="JPEG", quality=85)
+    return buf.getvalue(), "image/webp" if webp else "image/jpeg"
+
+
+async def _crop_cell_or_404(path: Path, index: int, row: dict[str, Any]) -> tuple[bytes, str]:
+    try:
+        return await _crop_cell_bounded(path, index, row["cols"], row["cell_w"], row["cell_h"])
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": _ERR_NOT_GENERATED, "message": "sheet file missing on disk"},
+        ) from exc
+
+
+async def _crop_cell_bounded(
+    path: Path, index: int, cols: int, cell_w: int, cell_h: int
+) -> tuple[bytes, str]:
+    async with _cell_crop_sem:
+        return await asyncio.to_thread(_crop_cell, path, index, cols, cell_w, cell_h)
+
+
+@router.get("/scrub/{camera}/sheet/{spec}/cell/{index}")
+async def scrub_sheet_cell(camera: str, spec: str, index: int, request: Request) -> Response:
+    """One cell of a sheet as its own small image (row-major `index`), so the
+    first still of an event doesn't need the whole multi-MB sheet."""
+    row, path = await _resolve_sheet(request, camera, spec)
+    if index < 0 or index >= row["count"]:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": _ERR_NOT_GENERATED, "message": "cell index out of range"},
+        )
+    key = (camera, spec, index)
+    hit = _cell_cache.get(key)
+    if hit is None:
+        pending = _cell_inflight.get(key)
+        if pending is not None:
+            try:
+                hit = await asyncio.shield(pending)
+            except Exception:
+                # The first request's crop failed or was cancelled with its client:
+                # crop for this one rather than inherit someone else's outcome.
+                hit = await _crop_cell_or_404(path, index, row)
+        else:
+            fut: asyncio.Future[tuple[bytes, str]] = asyncio.get_running_loop().create_future()
+            _cell_inflight[key] = fut
+            try:
+                hit = await _crop_cell_bounded(
+                    path, index, row["cols"], row["cell_w"], row["cell_h"]
+                )
+            except FileNotFoundError as exc:
+                fut.set_exception(exc)
+                fut.exception()  # mark retrieved; waiters re-raise it themselves
+                raise HTTPException(
+                    status_code=404,
+                    detail={"error": _ERR_NOT_GENERATED, "message": "sheet file missing on disk"},
+                ) from exc
+            except BaseException as exc:
+                fut.set_exception(exc)
+                fut.exception()
+                raise
+            else:
+                fut.set_result(hit)
+                _cell_cache[key] = hit
+                while len(_cell_cache) > _CELL_CACHE_MAX:
+                    _cell_cache.popitem(last=False)
+            finally:
+                _cell_inflight.pop(key, None)
+    else:
+        _cell_cache.move_to_end(key)
+    data, media_type = hit
+    return Response(content=data, media_type=media_type, headers={"Cache-Control": _IMMUTABLE})
 
 
 async def _fetch_and_aggregate_motion(
@@ -460,6 +645,42 @@ async def _fetch_and_aggregate_motion(
     return aggregate_motion(points, start, end, scale), unavailable
 
 
+def _motion_flight(app_state: Any) -> MotionFlight:
+    flight = getattr(app_state, "reel_motion_flight", None)
+    if not isinstance(flight, MotionFlight):
+        flight = MotionFlight()
+        app_state.reel_motion_flight = flight
+    return flight
+
+
+async def _reel_motion(
+    request: Request, camera: str, start: float, end: float, scale: float
+) -> tuple[list[float], bool]:
+    """`/v1/reel`'s motion: `_fetch_and_aggregate_motion` raced against
+    `scrub.reel_motion_deadline_s`.
+
+    Motion is the only part of a reel that waits on Frigate's HTTP API, and
+    the reel is what a client needs before it can show its first still -- a
+    Frigate slow to answer (CPU-bound on detection) must not hold coverage,
+    frames and events hostage. On a miss the reel answers with a zero-filled
+    trace and `motion_unavailable: true`; the fetch keeps running (one per
+    window at most) and its result is cached for the next request.
+    """
+    deadline_s = float(request.app.state.settings.scrub.reel_motion_deadline_s)
+    if deadline_s <= 0:
+        return await _fetch_and_aggregate_motion(request, camera, start, end, scale)
+    # Looked up at call time (not bound into the closure at import) so a
+    # test's monkeypatch of `_fetch_and_aggregate_motion` is what runs.
+    fetch_fn = _fetch_and_aggregate_motion
+    return await _motion_flight(request.app.state).get(
+        (camera, start, end, scale),
+        end,
+        lambda: fetch_fn(request, camera, start, end, scale),
+        deadline_s=deadline_s,
+        zero_fill=lambda: aggregate_motion([], start, end, scale),
+    )
+
+
 @router.get("/motion/{camera}")
 async def motion(camera: str, start: float, end: float, scale: float, request: Request) -> Any:
     """Total motion (§4.6) -- any `scale`, always covering the full requested
@@ -467,7 +688,7 @@ async def motion(camera: str, start: float, end: float, scale: float, request: R
     Frigate's two measured cliffs (all-zero wide scale, short-window
     truncation) by fetching at a safe scale and aggregating ourselves."""
     _require_series(start, end, scale)
-    _require_known_camera(request, camera)
+    await _require_known_camera(request, camera)
     values, unavailable = await _fetch_and_aggregate_motion(request, camera, start, end, scale)
     body: dict[str, Any] = {"start": start, "interval": scale, "values": values}
     if unavailable:
@@ -733,46 +954,48 @@ async def compose_reel(
     start: float,
     end: float,
     motion_scale: float,
-    *,
-    frigate_conn: Any = None,
 ) -> dict[str, Any]:
     """Build the `/v1/reel/{camera}` body (§4.5) without the HTTP wrapper --
     shared by `reel()` and `/v1/timeline`, which composes several lanes in
     one request.
 
-    `frigate_conn`, when given, is used instead of opening a fresh
-    `db.open_frigate_ro` connection -- the caller owns closing it. The
-    Frigate-side work here runs synchronously inline (never via
-    `asyncio.to_thread`), so it only ever executes on the event-loop thread;
-    sharing one connection across several `compose_reel` calls composed with
-    `asyncio.gather` is safe for that reason (never touched from more than
-    one thread), but is NOT a general invitation to hold a sqlite3
-    connection across threads.
+    Nothing here touches sqlite on the event loop: the Frigate-DB reads
+    (coverage, events, continuations, reviews -- plus the clock-offset lookup,
+    which may parse the Frigate config and read the sidecar) run on one worker
+    thread with their own connection, the scrub-bucket read on another via
+    `db.with_sidecar`, and the motion fetch is async and deadline-bounded
+    (`_reel_motion`). All three run concurrently, so a reel costs the slowest
+    of them -- not their sum -- and several windows requested at once (an
+    arrival asks for up to five) don't queue behind one another on the loop.
     """
-    conn = (
-        frigate_conn
-        if frigate_conn is not None
-        else db.open_frigate_ro(settings.frigate.db_path)
-    )
-    try:
-        if camera not in _known_cameras(request.app.state, conn):
-            raise HTTPException(
-                status_code=404,
-                detail={"error": _ERR_CAMERA_UNKNOWN, "message": f"no such camera: {camera}"},
-            )
-        coverage_result = db.recording_coverage(conn, camera, start, end, now=time.time())
-        offset_s = _event_clock_offset_s(settings, camera)
-        events = _events_json(conn, camera, start, end, offset_s=offset_s)
-        _attach_continuations(conn, settings, camera, events)
-        # Review segments come off the detect stream too -- same clock shift.
-        reviews = _reviews_json(conn, camera, start, end, offset_s=offset_s)
-    finally:
-        if frigate_conn is None:
-            conn.close()
+    if camera not in await known_cameras_async(request.app.state, settings):
+        raise HTTPException(
+            status_code=404,
+            detail={"error": _ERR_CAMERA_UNKNOWN, "message": f"no such camera: {camera}"},
+        )
 
-    bucket_rows = await db.with_sidecar(
-        settings.sidecar.db_path,
-        lambda conn: db.list_scrub_buckets(conn, camera, start, end),
+    def _frigate_reads() -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+        conn = db.open_frigate_ro(settings.frigate.db_path)
+        try:
+            coverage_result = db.recording_coverage(conn, camera, start, end, now=time.time())
+            offset_s = _event_clock_offset_s(settings, camera)
+            events = _events_json(conn, camera, start, end, offset_s=offset_s)
+            _attach_continuations(conn, settings, camera, events)
+            # Review segments come off the detect stream too -- same clock shift.
+            reviews = _reviews_json(conn, camera, start, end, offset_s=offset_s)
+        finally:
+            conn.close()
+        return coverage_result, events, reviews
+
+    (coverage_result, events, reviews), bucket_rows, (motion_values, motion_unavailable) = (
+        await asyncio.gather(
+            asyncio.to_thread(_frigate_reads),
+            db.with_sidecar(
+                settings.sidecar.db_path,
+                lambda conn: db.list_scrub_buckets(conn, camera, start, end),
+            ),
+            _reel_motion(request, camera, start, end, motion_scale),
+        )
     )
 
     # Same exclusion `/v1/scrub/{camera}/coverage` applies -- without it, a
@@ -788,9 +1011,6 @@ async def compose_reel(
         }
         for r in bucket_rows
     ]
-    motion_values, motion_unavailable = await _fetch_and_aggregate_motion(
-        request, camera, start, end, motion_scale
-    )
 
     body: dict[str, Any] = {
         "queried": [start, end],

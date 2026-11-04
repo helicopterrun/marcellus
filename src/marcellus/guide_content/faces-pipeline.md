@@ -19,9 +19,30 @@ full-resolution frames from a paired **capture camera** (e.g. a
 doorbell-height camera aimed at the gate) during the visit. In the last 24
 hours **{{stat:faces_captured_24h}}** frames were captured.
 
-The captures page groups by visit for fast review: keep the sharp frontal
-shots, discard the rest. Kept captures are the raw material the
-[identity clustering](/guide/identities) stage feeds on.
+Only frames with a detected face are kept (the **face gate**): a trigger
+often fires when nobody is in front of the capture camera yet, and without
+the gate those frames are just the street. When the capture camera tracks the
+person itself, frames are also sampled across its own sighting, not only at
+fixed offsets from the trigger, so a visitor who reaches the gate a while
+after (or before) the trigger fires is still caught. Each kept frame's
+thumbnail is cropped to the face.
+
+The captures page shows one card per visit: the most confident face large,
+the visit's other faces in a strip below it (tap one to swap it in), and
+**To review / Kept / Discarded / All** tabs with counts over the last 7, 30
+or 90 days. Tap the face to open the full frame with the detected face
+outlined; arrow keys step through the visit's frames, and a single bad frame
+can be discarded there. **Keep** and **Discard** act on the whole visit and
+offer **Undo**. Kept frames are skipped by `face-capture regate`, but every
+capture, kept or not, is deleted after `retention_days`. Discarding only
+hides a visit from review.
+
+Each card also names the [identities](/guide/identities) clustered from the
+capture camera's own sightings within `event_window_s` of the trigger, and
+links straight to them. Identity clustering runs on those sightings, not on
+these captures, so this is where a sharp capture meets the cluster to name.
+The status pill shows when the capture job last ran (hover it for the full
+counts), and **Check now** runs it immediately.
 
 ## Configuration
 
@@ -52,8 +73,24 @@ shots, discard the rest. Kept captures are the raw material the
   up on (default 3).
 - `apply_annotation_offset` — fold the trigger camera's
   `detect.annotation_offset` into the sample timestamps (default on).
-- `crop_to_bbox` — crop the preview thumbnail to the capture camera's own
-  concurrent event box (default on).
+- `face_gate` (default on) — run the face detector on each frame and keep
+  only frames with a face, thumbnailed to that face. Needs the `[enrich]`
+  extra; without it, capture runs ungated and logs an error.
+- `min_face_score` (default 0.6) — detector score a face must reach to pass
+  the gate.
+- `face_pad` (default 0.4) — padding around the face crop, as a fraction of
+  the face size per side.
+- `event_window_s` (default 30) — with the gate on, if the capture camera has
+  its own person event within this many seconds of the trigger, frames are
+  also sampled across that event, not only at `offsets_s`.
+- `event_max_samples` (default 8) — most frames sampled across that event.
+- `event_min_gap_s` (default 1.0) — minimum spacing between those samples,
+  in seconds.
+- `keep_per_visit` (default 3) — how many face frames a visit keeps, biggest
+  and most confident first; the rest are recorded as skipped.
+- `crop_to_bbox` — when no face crop is available (gate off), crop the
+  preview thumbnail to the capture camera's own concurrent event box
+  (default on).
 - `head_fraction` — fraction of the person box's height, from its top,
   taken as the head crop (default 0.4).
 - `crop_pad` — expand the head crop box by this fraction of its own

@@ -1,9 +1,11 @@
-// Identities: name (promotes + retro-labels past events), merge via picker
-// dialog, exclude/include single sightings (soft, undo-able), delete.
-// Confirmation dialogs are SC.dialog
-// (util.js) -- shared with eventalign.js's restart confirm and zones.js's
-// import confirm, all reusing the map editor's .me-overlay/.me-dialog
-// classes; everything else here is SC helpers.
+// Identities: name (promotes + retro-labels past events), merge via a
+// searchable picker, exclude/include single sightings (soft, undo-able),
+// delete, and a lightbox for a sighting's face stack. Confirmations are
+// SC.dialog and the viewer is SC.lightbox (util.js).
+//
+// The page is paginated, so cluster lookups for merging go through
+// /enrich/clusters/index.json rather than the DOM: a "looks like" partner
+// or a merge target is often not on the current page.
 
 function post(path, body) {
   return SC.fetchJson(path, {
@@ -25,28 +27,43 @@ async function setExcluded(eventId, excluded) {
   return patch('/enrich/events/' + eventId, { excluded });
 }
 
-function clusterMeta(id) {
-  const section = document.querySelector('.id-cluster[data-cluster="' + id + '"]');
-  if (!section) return null;
-  return {
-    section,
-    id: String(id),
-    name: section.dataset.name || null,
-    title: section.querySelector('.id-title').textContent,
-    thumb: section.dataset.thumb || null,
-  };
+let indexPromise = null;
+function clusterIndex() {
+  if (!indexPromise) {
+    indexPromise = SC.fetchJson('/enrich/clusters/index.json')
+      .then(d => d.clusters.map(c => ({
+        id: String(c.cluster_id),
+        name: c.name || null,
+        title: c.name || (c.handle + ' · #' + c.cluster_id),
+        thumb: c.avatar || null,
+        count: c.observation_count,
+      })))
+      .catch(e => { indexPromise = null; throw e; });
+  }
+  return indexPromise;
 }
 
-const dialog = SC.dialog;
+async function clusterMeta(id) {
+  const all = await clusterIndex();
+  return all.find(m => m.id === String(id)) || null;
+}
+
+function section(id) {
+  return document.querySelector('.id-cluster[data-cluster="' + id + '"]');
+}
 
 function clusterRow(meta, extra) {
-  const row = SC.el('div', { class: 'id-pick-row' }, [
+  return SC.el('div', { class: 'id-pick-row' }, [
     meta.thumb
-      ? SC.el('img', { src: meta.thumb, alt: '' }, [])
+      ? SC.el('img', { src: meta.thumb, alt: '', loading: 'lazy' }, [])
       : SC.el('span', { class: 'id-pick-noimg', text: '?' }, []),
-    SC.el('span', { text: meta.title + (extra ? ' · ' + extra : '') }, []),
+    SC.el('span', { class: 'id-pick-text' }, [
+      SC.el('b', { text: meta.title }, []),
+      SC.el('span', {
+        text: meta.count + ' sighting' + (meta.count === 1 ? '' : 's') + (extra ? ' · ' + extra : ''),
+      }, []),
+    ]),
   ]);
-  return row;
 }
 
 async function doMerge(fromId, intoId) {
@@ -57,62 +74,219 @@ async function doMerge(fromId, intoId) {
     return;
   }
   SC.toast('merged');
+  const into = section(intoId);
+  const from = section(fromId);
+  // Land on the survivor; reload so its strip and count include the merged sightings.
+  if (into) window.location.hash = 'cluster-' + intoId;
+  else if (from) from.remove();
   window.location.reload();
 }
 
-// Merge confirm for a "looks like" suggestion: show both clusters.
-function confirmMerge(fromId, intoId) {
-  const from = clusterMeta(fromId);
-  const into = clusterMeta(intoId);
-  if (!from || !into) return;
-  // The named (or older) cluster survives; merge the unnamed one into it.
-  let loser = from, winner = into;
-  if (from.name && !into.name) { loser = into; winner = from; }
-  dialog('Merge these two identities?', [
-    clusterRow(loser, 'goes away'),
-    clusterRow(winner, 'keeps its sightings + gains the others'),
-  ], [
-    { label: 'cancel' },
-    { label: 'merge', kind: 'btn-primary', onclick: () => doMerge(loser.id, winner.id) },
-  ]);
+// ---- merge evidence dialog ---------------------------------------------
+// Every merge confirmation shows each side's title, sighting count and a row of
+// its best face crops (/enrich/clusters/{id}/faces.json), because a merge can't
+// be cleanly undone and a number alone is no basis to judge by. The dialog
+// opens at once; Merge stays disabled until every side has finished loading
+// (or failed), so nobody merges blind on a slow connection.
+
+const FACES_SHOWN = 8;
+
+function openFace(url) {
+  const img = SC.el('img', { src: url, alt: 'face', class: 'id-ev-big' }, []);
+  SC.lightbox([SC.el('div', { class: 'sc-lb-body' }, [img])]);
 }
 
-// Manual merge: pick the surviving cluster from a list.
-function pickMergeTarget(fromId) {
-  const from = clusterMeta(fromId);
-  const others = Array.from(document.querySelectorAll('.id-cluster'))
-    .map(s => clusterMeta(s.dataset.cluster))
-    .filter(m => m && m.id !== String(fromId));
-  if (!others.length) { SC.toast('no other cluster to merge into', true); return; }
-  const rows = others.map(m => {
-    const row = clusterRow(m, null);
-    row.classList.add('id-pick-tap');
-    row.addEventListener('click', () => { overlay.remove(); doMerge(fromId, m.id); });
-    return row;
+function renderFaces(box, faces) {
+  box.textContent = '';
+  if (!faces.length) {
+    box.appendChild(SC.el('span', { class: 'id-ev-note', text: 'no face crops stored for this identity' }, []));
+    return;
+  }
+  faces.forEach(f => {
+    const img = SC.el('img', { src: f.url, alt: '', loading: 'lazy', class: 'id-ev-face', tabindex: '0',
+      title: 'tap to enlarge' }, []);
+    img.addEventListener('click', () => openFace(f.url));
+    img.addEventListener('keydown', e => { if (e.key === 'Enter') openFace(f.url); });
+    box.appendChild(img);
   });
-  const overlay = dialog('Merge "' + from.title + '" into…', rows, [{ label: 'cancel' }]);
 }
 
-document.querySelectorAll('.name-cluster').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const id = btn.dataset.id;
-    const input = document.querySelector('.cluster-name[data-id="' + id + '"]');
-    const name = ((input && input.value) || '').trim();
-    if (!name) { SC.toast('enter a name first', true); input && input.focus(); return; }
+// A small face on a page with a mouse grows beside the pointer. Touch screens get
+// no hover, so anything using this also needs a tap target (the Compare dialog).
+function hoverZoom(img) {
+  let big = null;
+  const hide = () => { if (big) { big.remove(); big = null; } };
+  img.addEventListener('pointerenter', e => {
+    if (e.pointerType !== 'mouse' || big) return;
+    big = SC.el('img', { src: img.src, alt: '', class: 'id-hover-zoom' }, []);
+    const r = img.getBoundingClientRect();
+    const size = 320;
+    big.style.left = Math.min(r.right + 12, window.innerWidth - size - 12) + 'px';
+    big.style.top = Math.max(12, Math.min(r.top, window.innerHeight - size - 12)) + 'px';
+    document.body.appendChild(big);
+  });
+  img.addEventListener('pointerleave', hide);
+  img.addEventListener('click', hide);
+}
+
+// sides: [{ id, meta (or null: looked up), role, title?, count? }]. `summary`
+// is a plain sentence naming what will be merged into what. `onMerge` runs on
+// the Merge button; `extra` are more dialog actions after it.
+function evidenceDialog(heading, summary, sides, mergeLabel, onMerge, autoEnable = true, extra = []) {
+  const rows = sides.map(side => {
+    const head = SC.el('div', { class: 'id-ev-head' }, []);
+    const faces = SC.el('div', { class: 'id-ev-faces' }, [
+      SC.el('span', { class: 'id-ev-note', text: 'loading faces…' }, []),
+    ]);
+    return { side, head, faces, node: SC.el('div', { class: 'id-ev-side' }, [head, faces]) };
+  });
+  const content = [];
+  if (summary) content.push(SC.el('p', { class: 'id-ev-summary', text: summary }, []));
+  content.push(SC.el('div', { class: 'id-ev-sides' }, rows.map(r => r.node)));
+  const overlay = SC.dialog(heading, content, [
+    { label: 'Cancel' },
+    { label: mergeLabel, kind: 'btn-primary', onclick: onMerge },
+    ...extra,
+  ]);
+  overlay.firstChild.classList.add('id-evidence');
+  const mergeBtn = overlay.querySelectorAll('.me-actions button')[1];
+  mergeBtn.disabled = true;
+
+  const loads = rows.map(async r => {
+    const meta = r.side.meta || await clusterMeta(r.side.id).catch(() => null);
+    if (meta) {
+      r.head.textContent = '';
+      r.head.appendChild(clusterRow(meta, r.side.role));
+    } else {
+      r.head.textContent = '';
+      r.head.appendChild(SC.el('b', { text: r.side.title || ('#' + r.side.id) }, []));
+    }
+    try {
+      const data = await SC.fetchJson('/enrich/clusters/' + r.side.id + '/faces.json?limit=' + FACES_SHOWN);
+      renderFaces(r.faces, data.faces || []);
+    } catch (e) {
+      r.faces.textContent = '';
+      r.faces.appendChild(SC.el('span', { class: 'id-ev-note',
+        text: 'could not load faces (' + e.message + ')' }, []));
+    }
+    return meta;
+  });
+  // Enable Merge only once every side has settled (loaded or failed). A caller
+  // that still has to work out who survives passes autoEnable=false.
+  if (autoEnable) Promise.all(loads).then(() => { mergeBtn.disabled = false; });
+  return { overlay, rows, loads };
+}
+
+// Merge confirm for a "looks like" suggestion: show both clusters.
+async function confirmMerge(fromId, intoId) {
+  // Roles depend on who is named / bigger, which needs the index; the dialog
+  // opens first with neutral labels and fills the roles in when it arrives.
+  const sides = [{ id: String(fromId), role: '' }, { id: String(intoId), role: '' }];
+  let loser = sides[0], winner = sides[1];
+  const dlg = evidenceDialog('Merge these two identities?',
+    'One goes away and everything moves into the other. Merging cannot be cleanly undone.',
+    sides, 'Merge', () => doMerge(loser.id, winner.id), false);
+  const mergeBtn = dlg.overlay.querySelectorAll('.me-actions button')[1];
+  mergeBtn.disabled = true;
+  const metas = await Promise.all(dlg.loads);
+  const [from, into] = metas;
+  if (!from || !into) {
+    dlg.overlay.querySelector('.id-ev-summary').textContent =
+      'That identity no longer exists. Close this and reload the page.';
+    return;
+  }
+  // The named cluster survives; otherwise the bigger one does.
+  if ((from.name && !into.name) || (!from.name === !into.name && from.count > into.count)) {
+    loser = sides[1]; winner = sides[0];
+  }
+  const roleOf = {};
+  roleOf[loser.id] = 'goes away';
+  roleOf[winner.id] = 'keeps everything';
+  dlg.rows.forEach((r, i) => {
+    r.head.textContent = '';
+    r.head.appendChild(clusterRow(metas[i], roleOf[r.side.id]));
+    r.node.classList.add(roleOf[r.side.id] === 'goes away' ? 'id-ev-goes' : 'id-ev-keeps');
+  });
+  mergeBtn.disabled = false;
+}
+
+// Manual merge: search for the surviving cluster.
+async function pickMergeTarget(fromId) {
+  let all;
+  try {
+    all = await clusterIndex();
+  } catch (e) {
+    SC.toast('could not load identities: ' + e.message, true);
+    return;
+  }
+  const from = all.find(m => m.id === String(fromId));
+  const others = all.filter(m => m.id !== String(fromId));
+  if (!from || !others.length) { SC.toast('no other identity to merge into', true); return; }
+
+  const search = SC.el('input', {
+    type: 'search', class: 'id-pick-search', placeholder: 'Search by name or #number',
+    'aria-label': 'Search identities',
+  }, []);
+  const list = SC.el('div', { class: 'id-pick-list' }, []);
+  let overlay = null;
+  function render() {
+    const q = search.value.trim().toLowerCase().replace(/^#/, '');
+    const hits = others.filter(m => !q || m.title.toLowerCase().includes(q) || m.id === q);
+    list.textContent = '';
+    hits.slice(0, 60).forEach(m => {
+      const row = clusterRow(m, null);
+      row.classList.add('id-pick-tap');
+      row.tabIndex = 0;
+      const pick = () => { overlay.remove(); doMerge(fromId, m.id); };
+      row.addEventListener('click', pick);
+      row.addEventListener('keydown', ev => { if (ev.key === 'Enter') pick(); });
+      list.appendChild(row);
+    });
+    if (!hits.length) list.appendChild(SC.el('p', { class: 'muted', text: 'No match.' }, []));
+    else if (hits.length > 60) {
+      list.appendChild(SC.el('p', { class: 'muted', text: (hits.length - 60) + ' more, refine the search' }, []));
+    }
+  }
+  search.addEventListener('input', render);
+  render();
+  overlay = SC.dialog('Merge "' + from.title + '" into…', [search, list], [{ label: 'Cancel' }]);
+  overlay.querySelector('.me-dialog').classList.add('id-pick-dialog');
+  search.focus();
+}
+
+// ---- naming ------------------------------------------------------------
+
+document.querySelectorAll('.id-name-form').forEach(form => {
+  form.addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const id = form.dataset.id;
+    const input = form.querySelector('.cluster-name');
+    const btn = form.querySelector('.name-cluster');
+    const name = (input.value || '').trim();
+    if (!name) { SC.toast('enter a name first', true); input.focus(); return; }
     btn.disabled = true;
     try {
       const res = await post('/enrich/clusters/' + id + '/name', { name });
-      const meta = clusterMeta(id);
-      if (meta) {
-        meta.section.dataset.name = name;
-        meta.section.querySelector('.id-title').textContent = name;
-        const badge = meta.section.querySelector('.badge');
+      const sec = section(id);
+      if (sec) {
+        sec.dataset.name = name;
+        sec.classList.add('id-named');
+        sec.querySelector('.id-title').textContent = name;
+        const badge = sec.querySelector('.badge');
         badge.classList.remove('unknown');
         badge.classList.add('recognized');
-        badge.textContent = 'known';
-        btn.textContent = 'rename';
+        badge.textContent = 'named';
+        btn.textContent = 'Save';
+        form.hidden = true;
+        const menu = sec.querySelector('.id-menu-pop');
+        if (menu && !menu.querySelector('.rename-cluster')) {
+          const rn = SC.el('button', { type: 'button', class: 'rename-cluster', 'data-id': id, text: 'Rename' }, []);
+          rn.addEventListener('click', () => startRename(rn));
+          menu.prepend(rn);
+        }
       }
-      SC.toast('named "' + name + '" — relabeled ' + (res.relabeled || 0) + ' past events');
+      indexPromise = null;
+      SC.toast('Named "' + name + '", relabeled ' + (res.relabeled || 0) + ' past events');
     } catch (e) {
       SC.toast('naming failed: ' + e.message, true);
     } finally {
@@ -121,28 +295,51 @@ document.querySelectorAll('.name-cluster').forEach(btn => {
   });
 });
 
+function startRename(btn) {
+  const sec = section(btn.dataset.id);
+  if (!sec) return;
+  btn.closest('details').removeAttribute('open');
+  const form = sec.querySelector('.id-name-form');
+  form.hidden = false;
+  const input = form.querySelector('.cluster-name');
+  input.focus();
+  input.select();
+}
+document.querySelectorAll('.rename-cluster').forEach(btn => {
+  btn.addEventListener('click', () => startRename(btn));
+});
+
+// ---- merge / delete ----------------------------------------------------
+
 document.querySelectorAll('.id-similar').forEach(btn => {
   btn.addEventListener('click', () => confirmMerge(btn.dataset.id, btn.dataset.other));
 });
 
 document.querySelectorAll('.merge-cluster').forEach(btn => {
-  btn.addEventListener('click', () => pickMergeTarget(btn.dataset.id));
+  btn.addEventListener('click', () => {
+    btn.closest('details').removeAttribute('open');
+    pickMergeTarget(btn.dataset.id);
+  });
 });
 
 document.querySelectorAll('.delete-cluster').forEach(btn => {
   btn.addEventListener('click', () => {
-    const meta = clusterMeta(btn.dataset.id);
-    if (!meta) return;
-    dialog('Delete "' + meta.title + '"?', [
-      SC.el('p', { text: 'Its sightings stay in history but lose this identity.' }, []),
+    btn.closest('details').removeAttribute('open');
+    const sec = section(btn.dataset.id);
+    if (!sec) return;
+    const title = sec.querySelector('.id-title').textContent;
+    SC.dialog('Delete "' + title + '"?', [
+      SC.el('p', { text: 'Its sightings stay in history but lose this identity. This can’t be undone.' }, []),
     ], [
-      { label: 'cancel' },
+      { label: 'Cancel' },
       {
-        label: 'delete', kind: 'btn-danger',
+        label: 'Delete', kind: 'btn-danger',
         onclick: async () => {
           try {
-            await post('/enrich/clusters/' + meta.id + '/delete');
-            meta.section.remove();
+            await post('/enrich/clusters/' + btn.dataset.id + '/delete');
+            sec.remove();
+            indexPromise = null;
+            SC.toast('deleted ' + title);
           } catch (e) {
             SC.toast('delete failed: ' + e.message, true);
           }
@@ -152,40 +349,58 @@ document.querySelectorAll('.delete-cluster').forEach(btn => {
   });
 });
 
+// Overflow menus: one open at a time, close on outside click / Escape.
+document.addEventListener('click', ev => {
+  document.querySelectorAll('details.id-menu[open]').forEach(d => {
+    if (!d.contains(ev.target)) d.removeAttribute('open');
+  });
+});
+document.addEventListener('keydown', ev => {
+  if (ev.key !== 'Escape') return;
+  document.querySelectorAll('details.id-menu[open]').forEach(d => d.removeAttribute('open'));
+});
+
+// ---- exclude / include -------------------------------------------------
+
+async function exclude(card) {
+  const eventId = card.dataset.event;
+  try {
+    await setExcluded(eventId, true);
+  } catch (e) {
+    SC.toast('exclude failed: ' + e.message, true);
+    return false;
+  }
+  const parent = card.parentNode;
+  const next = card.nextSibling;
+  card.remove();
+  SC.toast('Sighting excluded', false, {
+    text: 'Undo',
+    callback: async () => {
+      try {
+        await setExcluded(eventId, false);
+      } catch (e) {
+        SC.toast('undo failed: ' + e.message, true);
+        return;
+      }
+      parent.insertBefore(card, next);
+    },
+  });
+  return true;
+}
+
 document.querySelectorAll('.id-exclude').forEach(btn => {
   btn.addEventListener('click', async () => {
-    const eventId = btn.dataset.event;
-    const card = btn.closest('.id-sighting');
     btn.disabled = true;
-    try {
-      await setExcluded(eventId, true);
-    } catch (e) {
-      SC.toast('exclude failed: ' + e.message, true);
-      btn.disabled = false;
-      return;
-    }
-    card && card.remove();
-    SC.toast('Sighting excluded', false, {
-      text: 'Undo',
-      callback: async () => {
-        try {
-          await setExcluded(eventId, false);
-        } catch (e) {
-          SC.toast('undo failed: ' + e.message, true);
-          return;
-        }
-        window.location.reload();
-      },
-    });
+    await exclude(btn.closest('.id-sighting'));
+    btn.disabled = false;
   });
 });
 
 document.querySelectorAll('.id-include').forEach(btn => {
   btn.addEventListener('click', async () => {
-    const eventId = btn.dataset.event;
     btn.disabled = true;
     try {
-      await setExcluded(eventId, false);
+      await setExcluded(btn.dataset.event, false);
     } catch (e) {
       SC.toast('include failed: ' + e.message, true);
       btn.disabled = false;
@@ -195,3 +410,245 @@ document.querySelectorAll('.id-include').forEach(btn => {
     window.location.reload();
   });
 });
+
+// ---- sighting lightbox -------------------------------------------------
+
+function openSighting(card) {
+  const strip = card.parentNode;
+  const cards = Array.from(strip.querySelectorAll('.id-sighting'));
+  const sec = card.closest('.id-cluster');
+  const title = sec.querySelector('.id-title').textContent;
+  const stage = SC.el('div', { class: 'id-lb-stage' }, []);
+  const caption = SC.el('div', { class: 'id-lb-caption' }, []);
+  const bar = SC.el('div', { class: 'id-lb-bar' }, []);
+  let idx = cards.indexOf(card);
+
+  function show() {
+    const c = cards[idx];
+    if (!c.isConnected) return;
+    const eventId = c.dataset.event;
+    stage.textContent = '';
+    const stack = c.querySelector('.id-stack');
+    if (stack) {
+      const faces = stack.cloneNode(true);
+      faces.hidden = false;
+      faces.className = 'id-lb-faces';
+      faces.querySelectorAll('img[data-src]').forEach(img => { img.src = img.dataset.src; });
+      stage.appendChild(faces);
+    } else {
+      // No crops yet: Frigate's full snapshot (via the authed proxy), and
+      // the thumbnail if that fails.
+      const thumb = c.querySelector('img').src;
+      const snap = SC.el('img', { class: 'id-lb-snap', src: '/api/events/' + eventId + '/snapshot.jpg', alt: '' }, []);
+      snap.addEventListener('error', () => { snap.className = 'id-lb-thumb'; snap.src = thumb; }, { once: true });
+      stage.appendChild(snap);
+    }
+    const ts = parseFloat(c.dataset.ts);
+    caption.textContent = '';
+    caption.append(
+      SC.el('b', { text: title }, []),
+      SC.el('span', { text: ' · ' + (ts ? SC.when(ts) : '') + (c.dataset.distance ? ' · distance ' + c.dataset.distance : '') }, []),
+      SC.el('span', { class: 'id-lb-pos', text: ' · ' + (idx + 1) + ' / ' + cards.length }, []),
+    );
+    bar.textContent = '';
+    bar.append(
+      SC.el('a', { class: 'btn btn-neutral', href: '/event/' + eventId, text: 'Open event' }, []),
+      SC.el('a', { class: 'btn btn-neutral', href: '/api/events/' + eventId + '/snapshot.jpg', target: '_blank', rel: 'noopener', text: 'Snapshot' }, []),
+    );
+    if (!c.classList.contains('id-excluded')) {
+      const ex = SC.el('button', { type: 'button', class: 'btn btn-danger', text: 'Not this person' }, []);
+      ex.addEventListener('click', async () => {
+        ex.disabled = true;
+        if (await exclude(c)) {
+          cards.splice(idx, 1);
+          if (!cards.length) { lb.close(); return; }
+          idx = Math.min(idx, cards.length - 1);
+          show();
+        } else {
+          ex.disabled = false;
+        }
+      });
+      bar.appendChild(ex);
+    }
+  }
+
+  function step(d) {
+    if (cards.length < 2) return;
+    idx = (idx + d + cards.length) % cards.length;
+    show();
+  }
+  const prev = SC.el('button', { type: 'button', class: 'sc-lb-nav sc-lb-prev', 'aria-label': 'Previous sighting', text: '‹' }, []);
+  const next = SC.el('button', { type: 'button', class: 'sc-lb-nav sc-lb-next', 'aria-label': 'Next sighting', text: '›' }, []);
+  prev.addEventListener('click', () => step(-1));
+  next.addEventListener('click', () => step(1));
+  if (cards.length < 2) { prev.hidden = true; next.hidden = true; }
+
+  const lb = SC.lightbox([prev, SC.el('div', { class: 'sc-lb-body' }, [stage, caption, bar]), next], {
+    onKey: ev => {
+      if (ev.key === 'ArrowLeft') step(-1);
+      else if (ev.key === 'ArrowRight') step(1);
+    },
+  });
+  show();
+}
+
+document.querySelectorAll('.id-open').forEach(btn => {
+  btn.addEventListener('click', () => openSighting(btn.closest('.id-sighting')));
+});
+
+// ---- face-crop backfill ------------------------------------------------
+// The button only queues/un-queues; the enrichment worker does the work in
+// idle cycles. While queued, poll the counts.
+(function backfill() {
+  const btn = document.querySelector('.id-backfill-btn');
+  const text = document.querySelector('.id-backfill-text');
+  if (!btn || !text) return;
+  let timer = null;
+
+  function render(st) {
+    const running = st.queued > 0;
+    text.textContent = '';
+    if (running) {
+      text.append('Building face crops: ', SC.el('b', { text: String(st.queued) }, []), ' queued · ' + st.done + ' done');
+    } else if (st.ready > 0) {
+      text.append(SC.el('b', { text: String(st.ready) }, []),
+        ' older sightings have no face crops yet, so they show Frigate’s whole-person thumbnail.');
+    } else {
+      text.textContent = 'Face crops built for ' + st.done + ' older sightings'
+        + (st.failed ? ' · ' + st.failed + ' no longer in Frigate' : '') + '.';
+    }
+    btn.dataset.run = running ? '0' : '1';
+    btn.textContent = running ? 'Pause' : 'Build face crops';
+    btn.hidden = !running && st.ready === 0;
+    if (running && !timer) {
+      timer = setInterval(async () => {
+        try { render(await SC.fetchJson('/enrich/backfill.json')); } catch (e) { /* next tick */ }
+      }, 30000);
+    } else if (!running && timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      const st = await post('/enrich/backfill', { run: btn.dataset.run === '1' });
+      render(st);
+      SC.toast(st.queued ? 'queued ' + st.queued + ' sightings, crops build in the background' : 'paused');
+    } catch (e) {
+      SC.toast('backfill failed: ' + e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  if (btn.dataset.run === '0') {
+    SC.fetchJson('/enrich/backfill.json').then(render).catch(() => {});
+  }
+})();
+
+// ---- proposed merges ---------------------------------------------------
+// Read-only proposals from /enrich/merge-proposals.json (faces/consolidate.py).
+// "Merge group" is one human click per group: it confirms, then calls the
+// existing merge route once per non-survivor.
+
+function proposalMeta(m) {
+  return {
+    id: String(m.id),
+    title: m.handle + ' · #' + m.id,
+    thumb: m.avatar_path || null,
+    count: m.sightings,
+  };
+}
+
+async function mergeGroup(group) {
+  const losers = group.members.filter(m => m.id !== group.survivor);
+  try {
+    for (const m of losers) {
+      await post('/enrich/clusters/' + m.id + '/merge', { into: group.survivor });
+    }
+  } catch (e) {
+    SC.toast('merge failed: ' + e.message, true);
+    window.location.reload();
+    return;
+  }
+  SC.toast('merged ' + losers.length + ' into one');
+  window.location.reload();
+}
+
+function compareGroup(group, card, notSame) {
+  const losers = group.members.filter(m => m.id !== group.survivor);
+  const keeper = group.members.find(m => m.id === group.survivor);
+  const keepTitle = keeper.handle + ' · #' + keeper.id;
+  const summary = losers.length + ' identit' + (losers.length === 1 ? 'y' : 'ies') + ' ('
+    + losers.map(m => '#' + m.id).join(', ') + ') will be merged into ' + keepTitle
+    + ', the one with the most sightings. Merging cannot be cleanly undone.';
+  const sides = group.members.map(m => ({
+    id: String(m.id),
+    meta: proposalMeta(m),
+    role: m.id === group.survivor ? 'keeps everything' : 'goes away',
+  }));
+  evidenceDialog('Are these the same person?', summary, sides,
+    'Merge group', () => mergeGroup(group), true,
+    [{ label: 'Not the same', onclick: () => dismissGroup(group, card, notSame) }]);
+}
+
+async function dismissGroup(group, card, btn) {
+  btn.disabled = true;
+  try {
+    await post('/v1/people/merge-suggestions/dismiss', { ids: group.members.map(m => m.id) });
+  } catch (e) {
+    btn.disabled = false;
+    SC.toast('dismiss failed: ' + e.message, true);
+    return;
+  }
+  const box = document.getElementById('merge-proposals');
+  card.remove();
+  if (box && !box.querySelector('.id-prop')) box.hidden = true;
+  SC.toast('will not suggest these again');
+}
+
+function renderProposal(group) {
+  const members = SC.el('div', { class: 'id-prop-members' }, group.members.map(m => {
+    const meta = proposalMeta(m);
+    return clusterRow(meta, m.days + ' day' + (m.days === 1 ? '' : 's'));
+  }));
+  const bits = ['distance ' + group.max_distance.toFixed(2)];
+  const info = SC.el('div', { class: 'id-prop-meta' }, [
+    SC.el('span', { text: bits.join(' · ') }, []),
+    ...(group.same_visit
+      ? [SC.el('span', { class: 'id-prop-tag', text: 'same visit',
+          title: 'two of these were seen on the same camera within minutes of each other' }, [])]
+      : []),
+  ]);
+  const btn = SC.el('button', { type: 'button', class: 'btn btn-primary', text: 'Compare',
+    title: 'see these faces large, then merge them or rule them out' }, []);
+  const notSame = SC.el('button', { type: 'button', class: 'btn', text: 'Not the same',
+    title: 'these are different people: stop suggesting this merge' }, []);
+  const card = SC.el('div', { class: 'id-prop' }, [members, info, btn, notSame]);
+  const compare = () => compareGroup(group, card, notSame);
+  btn.addEventListener('click', compare);
+  members.querySelectorAll('.id-pick-row').forEach(row => {
+    row.classList.add('id-prop-face');
+    row.addEventListener('click', compare);
+    const img = row.querySelector('img');
+    if (img) hoverZoom(img);
+  });
+  notSame.addEventListener('click', () => dismissGroup(group, card, notSame));
+  return card;
+}
+
+(async function loadProposals() {
+  const box = document.getElementById('merge-proposals');
+  if (!box) return;
+  let data;
+  try {
+    data = await SC.fetchJson(box.dataset.url || '/enrich/merge-proposals.json');
+  } catch (e) {
+    return;  // optional extra; the page works without it
+  }
+  const list = box.querySelector('.id-prop-list');
+  (data.proposals || []).forEach(g => list.appendChild(renderProposal(g)));
+  box.hidden = !(data.proposals || []).length;
+})();

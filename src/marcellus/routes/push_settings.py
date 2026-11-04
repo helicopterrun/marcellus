@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from marcellus import db
-from marcellus.push import card_store, policy_settings
+from marcellus.push import card_store, ladder_policy, policy_settings
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +241,60 @@ class OverrideRequest(BaseModel):
     level: str | None = None
 
 
+def _zone_level(level: str) -> str | None:
+    """A zone-override level from a request: an engine level, legacy
+    `notify` read as `silent` (v3 §2.4); `None` if invalid (still no `off`)."""
+    canonical = ladder_policy.canonical_level(level)
+    return canonical if canonical in policy_settings.LEVELS else None
+
+
+#: `PUT /v1/push/overrides` outcome-cell level -> `ladder` value (v3 §5.7):
+#: the four engine levels, plus legacy `off` (Ignore) and `notify` (Quiet).
+_CELL_LEVEL_TO_LADDER = {
+    **policy_settings.LEVEL_TO_LADDER,
+    "off": "ignore",
+    "notify": "silent",
+}
+
+
+def _cell_value(level: str) -> str | None:
+    return _CELL_LEVEL_TO_LADDER.get(level)
+
+
+def _ladder_level(subject: str, value: str) -> str:
+    """A `ladder` cell in the decision-trace level vocabulary (v3 §5.6):
+    Ignore is `off` (suppressed) for a non-person subject, `log` for a
+    person. Silence `previous`/`applied` use this, so a `previous` sent back
+    to `PUT /overrides` restores the cell exactly."""
+    if value == "ignore" and subject != "person":
+        return "off"
+    return policy_settings.LADDER_TO_LEVEL[value]
+
+
+def _cell_level(active: dict[str, Any], subject: str, place: str) -> str | None:
+    row = (active.get("ladder") or {}).get(subject)
+    value = row.get(place) if isinstance(row, dict) else None
+    return _ladder_level(subject, value) if value in policy_settings.LADDER_VALUES else None
+
+
+def _override_level(active: dict[str, Any], zone: str, subject: str) -> str | None:
+    level = active.get("zone_overrides", {}).get(zone, {}).get(subject)
+    return ladder_policy.canonical_level(level) if isinstance(level, str) else None
+
+
+def _with_ladder_cell(
+    active: dict[str, Any], subject: str, place: str, value: str
+) -> dict[str, Any]:
+    """The full settings body with one `ladder` cell changed. Deep-copies
+    every subject's row (not just this cell) -- `normalize_settings` merges
+    a partial `ladder` over `default_settings()`, so sending only
+    `{subject: {place: ...}}` would reset every other tuned cell."""
+    ladder = {s: dict(row_) for s, row_ in (active.get("ladder") or {}).items()}
+    ladder.setdefault(subject, {})
+    ladder[subject][place] = value
+    return {**active, "ladder": ladder}
+
+
 def _scope_for_card(row: Any) -> dict[str, Any]:
     """Derive the silence scope from a `push_cards` row (§C): a card with a
     `zone_name` is scoped to that zone's per-subject override; otherwise it's
@@ -290,10 +344,11 @@ def _insert_silence(
 
 @router.post("/silence")
 async def silence_card(body: SilenceRequest, request: Request) -> dict[str, Any]:
-    """Silence the cell (zone-override or outcome-table) that a given card
-    routed through, down to `quiet` (alerts-slice1 §C). One-tap "quiet this"
-    from the card detail screen -- the counterpart to the `/overrides`
-    fine-grained editor."""
+    """Silence the cell (zone override or ladder cell) that a given card
+    routed through, down to Quiet -- `silent` (ladder v3 §5.7; was `quiet`
+    before v3). One-tap "quiet this" from the card detail screen -- the
+    counterpart to the `/overrides` fine-grained editor. `previous`/`applied`
+    are engine levels (`off` for a non-person Ignore cell)."""
     settings = request.app.state.settings
 
     def _lookup(conn: Any) -> Any:
@@ -316,24 +371,19 @@ async def silence_card(body: SilenceRequest, request: Request) -> dict[str, Any]
     zone = scope.get("zone", "")
     active = policy_settings.get_active()
 
+    # Ladder v3 §5.7: silence applies Quiet (`silent`: a passive, kept row,
+    # never a sound) -- as a zone override, or as the ladder cell.
+    applied = "silent"
     if kind == "zone_override":
-        previous = active.get("zone_overrides", {}).get(zone, {}).get(subject)
+        previous = _override_level(active, zone, subject)
         zone_overrides = {z: dict(row_) for z, row_ in active.get("zone_overrides", {}).items()}
         zone_overrides.setdefault(zone, {})
-        zone_overrides[zone][subject] = "quiet"
+        zone_overrides[zone][subject] = applied
         full_body = {**active, "zone_overrides": zone_overrides}
     else:
-        previous = active.get("outcomes", {}).get(subject, {}).get(place)
-        # "quiet" is a *level* word; the outcomes table speaks a different
-        # vocabulary (`OUTCOMES`) where its equivalent is "glance". Deep-copy
-        # every subject's row (not just this cell) -- `normalize_settings`
-        # merges a partial `outcomes` document over `default_settings()`, so
-        # sending only `{subject: {place: ...}}` would reset every other
-        # tuned cell (including this subject's other places) to defaults.
-        outcomes = {s: dict(row_) for s, row_ in active.get("outcomes", {}).items()}
-        outcomes.setdefault(subject, {})
-        outcomes[subject][place] = policy_settings.LEVEL_TO_OUTCOME["quiet"]
-        full_body = {**active, "outcomes": outcomes}
+        place = ladder_policy.canonical_place(place)
+        previous = _cell_level(active, subject, place)
+        full_body = _with_ladder_cell(active, subject, place, "silent")
 
     errors = policy_settings.validate_settings(full_body)
     if errors:
@@ -352,7 +402,7 @@ async def silence_card(body: SilenceRequest, request: Request) -> dict[str, Any]
             subject=subject,
             place=place,
             previous=previous,
-            applied="quiet",
+            applied=applied,
         )
         conn.commit()
 
@@ -367,7 +417,8 @@ async def silence_card(body: SilenceRequest, request: Request) -> dict[str, Any]
     response_scope = dict(scope)
     if kind == "outcome_cell":
         response_scope.pop("zone", None)
-    return {"scope": response_scope, "previous": previous, "applied": "quiet"}
+        response_scope["place"] = place
+    return {"scope": response_scope, "previous": previous, "applied": applied}
 
 
 @router.put("/overrides")
@@ -396,7 +447,8 @@ async def put_override(body: OverrideRequest, request: Request) -> dict[str, Any
                     "message": "zone_override requires zone and subject",
                 },
             )
-        if body.level is not None and body.level not in policy_settings.LEVELS:
+        # v3 §5.7: log|silent|quiet|urgent; legacy `notify` -> `silent`.
+        if body.level is not None and _zone_level(body.level) is None:
             raise HTTPException(
                 status_code=422,
                 detail={
@@ -424,45 +476,40 @@ async def put_override(body: OverrideRequest, request: Request) -> dict[str, Any
                     "message": "an outcomes cell cannot be null -- send the previous level",
                 },
             )
-        allowed = (*policy_settings.LEVELS, "off")
-        if body.level not in allowed:
+        # v3 §5.7: the four levels; legacy `off` -> Ignore, `notify` -> Quiet.
+        if _cell_value(body.level) is None:
+            allowed = policy_settings.LEVELS
             raise HTTPException(
                 status_code=422,
                 detail={"error": _ERR_BAD_SCOPE, "message": f"level must be one of {allowed}"},
             )
         zone = ""
         subject = body.subject
-        place = body.place
+        place = ladder_policy.canonical_place(body.place)
 
     active = policy_settings.get_active()
+    applied: str | None
     if kind == "zone_override":
-        previous = active.get("zone_overrides", {}).get(zone, {}).get(subject)
+        previous = _override_level(active, zone, subject)
         zone_overrides = {z: dict(row_) for z, row_ in active.get("zone_overrides", {}).items()}
-        if body.level is None:
+        applied = _zone_level(body.level) if body.level is not None else None
+        if applied is None:
             zone_overrides.get(zone, {}).pop(subject, None)
             if zone in zone_overrides and not zone_overrides[zone]:
                 zone_overrides.pop(zone, None)
         else:
             zone_overrides.setdefault(zone, {})
-            zone_overrides[zone][subject] = body.level
+            zone_overrides[zone][subject] = applied
         full_body = {**active, "zone_overrides": zone_overrides}
         scope: dict[str, Any] = {"kind": kind, "zone": zone, "subject": subject}
     else:
-        previous = active.get("outcomes", {}).get(subject, {}).get(place)
-        # `body.level` is in the level vocabulary (LEVELS + "off"); the
-        # outcomes table speaks OUTCOMES (off/log/glance/notify/alarm) --
-        # translate at this one boundary, same as `/silence`. Already
-        # checked non-None above; narrow explicitly for mypy.
+        previous = _cell_level(active, subject, place)
+        # Already checked non-None above; narrow explicitly for mypy.
         assert body.level is not None  # validated above
-        level_value: str = body.level
-        outcome = policy_settings.LEVEL_TO_OUTCOME.get(level_value, level_value)
-        # Deep-copy every subject's row -- see the matching comment in
-        # `/silence` above for why a bare `{subject: {place: ...}}` would
-        # reset every other tuned outcome cell to defaults.
-        outcomes = {s: dict(row_) for s, row_ in active.get("outcomes", {}).items()}
-        outcomes.setdefault(subject, {})
-        outcomes[subject][place] = outcome
-        full_body = {**active, "outcomes": outcomes}
+        value = _cell_value(body.level)
+        assert value is not None  # validated above
+        full_body = _with_ladder_cell(active, subject, place, value)
+        applied = _ladder_level(subject, value)
         scope = {"kind": kind, "subject": subject, "place": place}
 
     errors = policy_settings.validate_settings(full_body)
@@ -475,7 +522,7 @@ async def put_override(body: OverrideRequest, request: Request) -> dict[str, Any
 
     # A pure removal (zone_override level=None) applies nothing to audit --
     # there's no new silence in effect, just one lifted.
-    if body.level is not None:
+    if applied is not None:
 
         def _record(conn: Any) -> None:
             _insert_silence(
@@ -486,7 +533,7 @@ async def put_override(body: OverrideRequest, request: Request) -> dict[str, Any
                 subject=subject,
                 place=place,
                 previous=previous,
-                applied=body.level or "",
+                applied=applied or "",
             )
             conn.commit()
 
@@ -496,6 +543,6 @@ async def put_override(body: OverrideRequest, request: Request) -> dict[str, Any
         "push: override applied scope=%s previous=%s applied=%s",
         scope,
         previous,
-        body.level,
+        applied,
     )
-    return {"scope": scope, "previous": previous, "applied": body.level}
+    return {"scope": scope, "previous": previous, "applied": applied}

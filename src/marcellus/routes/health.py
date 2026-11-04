@@ -17,9 +17,9 @@ pool `routes/proxy.py` uses (frigate_api.get_stream_client) and reports
 the body. That day every Frigate-backed route hung/502'd for hours while
 `/healthz` stayed 200, because the probe used its own fresh connection
 against a different origin and never saw the wedged proxy. `checks
-["upstream_pool"]` and `checks["api_pool"]` additionally report pool stats
-for both pools and flip to degraded when a pool is at `max_connections` with
-nothing idle.
+["upstream_pool"]`, `checks["vod_pool"]` (once recorded playback has used it)
+and `checks["api_pool"]` additionally report pool stats and flip to degraded
+when a pool is at `max_connections` with nothing idle.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -38,7 +39,9 @@ from marcellus import __version__, db
 from marcellus.frigate_api import (
     _DEFAULT_LIMITS,
     _STREAM_LIMITS,
+    _VOD_STREAM_LIMITS,
     get_stream_client,
+    get_vod_stream_client,
     pool_stats,
 )
 
@@ -56,38 +59,101 @@ router = APIRouter(tags=["meta"])
 _STALLED_POOL_RECYCLE_S = 30.0
 
 
-def _note_stalled_pool(app: Any, now: float) -> None:
-    """Record when the stream pool was first observed saturated.
+@dataclass(frozen=True)
+class _StreamPool:
+    """One of the proxy's pools the watchdog keeps from wedging for good."""
+
+    name: str
+    client_attr: str
+    stalled_since_attr: str
+    limits: httpx.Limits
+
+
+_STREAM_POOL = _StreamPool("stream", "stream_http_client", "_stalled_pool_since", _STREAM_LIMITS)
+_VOD_POOL = _StreamPool(
+    "vod", "vod_stream_http_client", "_stalled_vod_pool_since", _VOD_STREAM_LIMITS
+)
+
+
+def _note_stalled_pool(app: Any, now: float, pool: _StreamPool = _STREAM_POOL) -> None:
+    """Record when the pool was first observed saturated.
 
     Idempotent across repeated saturated probes: only the first observation
     sets the timestamp, so `_STALLED_POOL_RECYCLE_S` measures how long the
     condition has *persisted*, not just that it was seen once.
     """
-    if getattr(app.state, "_stalled_pool_since", None) is None:
-        app.state._stalled_pool_since = now
+    if getattr(app.state, pool.stalled_since_attr, None) is None:
+        setattr(app.state, pool.stalled_since_attr, now)
 
 
-def _recycle_stream_client(app: Any) -> None:
-    """Swap in a fresh stream client and retire the wedged one in the background.
+def _recycle_stream_client(app: Any, pool: _StreamPool = _STREAM_POOL) -> None:
+    """Swap in a fresh client for `pool` and retire the wedged one in the background.
 
     The old client's transport may hang closing the wedged connections (that
     is the whole problem), so it must never be awaited inline here -- this
     function runs from inside the `/healthz` request path.
     """
-    old = getattr(app.state, "stream_http_client", None)
+    old = getattr(app.state, pool.client_attr, None)
     logger.warning(
-        "healthz: stream pool wedged for >=%.0fs, recycling stream client",
+        "healthz: %s pool wedged for >=%.0fs, recycling %s client",
+        pool.name,
         _STALLED_POOL_RECYCLE_S,
+        pool.name,
     )
-    get_stream_client_forced_fresh(app)
-    app.state._stalled_pool_since = None
+    if pool is _VOD_POOL:
+        app.state.vod_stream_http_client = None
+        get_vod_stream_client(app)
+    else:
+        get_stream_client_forced_fresh(app)
+    setattr(app.state, pool.stalled_since_attr, None)
     if old is not None:
 
         async def _close_old() -> None:
+            # Bounded: the wedged transport is exactly what may hang on close.
             with contextlib.suppress(Exception):
-                await old.aclose()
+                await asyncio.wait_for(old.aclose(), timeout=30.0)
 
         asyncio.ensure_future(_close_old())
+
+
+def _check_pool(app: Any, now: float, pool: _StreamPool) -> tuple[dict[str, int], bool]:
+    client = getattr(app.state, pool.client_attr, None)
+    if client is None:
+        return {}, False
+    stats = pool_stats(client)
+    if not stats:
+        return {}, False
+    max_connections = pool.limits.max_connections
+    saturated = (
+        max_connections is not None
+        and stats.get("connections", 0) >= max_connections
+        and stats.get("idle", 0) == 0
+    )
+    if saturated:
+        _note_stalled_pool(app, now, pool)
+        since = getattr(app.state, pool.stalled_since_attr, None)
+        if since is not None and now - since >= _STALLED_POOL_RECYCLE_S:
+            _recycle_stream_client(app, pool)
+    else:
+        setattr(app.state, pool.stalled_since_attr, None)
+    return stats, saturated
+
+
+def check_stream_pool(app: Any, now: float) -> tuple[dict[str, int], bool]:
+    """The stream pool's stats and whether it is saturated; recycles the client
+    once saturation has lasted `_STALLED_POOL_RECYCLE_S`.
+
+    Called by `/healthz` and, every few seconds, by the server's proxy
+    watchdog -- on 2026-10-17 nothing polled `/healthz` on the NVR, so a
+    recycle that only ran there never ran at all and the pool stayed wedged
+    for 40 minutes until a manual restart.
+    """
+    return _check_pool(app, now, _STREAM_POOL)
+
+
+def check_vod_stream_pool(app: Any, now: float) -> tuple[dict[str, int], bool]:
+    """`check_stream_pool` for the `/vod/*` pool (`frigate_api._VOD_STREAM_LIMITS`)."""
+    return _check_pool(app, now, _VOD_POOL)
 
 
 def get_stream_client_forced_fresh(app: Any) -> httpx.AsyncClient:
@@ -196,12 +262,20 @@ async def _probe_frigate(app: Any, settings: Any, now: float) -> tuple[str, str 
     return result
 
 
-@router.get("/healthz")
-async def healthz(request: Request) -> JSONResponse:
-    app = request.app
+async def compute_health(app: Any, now: float | None = None) -> dict[str, Any]:
+    """Run the `/healthz` probes and return `{"ok", "checks", "failing",
+    "reason", "scrub_low_disk"}`.
+
+    Shared by `/healthz` and `/status.json` (the status page's verdict), so
+    the two can never disagree about what is wrong. `failing` names the checks
+    that cleared `ok` (the ones that gate the 503), in probe order. Cost: the
+    Frigate probe is cached for `_FRIGATE_PROBE_INTERVAL_S`; everything else is
+    in-memory stats plus one `SELECT 1`.
+    """
     settings = app.state.settings
-    now = time.time()
+    now = time.time() if now is None else now
     checks: dict[str, Any] = {}
+    failing: list[str] = []
     ok = True
 
     frigate_status, frigate_reason = await _probe_frigate(app, settings, now)
@@ -209,27 +283,21 @@ async def healthz(request: Request) -> JSONResponse:
     reason: str | None = None
     if frigate_status == "proxy_stalled":
         ok = False
+        failing.append("frigate")
         reason = frigate_reason
 
-    stream_client = getattr(app.state, "stream_http_client", None)
-    if stream_client is not None:
-        stats = pool_stats(stream_client)
-        if stats:
-            checks["upstream_pool"] = stats
-            max_connections = _STREAM_LIMITS.max_connections
-            saturated = (
-                max_connections is not None
-                and stats.get("connections", 0) >= max_connections
-                and stats.get("idle", 0) == 0
-            )
-            if saturated:
-                ok = False
-                _note_stalled_pool(app, now)
-                since = app.state._stalled_pool_since
-                if since is not None and now - since >= _STALLED_POOL_RECYCLE_S:
-                    _recycle_stream_client(app)
-            else:
-                app.state._stalled_pool_since = None
+    stream_stats, stream_saturated = check_stream_pool(app, now)
+    if stream_stats:
+        checks["upstream_pool"] = stream_stats
+    if stream_saturated:
+        ok = False
+        failing.append("upstream_pool")
+
+    vod_stats, vod_saturated = check_vod_stream_pool(app, now)
+    if vod_stats:
+        checks["vod_pool"] = vod_stats
+    if vod_saturated:
+        ok = False
 
     http_client = getattr(app.state, "http_client", None)
     if http_client is not None:
@@ -244,6 +312,7 @@ async def healthz(request: Request) -> JSONResponse:
             )
             if saturated:
                 ok = False
+                failing.append("api_pool")
 
     # `push_subscriber` is set by the lifespan when push starts; its absence
     # means the lifespan hasn't run (tests, bare create_app under another
@@ -255,6 +324,8 @@ async def healthz(request: Request) -> JSONResponse:
         # Disconnected is degraded even during startup/backoff: push is not
         # being delivered either way, and the reconnect loop clears it fast.
         ok = ok and connected
+        if not connected:
+            failing.append("mqtt")
 
         try:
             conn = db.open_sidecar(str(settings.sidecar.db_path))
@@ -266,6 +337,7 @@ async def healthz(request: Request) -> JSONResponse:
         except Exception:
             checks["db"] = "error"
             ok = False
+            failing.append("db")
 
     scrub_low_disk: bool | None = None
     if settings.scrub.enabled:
@@ -278,6 +350,7 @@ async def healthz(request: Request) -> JSONResponse:
             # process rather than a wedge.
             checks["scrub"] = "locked"
             ok = False
+            failing.append("scrub")
         else:
             tick = min(settings.scrub.generate_interval_s, settings.scrub.live_edge_interval_s)
             last_cycle = getattr(app.state, "scrub_last_cycle", None)
@@ -288,12 +361,14 @@ async def healthz(request: Request) -> JSONResponse:
                 if age > tick * _SCRUB_STALE_TICKS:
                     checks["scrub"] = "stale"
                     ok = False
+                    failing.append("scrub")
                 else:
                     checks["scrub"] = "ok"
             elif now - started_at > tick * _SCRUB_STALE_TICKS:
                 # Never completed a cycle and we're well past startup grace.
                 checks["scrub"] = "stale"
                 ok = False
+                failing.append("scrub")
             else:
                 checks["scrub"] = "starting"
 
@@ -310,11 +385,13 @@ async def healthz(request: Request) -> JSONResponse:
             if age > tick * _SCRUB_STALE_TICKS:
                 checks["face_enrich"] = "stale"
                 ok = False
+                failing.append("face_enrich")
             else:
                 checks["face_enrich"] = "ok"
         elif now - started_at > tick * _SCRUB_STALE_TICKS:
             checks["face_enrich"] = "stale"
             ok = False
+            failing.append("face_enrich")
         else:
             checks["face_enrich"] = "starting"
 
@@ -327,16 +404,30 @@ async def healthz(request: Request) -> JSONResponse:
                 checks["encounters_last_reconcile"] = enc_status["last_reconcile"]
             if enc_status["state"] == "error":
                 ok = False
+                failing.append("encounters")
         else:
             checks["encounters"] = "starting"
     else:
         checks["encounters"] = "disabled"
+
+    if settings.external_sources.enabled:
+        sources_service = getattr(app.state, "external_sources", None)
+        if sources_service is not None:
+            # Per-source `source:<id>` states from cached service state (no
+            # I/O). Deliberately never clears `ok`: a wildlife camera on
+            # another subnet going dark must not 503 Marcellus itself.
+            checks.update(sources_service.health_checks())
+        else:
+            checks["external_sources"] = "starting"
+    else:
+        checks["external_sources"] = "disabled"
 
     if settings.unifi_protect.enabled:
         protect_subscriber = getattr(app.state, "protect_subscriber", None)
         if protect_subscriber is None:
             checks["unifi_protect"] = "degraded"
             ok = False
+            failing.append("unifi_protect")
             if reason is None:
                 reason = "unifi_protect"
         else:
@@ -344,17 +435,38 @@ async def healthz(request: Request) -> JSONResponse:
             checks["unifi_protect"] = protect_status
             if protect_status == "down":
                 ok = False
+                failing.append("unifi_protect")
                 if reason is None:
                     reason = "unifi_protect"
             protect_last_ring_at = protect_subscriber.status().get("last_ring_at")
             if protect_last_ring_at is not None:
                 checks["unifi_protect_last_ring_age_s"] = round(now - protect_last_ring_at, 1)
 
-    body: dict[str, Any] = {"status": "ok" if ok else "degraded", "checks": checks}
-    if reason is not None:
-        body["reason"] = reason
-    if scrub_low_disk is not None:
-        body["scrub_low_disk"] = scrub_low_disk
+    # Informational only, like `frigate`: cameras that stopped recording are
+    # an alert for a person, never a reason to 503 (and so restart) the
+    # sidecar. Absent when the watcher is disabled.
+    recording_watcher = getattr(app.state, "recording_watcher", None)
+    if settings.recording_watch.enabled and recording_watcher is not None:
+        checks["recording"] = recording_watcher.health(now)
+
+    return {
+        "ok": ok,
+        "checks": checks,
+        "failing": failing,
+        "reason": reason,
+        "scrub_low_disk": scrub_low_disk,
+    }
+
+
+@router.get("/healthz")
+async def healthz(request: Request) -> JSONResponse:
+    health = await compute_health(request.app)
+    ok = health["ok"]
+    body: dict[str, Any] = {"status": "ok" if ok else "degraded", "checks": health["checks"]}
+    if health["reason"] is not None:
+        body["reason"] = health["reason"]
+    if health["scrub_low_disk"] is not None:
+        body["scrub_low_disk"] = health["scrub_low_disk"]
     return JSONResponse(body, status_code=200 if ok else 503)
 
 

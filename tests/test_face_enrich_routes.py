@@ -3,6 +3,8 @@ stubbed engine — the orchestration paths minus actual inference."""
 
 from __future__ import annotations
 
+import io
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -19,7 +21,9 @@ from marcellus.config import (
     SidecarSection,
 )
 from marcellus.faces import enrich
+from marcellus.faces.handles import handle_for
 from marcellus.frigate_api import FrigateAPIError, FrigateClient
+from marcellus.routes import enrich as enrich_routes
 from marcellus.server import create_app
 from tests.conftest import FRIGATE_EVENT_SCHEMA
 
@@ -56,7 +60,7 @@ def client(frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path) -> Test
         sidecar=SidecarSection(
             db_path=sidecar_db_path, bind_port=5001, require_frigate_auth=False
         ),
-        face_enrich=FaceEnrichSection(cameras=["gate-face"]),
+        face_enrich=FaceEnrichSection(cameras=["gate-face"], crops_dir=tmp_path / "crops"),
     )
     _seed_clusters(settings)
     return TestClient(create_app(settings))
@@ -66,7 +70,7 @@ def test_clusters_page_renders(client: TestClient) -> None:
     r = client.get("/enrich/clusters")
     assert r.status_code == 200
     assert "alice" in r.text
-    assert "unknown #2" in r.text
+    assert f"{handle_for(2)} · #2" in r.text
 
 
 def test_clusters_json_orders_named_first(client: TestClient) -> None:
@@ -128,6 +132,109 @@ def test_delete_clears_assignments(client: TestClient) -> None:
     assert client.post("/enrich/clusters/2/delete").status_code == 404
 
 
+def _add_cluster(settings: Settings, name: str | None, count: int, event_id: str) -> int:
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        cur = conn.execute(
+            "INSERT INTO face_clusters (name, centroid, observation_count, created_at, "
+            "last_seen_at) VALUES (?, ?, ?, '', ?)",
+            (name, enrich.pack_embedding([0.6, 0.8]), count, time.time()),
+        )
+        cid = int(cur.lastrowid or 0)
+        conn.execute(
+            "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+            "embedding, best_quality, status, processed_at) "
+            "VALUES (?, 'gate-face', 0, ?, ?, 0.5, 'enriched', '')",
+            (event_id, cid, enrich.pack_embedding([0.6, 0.8])),
+        )
+        conn.commit()
+        return cid
+    finally:
+        conn.close()
+
+
+def test_people_view_hides_single_sightings_and_once_view_shows_them(
+    client: TestClient,
+) -> None:
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    once = _add_cluster(settings, None, 1, "ev-once")
+    people = client.get("/enrich/clusters").text
+    assert f'id="cluster-{once}"' not in people and f"{handle_for(2)} · #2" in people
+    # Tab counts: alice + unknown #2 under People, the new one under Seen once.
+    assert '<span class="pp-n">2</span>' in people and '<span class="pp-n">1</span>' in people
+    seen_once = client.get("/enrich/clusters?view=once").text
+    cards = seen_once.split("</datalist>", 1)[1]  # the name datalist lists alice
+    assert f'id="cluster-{once}"' in cards and "alice" not in cards
+    # A bogus view falls back to People rather than erroring.
+    assert f"{handle_for(2)} · #2" in client.get("/enrich/clusters?view=nope").text
+
+
+def test_unknowns_sort_by_sightings_after_named(client: TestClient) -> None:
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    big = _add_cluster(settings, None, 9, "ev-big")
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        order = [c["cluster_id"] for c in enrich_routes._clusters(conn, view="people")]
+    finally:
+        conn.close()
+    assert order == [1, big, 2]  # named first, then the most-seen unknown
+
+
+def test_single_cluster_view_and_missing_cluster(client: TestClient) -> None:
+    html = client.get("/enrich/clusters?cluster=2").text
+    assert f"{handle_for(2)} · #2" in html and "alice" not in html.split("<datalist", 1)[1].split(
+        "</datalist>", 1
+    )[1]
+    assert "All identities" in html
+    assert "no longer exists" in client.get("/enrich/clusters?cluster=999").text
+
+
+def test_pagination_offers_show_more(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The batch is "every named person, then N unnamed": with N = 1 and two
+    # unnamed clusters (#2 plus a busier one), the first page cuts one off.
+    monkeypatch.setattr(enrich_routes, "_PAGE_SIZE", 1)
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    busier = _add_cluster(settings, None, 3, "ev-busier")  # sorts ahead of #2
+    first = client.get("/enrich/clusters").text
+    assert "Show more" in first
+    assert "alice" in first  # named people are never cut
+    # The link keeps the view and lands on the first NEW card.
+    assert "page=2" in first and "#cluster-2" in first
+    assert f'id="cluster-{busier}"' in first and 'id="cluster-2"' not in first
+    assert "Show more" not in client.get("/enrich/clusters?page=2").text
+
+
+def test_named_people_are_never_batched_away(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(enrich_routes, "_PAGE_SIZE", 1)
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    named = [_add_cluster(settings, f"person{i}", 1, f"ev-n{i}") for i in range(3)]
+    html = client.get("/enrich/clusters").text
+    for cid in named:
+        assert f'id="cluster-{cid}"' in html
+
+
+def test_out_of_range_page_does_not_error(client: TestClient) -> None:
+    for page in ("0", "-3", "100000"):
+        assert client.get(f"/enrich/clusters?page={page}").status_code == 200, page
+
+
+def test_cluster_index_lists_every_cluster_with_an_avatar(client: TestClient) -> None:
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    _add_cluster(settings, None, 1, "ev-once")
+    rows = client.get("/enrich/clusters/index.json").json()["clusters"]
+    assert [r["cluster_id"] for r in rows][:1] == [1]  # named first
+    assert len(rows) == 3
+    by_id = {r["cluster_id"]: r for r in rows}
+    assert by_id[1]["avatar"] == "/enrich/thumb/ev-a"  # no crops: Frigate thumbnail
+    _set_stack(settings, "ev-a", [0.9])
+    rows = client.get("/enrich/clusters/index.json").json()["clusters"]
+    assert rows[0]["avatar"] == "/enrich/face/ev-a/0.jpg"  # a crop wins
+
+
 def test_thumb_rejects_unknown_event(client: TestClient) -> None:
     assert client.get("/enrich/thumb/not-ours").status_code == 404
 
@@ -135,13 +242,13 @@ def test_thumb_rejects_unknown_event(client: TestClient) -> None:
 def test_page_shows_sightings_stats_and_similar_hint(client: TestClient) -> None:
     r = client.get("/enrich/clusters")
     assert r.status_code == 200
-    # Sighting strip: both seeded events render thumbnails + snapshot links.
-    assert "/enrich/thumb/ev-a" in r.text
-    assert "/api/events/ev-a/snapshot.jpg" in r.text
+    # Sighting strip: both seeded events render thumbnails (the snapshot link
+    # and full frame live in the JS lightbox).
+    assert "/enrich/thumb/ev-a" in r.text and 'data-event="ev-b"' in r.text
     # Stats bar renders (both seeded rows have event_start_ts=0, outside 7d).
-    assert "enriched" in r.text and "worker:" in r.text
+    assert "enriched" in r.text and "this week:" in r.text
     # Seeded centroids are orthogonal — no similarity hint.
-    assert "looks like" not in r.text
+    assert "Looks like" not in r.text
 
 
 def test_similar_hint_appears_for_close_centroids(client: TestClient) -> None:
@@ -154,9 +261,78 @@ def test_similar_hint_appears_for_close_centroids(client: TestClient) -> None:
     conn.commit()
     conn.close()
     r = client.get("/enrich/clusters")
-    assert "looks like" in r.text
+    assert "Looks like" in r.text
     sim = client.get("/enrich/clusters.json").json()["similar"]
     assert sim["2"]["cluster_id"] == 1 and sim["2"]["name"] == "alice"
+
+
+def test_similar_pairs_numpy_matches_pure_python(sidecar_db_path: Path) -> None:
+    import random
+
+    rng = random.Random(7)
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        base = [rng.gauss(0, 1) for _ in range(16)]
+        for i in range(30):
+            # Every third cluster is a near-copy of `base`, so hints exist.
+            vec = [b + rng.gauss(0, 0.3) for b in base] if i % 3 == 0 else [
+                rng.gauss(0, 1) for _ in range(16)
+            ]
+            conn.execute(
+                "INSERT INTO face_clusters (name, centroid, observation_count, created_at, "
+                "last_seen_at) VALUES (?, ?, 1, '', 0)",
+                (f"n{i}" if i % 5 == 0 else None, enrich.pack_embedding(vec)),
+            )
+        conn.commit()
+        rows = [
+            (int(r["cluster_id"]), r["name"], r["centroid"])
+            for r in conn.execute("SELECT cluster_id, name, centroid FROM face_clusters")
+        ]
+        fast = enrich_routes._similar_pairs(conn)
+    finally:
+        conn.close()
+    slow = enrich_routes._similar_pairs_py(rows)
+    assert fast and fast.keys() == slow.keys()
+    for cid, hint in slow.items():
+        assert fast[cid]["cluster_id"] == hint["cluster_id"]
+        assert fast[cid]["name"] == hint["name"]
+        assert fast[cid]["distance"] == pytest.approx(hint["distance"], abs=1e-3)
+
+
+def test_single_cluster_shows_every_sighting_and_sorts_least_alike_first(
+    client: TestClient,
+) -> None:
+    conn = sqlite3.connect(client.app.state.settings.sidecar.db_path)  # type: ignore[attr-defined]
+    # Cluster 1 (centroid [1, 0]) gets 40 more sightings, more than any strip
+    # cap. ev-odd has the best quality but points the other way.
+    for i in range(40):
+        conn.execute(
+            "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+            "embedding, best_quality, status, processed_at) "
+            "VALUES (?, 'gate-face', 0, 1, ?, ?, 'enriched', '')",
+            (f"ev-{i:02d}", enrich.pack_embedding([1.0, 0.05 * i]), 0.1 + i / 100),
+        )
+    conn.execute(
+        "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+        "embedding, best_quality, status, processed_at) "
+        "VALUES ('ev-odd', 'gate-face', 0, 1, ?, 0.99, 'enriched', '')",
+        (enrich.pack_embedding([0.0, 1.0]),),
+    )
+    conn.commit()
+    conn.close()
+
+    best = client.get("/enrich/clusters?cluster=1").text
+    assert best.count('class="id-sighting') == 42
+    assert "Least alike first" in best and "id-fit-odd" in best
+
+    odd = client.get("/enrich/clusters?cluster=1&sort=odd").text
+    marker = '<figure class="id-sighting" data-event="'
+    order = [chunk.split('"', 1)[0] for chunk in odd.split(marker)[1:]]
+    assert order[0] == "ev-odd"
+    # ev-a and ev-00 sit exactly on the centroid direction: last.
+    assert set(order[-2:]) == {"ev-a", "ev-00"}
+    # Unknown sort values fall back to best-first.
+    assert client.get("/enrich/clusters?cluster=1&sort=bogus").status_code == 200
 
 
 def test_sighting_remove_detaches_and_deletes_empty_cluster(client: TestClient) -> None:
@@ -255,19 +431,27 @@ def test_hard_remove_still_works_alongside_soft_exclude(client: TestClient) -> N
 
 
 class _StubEngine:
-    """Yields one good face per frame along a fixed embedding."""
+    """Yields one good face per frame along a fixed embedding.
+
+    `by_ts` overrides the quality for the frame at that instant, so a test
+    can shape an event's best-to-worst order.
+    """
 
     def __init__(self, embedding: list[float], quality: float = 0.8) -> None:
         self.embedding = embedding
         self.quality = quality
+        self.by_ts: dict[float, float] = {}
+        self.det_floors: list[float] = []
 
     def faces_in_jpeg(
-        self, jpeg: bytes, *, frame_ts: float, min_face_area_px: int
+        self, jpeg: bytes, *, frame_ts: float, min_face_area_px: int, min_det_score: float = 0.0
     ) -> list[enrich.DetectedFace]:
+        self.det_floors.append(min_det_score)
+        q = next((v for t, v in self.by_ts.items() if abs(t - frame_ts) < 1e-6), self.quality)
         return [
             enrich.DetectedFace(
-                frame_ts=frame_ts, area_px=8000.0, quality=self.quality,
-                embedding=list(self.embedding),
+                frame_ts=frame_ts, area_px=8000.0, quality=q,
+                embedding=list(self.embedding), bbox=(0.1, 0.1, 0.15, 0.2), det_score=0.8,
             )
         ]
 
@@ -363,6 +547,290 @@ def test_process_event_no_frames_and_low_quality(
         conn.close()
 
 
+def _frame_jpeg() -> bytes:
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (640, 360), (40, 80, 120)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def test_process_event_stores_a_best_first_face_stack(
+    tmp_path: Path, stub_engine: _StubEngine
+) -> None:
+    # 11 frames over 100..110 at 0.3; three stand out. best_n=2 and
+    # min_quality=0.5 leave ranks 0-1 used, 2 over the gate but past best_n,
+    # 3-4 under the gate -- all five kept, best on top.
+    cfg = FaceEnrichSection(
+        cameras=["gate-face"], crops_dir=tmp_path / "crops", best_n=2, min_quality=0.5,
+    )
+    stub_engine.quality = 0.3
+    stub_engine.by_ts = {105.0: 0.95, 102.0: 0.9, 108.0: 0.6}
+    conn = _joined(tmp_path)
+    try:
+        status = enrich.process_event(conn, _StubClient(jpeg=_frame_jpeg()), _cand(), cfg=cfg)  # type: ignore[arg-type]
+        assert status == "enriched"
+        stack = [
+            (r["rank"], r["quality"], r["frame_ts"], r["used"])
+            for r in conn.execute("SELECT * FROM face_crops WHERE event_id = 'ev1' ORDER BY rank")
+        ]
+        assert stack == [
+            (0, pytest.approx(0.95), pytest.approx(105.0), 1),
+            (1, pytest.approx(0.9), pytest.approx(102.0), 1),
+            (2, pytest.approx(0.6), pytest.approx(108.0), 0),
+            (3, pytest.approx(0.3), pytest.approx(100.0), 0),
+            (4, pytest.approx(0.3), pytest.approx(101.0), 0),
+        ]
+        row = conn.execute("SELECT * FROM face_enrichments WHERE event_id = 'ev1'").fetchone()
+        assert row["best_quality"] == pytest.approx(0.95)
+        assert row["best_frame_ts"] == pytest.approx(105.0)
+        assert json.loads(row["best_bbox"]) == [0.1, 0.1, 0.15, 0.2]
+        assert row["best_crop_path"] == "1970-01-01/ev1_0.jpg"
+        for rank in range(5):
+            assert (tmp_path / "crops" / f"1970-01-01/ev1_{rank}.jpg").stat().st_size > 0
+    finally:
+        conn.close()
+
+
+def test_process_event_survives_an_undecodable_best_frame(
+    tmp_path: Path, stub_engine: _StubEngine
+) -> None:
+    cfg = FaceEnrichSection(cameras=["gate-face"], crops_dir=tmp_path / "crops")
+    conn = _joined(tmp_path)
+    try:
+        assert enrich.process_event(conn, _StubClient(), _cand(), cfg=cfg) == "enriched"  # type: ignore[arg-type]
+        row = conn.execute("SELECT * FROM face_enrichments WHERE event_id = 'ev1'").fetchone()
+        assert row["best_crop_path"] is None and row["best_frame_ts"] is not None
+        paths = [r[0] for r in conn.execute("SELECT crop_path FROM face_crops")]
+        assert paths and all(p is None for p in paths)
+    finally:
+        conn.close()
+
+
+def _set_crop(settings: Settings, event_id: str, rel: str) -> None:
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        conn.execute(
+            "UPDATE face_enrichments SET best_crop_path = ? WHERE event_id = ?", (rel, event_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_face_route_serves_the_crop_and_404s_otherwise(client: TestClient) -> None:
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    crops = Path(settings.face_enrich.crops_dir)
+    (crops / "d").mkdir(parents=True)
+    (crops / "d" / "ev-a.jpg").write_bytes(b"\xff\xd8crop")
+    _set_crop(settings, "ev-a", "d/ev-a.jpg")
+    r = client.get("/enrich/face/ev-a.jpg")
+    assert r.status_code == 200 and r.content == b"\xff\xd8crop"
+    assert r.headers["content-type"] == "image/jpeg"
+    assert client.get("/enrich/face/ev-b.jpg").status_code == 404  # no crop stored
+    assert client.get("/enrich/face/nope.jpg").status_code == 404  # not enriched
+    # A row pointing outside crops_dir is refused, not read.
+    (crops.parent / "secret.jpg").write_bytes(b"secret")
+    _set_crop(settings, "ev-b", "../secret.jpg")
+    assert client.get("/enrich/face/ev-b.jpg").status_code == 404
+
+
+def _set_stack(settings: Settings, event_id: str, qualities: list[float]) -> None:
+    crops = Path(settings.face_enrich.crops_dir)
+    (crops / "d").mkdir(parents=True, exist_ok=True)
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        for rank, q in enumerate(qualities):
+            rel = f"d/{event_id}_{rank}.jpg"
+            (crops / rel).write_bytes(f"face{rank}".encode())
+            conn.execute(
+                "INSERT INTO face_crops (event_id, rank, quality, frame_ts, bbox, used, "
+                "crop_path) VALUES (?, ?, ?, 0, '[]', ?, ?)",
+                (event_id, rank, q, 1 if q >= 0.5 else 0, rel),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_stack_ranks_are_served_and_rendered_best_first(client: TestClient) -> None:
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    _set_stack(settings, "ev-a", [0.91, 0.62, 0.31])
+    assert client.get("/enrich/face/ev-a/2.jpg").content == b"face2"
+    assert client.get("/enrich/face/ev-a/3.jpg").status_code == 404
+    html = client.get("/enrich/clusters").text
+    srcs = [f"/enrich/face/ev-a/{r}.jpg" for r in range(3)]
+    assert all(src in html for src in srcs)
+    assert html.index(srcs[0]) < html.index(srcs[1]) < html.index(srcs[2])
+    assert html.count("id-face-unused") == 1  # only the 0.31 face missed the gate
+    # A sighting without a stack still shows Frigate's thumbnail.
+    assert "/enrich/thumb/ev-b" in html and "/enrich/thumb/ev-a" not in html.split(
+        'data-event="ev-a"', 1
+    )[1].split("</figure>", 1)[0]
+    faces = client.get("/enrich/clusters.json").json()["clusters"][0]["sightings"][0]["faces"]
+    assert [f["rank"] for f in faces] == [0, 1, 2]
+
+
+def test_deleting_a_cluster_deletes_its_crops(client: TestClient) -> None:
+    settings = client.app.state.settings  # type: ignore[attr-defined]
+    crops = Path(settings.face_enrich.crops_dir)
+    (crops / "d").mkdir(parents=True)
+    for eid in ("ev-a", "ev-b"):
+        (crops / "d" / f"{eid}.jpg").write_bytes(b"x")
+        _set_crop(settings, eid, f"d/{eid}.jpg")
+    _set_stack(settings, "ev-b", [0.8, 0.4])
+    assert client.post("/enrich/clusters/2/delete").status_code == 200
+    assert not (crops / "d" / "ev-b.jpg").exists()
+    assert not (crops / "d" / "ev-b_0.jpg").exists() and not (crops / "d" / "ev-b_1.jpg").exists()
+    assert client.get("/enrich/face/ev-b/0.jpg").status_code == 404
+    assert (crops / "d" / "ev-a.jpg").exists()  # other cluster untouched
+    assert client.get("/enrich/face/ev-b.jpg").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Face-stack backfill
+
+
+def _seed_backfill(tmp_path: Path, now: float) -> Settings:
+    """Frigate events + enrichment rows: two old enriched events without a
+    stack (one Frigate has since dropped), one with a stack, one no_faces."""
+    frigate = tmp_path / "f.db"
+    c = sqlite3.connect(frigate)
+    c.executescript(FRIGATE_EVENT_SCHEMA)
+    for eid, start in (("old-1", 100.0), ("old-2", 200.0), ("stacked", 300.0), ("nf", 400.0)):
+        c.execute(
+            "INSERT INTO event (id, camera, label, start_time, end_time) "
+            "VALUES (?, 'gate-face', 'person', ?, ?)",
+            (eid, start, start + 10.0),
+        )
+    c.commit()
+    c.close()
+    settings = Settings(
+        frigate=FrigateSection(base_url="http://frigate.test:5000", db_path=frigate),
+        sidecar=SidecarSection(db_path=tmp_path / "s.db"),
+        face_enrich=FaceEnrichSection(
+            cameras=["gate-face"], crops_dir=tmp_path / "crops", backfill_per_cycle=5,
+            lookback_s=60.0,  # keeps the seeded (ancient) events out of live candidates
+        ),
+    )
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO face_clusters (name, centroid, observation_count, created_at, "
+            "last_seen_at) VALUES ('alice', ?, 3, '', ?)",
+            (enrich.pack_embedding([0.0, 1.0]), now),
+        )
+        for eid, status, start in (("old-1", "enriched", 100.0), ("old-2", "enriched", 200.0),
+                                   ("stacked", "enriched", 300.0), ("nf", "no_faces", 400.0),
+                                   ("gone", "enriched", 50.0)):
+            conn.execute(
+                "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+                "embedding, sub_label_written, status, processed_at) "
+                "VALUES (?, 'gate-face', ?, 1, ?, 'alice', ?, '')",
+                (eid, start, enrich.pack_embedding([0.0, 1.0]), status),
+            )
+        conn.execute(
+            "INSERT INTO face_crops (event_id, rank, quality, frame_ts, bbox, used, crop_path) "
+            "VALUES ('stacked', 0, 0.9, 300, '[]', 1, 'x.jpg')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return settings
+
+
+def test_backfill_queue_pause_and_status_count_only_stackless_enriched(tmp_path: Path) -> None:
+    settings = _seed_backfill(tmp_path, time.time())
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        assert enrich.backfill_status(conn) == {"queued": 0, "done": 0, "failed": 0, "ready": 3}
+        assert enrich.queue_backfill(conn) == 3  # old-1, old-2, gone
+        assert enrich.queue_backfill(conn) == 0  # idempotent
+        assert enrich.backfill_status(conn)["queued"] == 3
+        assert enrich.pause_backfill(conn) == 3
+        assert enrich.backfill_status(conn) == {"queued": 0, "done": 0, "failed": 0, "ready": 3}
+    finally:
+        conn.close()
+
+
+class _ClientCM(_StubClient):
+    def __enter__(self) -> _ClientCM:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def test_backfill_cycle_builds_stacks_without_touching_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_engine: _StubEngine
+) -> None:
+    now = time.time()
+    settings = _seed_backfill(tmp_path, now)
+    client = _ClientCM(jpeg=_frame_jpeg())
+    monkeypatch.setattr(enrich, "FrigateClient", lambda *a, **k: client)
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    enrich.queue_backfill(conn)
+    conn.commit()
+    conn.close()
+
+    summary = enrich.run_cycle(settings, now=now)
+    assert summary["candidates"] == 0 and summary["backfilled"] == 3
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        rows = {r["event_id"]: dict(r) for r in conn.execute("SELECT * FROM face_enrichments")}
+        assert rows["old-1"]["stack_status"] == "done" and rows["old-2"]["stack_status"] == "done"
+        assert rows["gone"]["stack_status"] == "no_frames"  # Frigate dropped it
+        assert rows["old-1"]["best_crop_path"] == "1970-01-01/old-1_0.jpg"
+        for eid in ("old-1", "old-2"):
+            # Identity untouched: same cluster, embedding, sub_label; no Frigate writes.
+            assert rows[eid]["cluster_id"] == 1 and rows[eid]["sub_label_written"] == "alice"
+            assert enrich.unpack_embedding(rows[eid]["embedding"]) == [0.0, 1.0]
+        assert client.sub_labels == []
+        stack = conn.execute(
+            "SELECT COUNT(*) FROM face_crops WHERE event_id = 'old-1'"
+        ).fetchone()[0]
+        assert stack == 5
+        centroid = conn.execute("SELECT observation_count FROM face_clusters").fetchone()[0]
+        assert centroid == 3
+        assert enrich.backfill_status(conn) == {"queued": 0, "done": 2, "failed": 1, "ready": 0}
+    finally:
+        conn.close()
+
+
+def test_backfill_yields_to_live_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_engine: _StubEngine
+) -> None:
+    now = time.time()
+    settings = _seed_backfill(tmp_path, now)
+    c = sqlite3.connect(settings.frigate.db_path)
+    c.execute(
+        "INSERT INTO event (id, camera, label, start_time, end_time) "
+        "VALUES ('live', 'gate-face', 'person', ?, ?)",
+        (now - 58.0, now - 50.0),
+    )
+    c.commit()
+    c.close()
+    client = _ClientCM(jpeg=_frame_jpeg())
+    monkeypatch.setattr(enrich, "FrigateClient", lambda *a, **k: client)
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    enrich.queue_backfill(conn)
+    conn.commit()
+    conn.close()
+    summary = enrich.run_cycle(settings, now=now)
+    assert summary["candidates"] == 1 and summary["backfilled"] == 0
+
+
+def test_backfill_routes_queue_pause_and_render(client: TestClient) -> None:
+    html = client.get("/enrich/clusters").text
+    assert "Build face crops" in html and "older sightings have no face crops" in html
+    r = client.post("/enrich/backfill", json={"run": True})
+    assert r.status_code == 200 and r.json()["queued"] == 2  # ev-a, ev-b
+    assert client.get("/enrich/backfill.json").json()["queued"] == 2
+    assert "Pause" in client.get("/enrich/clusters").text
+    assert client.post("/enrich/backfill", json={"run": False}).json()["queued"] == 0
+
+
 def test_run_cycle_records_errors_and_retries_until_cap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frigate_db_path: Path
 ) -> None:
@@ -396,3 +864,260 @@ def test_run_cycle_records_errors_and_retries_until_cap(
         assert row["status"] == "error" and row["attempts"] == expected_attempts
     # Attempts exhausted: the event is no longer a candidate.
     assert enrich.run_cycle(settings, now=now)["candidates"] == 0
+
+
+# ---------------------------------------------------------------------------
+# min_det_score gate and regate.
+
+
+def test_scan_passes_the_det_floor_and_stack_keeps_det_score(
+    tmp_path: Path, stub_engine: _StubEngine
+) -> None:
+    cfg = FaceEnrichSection(cameras=["gate-face"], crops_dir=tmp_path / "crops",
+                            min_det_score=0.65)
+    conn = _joined(tmp_path)
+    try:
+        enrich.process_event(conn, _StubClient(jpeg=_frame_jpeg()), _cand(), cfg=cfg)  # type: ignore[arg-type]
+        assert stub_engine.det_floors and set(stub_engine.det_floors) == {0.65}
+        dets = [r[0] for r in conn.execute("SELECT det_score FROM face_crops")]
+        assert dets and dets == pytest.approx([0.8] * len(dets))
+    finally:
+        conn.close()
+
+
+class _RegateClient:
+    """recording_snapshot keyed by frame ts; None = the recording is gone."""
+
+    def __init__(self, frames: dict[float, bytes | None]) -> None:
+        self.frames = frames
+        self.sub_labels: list[tuple[str, str]] = []
+
+    def recording_snapshot(
+        self, camera: str, ts: float, *, timeout: float = 15.0
+    ) -> tuple[bytes | None, int]:
+        jpeg = self.frames.get(ts)
+        return (jpeg, 200 if jpeg else 404)
+
+    def set_sub_label(self, event_id: str, sub_label: str, *, score: float | None = None) -> None:
+        self.sub_labels.append((event_id, sub_label))
+
+
+class _RegateDetector:
+    """detect_in_jpeg answers from a table keyed by the frame bytes."""
+
+    def __init__(self, dets: dict[bytes, list[tuple[tuple[float, float, float, float], float]]]):
+        self.dets = dets
+
+    def detect_in_jpeg(self, jpeg: bytes) -> list[tuple[tuple[float, float, float, float], float]]:
+        return self.dets.get(jpeg, [])
+
+
+_BOX = [0.1, 0.1, 0.2, 0.3]
+
+
+def _regate_settings(tmp_path: Path) -> Settings:
+    settings = Settings(
+        frigate=FrigateSection(base_url="http://frigate.test:5000", db_path=tmp_path / "f.db"),
+        sidecar=SidecarSection(db_path=tmp_path / "s.db"),
+        face_enrich=FaceEnrichSection(cameras=["gate-face"], crops_dir=tmp_path / "crops"),
+    )
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        # Cluster 1 (named) holds a face, a leaf, a sighting whose recording
+        # is gone and one never cropped; cluster 2 holds only a wheel.
+        for name in ("alice", None):
+            conn.execute(
+                "INSERT INTO face_clusters (name, centroid, observation_count, created_at, "
+                "last_seen_at) VALUES (?, ?, 1, '', 0)",
+                (name, enrich.pack_embedding([1.0, 0.0])),
+            )
+        for eid, cid, ts, emb, label in (
+            ("face", 1, 1.0, [1.0, 0.0], "alice"),
+            ("leaf", 1, 2.0, [0.0, 1.0], "alice"),
+            ("gone", 1, 3.0, [1.0, 0.0], None),
+            ("nobox", 1, None, [1.0, 0.0], None),
+            ("wheel", 2, 4.0, [1.0, 0.0], None),
+        ):
+            conn.execute(
+                "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+                "embedding, sub_label_written, status, processed_at, best_frame_ts, best_bbox) "
+                "VALUES (?, 'gate-face', ?, ?, ?, ?, 'enriched', '', ?, ?)",
+                (eid, ts or 0.0, cid, enrich.pack_embedding(emb), label, ts,
+                 json.dumps(_BOX) if ts else None),
+            )
+            if ts:
+                (tmp_path / "crops").mkdir(exist_ok=True)
+                (tmp_path / "crops" / f"{eid}.jpg").write_bytes(b"x")
+                conn.execute(
+                    "INSERT INTO face_crops (event_id, rank, quality, frame_ts, bbox, used, "
+                    "crop_path) VALUES (?, 0, 0.9, ?, ?, 1, ?)",
+                    (eid, ts, json.dumps(_BOX), f"{eid}.jpg"),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+    return settings
+
+
+def _regate_fakes() -> tuple[_RegateClient, _RegateDetector]:
+    client = _RegateClient({1.0: b"f-face", 2.0: b"f-leaf", 3.0: None, 4.0: b"f-wheel"})
+    detector = _RegateDetector({
+        b"f-face": [((0.1, 0.1, 0.2, 0.3), 0.78), ((0.6, 0.6, 0.7, 0.8), 0.52)],
+        b"f-leaf": [((0.1, 0.1, 0.2, 0.3), 0.53)],
+        # The only face in this frame is elsewhere: nothing matches the stored box.
+        b"f-wheel": [((0.6, 0.6, 0.7, 0.8), 0.9)],
+    })
+    return client, detector
+
+
+def test_regate_detaches_junk_rebuilds_and_deletes_emptied_clusters(tmp_path: Path) -> None:
+    settings = _regate_settings(tmp_path)
+    client, detector = _regate_fakes()
+    out = enrich.regate(settings, client=client, detector=detector)
+    assert {k: out[k] for k in ("checked", "kept", "dropped", "missing", "no_box",
+                                "clusters_rebuilt", "clusters_deleted")} == {
+        "checked": 3, "kept": 1, "dropped": 2, "missing": 1, "no_box": 1,
+        "clusters_rebuilt": 1, "clusters_deleted": 1,
+    }
+    # The leaf had a sub_label written: it is cleared in Frigate.
+    assert client.sub_labels == [("leaf", "")]
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        rows = {r["event_id"]: r for r in conn.execute("SELECT * FROM face_enrichments")}
+        assert rows["leaf"]["cluster_id"] is None and rows["leaf"]["embedding"] is None
+        assert rows["leaf"]["status"] == "no_faces" and rows["leaf"]["sub_label_written"] is None
+        assert rows["leaf"]["detail"] == "regate: det 0.53"
+        assert rows["wheel"]["cluster_id"] is None
+        assert {e for e, r in rows.items() if r["cluster_id"] == 1} == {"face", "gone", "nobox"}
+        assert [r[0] for r in conn.execute("SELECT cluster_id FROM face_clusters")] == [1]
+        # Rebuilt without the leaf: 3 embeddings, all [1, 0].
+        c1 = conn.execute("SELECT centroid, observation_count FROM face_clusters").fetchone()
+        assert c1["observation_count"] == 3
+        assert enrich.unpack_embedding(c1["centroid"]) == pytest.approx([1.0, 0.0])
+        crops = {r[0]: r[1] for r in conn.execute("SELECT event_id, det_score FROM face_crops")}
+        assert crops == {"face": pytest.approx(0.78), "gone": None}
+    finally:
+        conn.close()
+    assert (tmp_path / "crops" / "face.jpg").exists()
+    assert not (tmp_path / "crops" / "leaf.jpg").exists()
+    assert not (tmp_path / "crops" / "wheel.jpg").exists()
+
+    # Idempotent: a second pass finds nothing more to drop.
+    again = enrich.regate(settings, client=client, detector=detector)
+    assert again["dropped"] == 0 and again["kept"] == 1
+
+
+def test_regate_dry_run_changes_nothing(tmp_path: Path) -> None:
+    settings = _regate_settings(tmp_path)
+    client, detector = _regate_fakes()
+    out = enrich.regate(settings, client=client, detector=detector, dry_run=True)
+    assert out["dropped"] == 2 and out["kept"] == 1 and out["dry_run"] is True
+    assert client.sub_labels == []
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM face_enrichments WHERE cluster_id IS NOT NULL"
+        ).fetchone()[0] == 5
+        assert conn.execute("SELECT COUNT(*) FROM face_clusters").fetchone()[0] == 2
+        assert conn.execute(
+            "SELECT COUNT(*) FROM face_crops WHERE det_score IS NOT NULL"
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
+    assert (tmp_path / "crops" / "leaf.jpg").exists()
+
+
+# --- merge-hint preview: partner handle/avatar, faces.json, button text --------
+
+
+def _close_pair(client: TestClient) -> None:
+    conn = sqlite3.connect(client.app.state.settings.sidecar.db_path)  # type: ignore[attr-defined]
+    conn.execute(
+        "UPDATE face_clusters SET centroid = ? WHERE cluster_id = 2",
+        (enrich.pack_embedding(enrich.l2_normalize([0.95, 0.05])),),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _crop(client: TestClient, event_id: str, quality: float, *, excluded: bool = False,
+          cluster: int | None = None, rank: int = 0) -> None:
+    conn = sqlite3.connect(client.app.state.settings.sidecar.db_path)  # type: ignore[attr-defined]
+    conn.execute(
+        "INSERT OR IGNORE INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+        "embedding, best_quality, status, processed_at, excluded_at) "
+        "VALUES (?, 'gate-face', 1, ?, ?, ?, 'enriched', '', ?)",
+        (event_id, cluster, enrich.pack_embedding([1.0, 0.0]), quality, "x" if excluded else None),
+    )
+    if cluster is None:
+        conn.execute("UPDATE face_enrichments SET best_quality = ? WHERE event_id = ?",
+                     (quality, event_id))
+    conn.execute(
+        "INSERT INTO face_crops (event_id, rank, quality, frame_ts, bbox, used, crop_path) "
+        "VALUES (?, ?, ?, 0, '[0,0,1,1]', 1, ?)",
+        (event_id, rank, quality, f"{event_id}/{rank}.jpg"),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_similar_carries_handle_and_avatar(client: TestClient) -> None:
+    _close_pair(client)
+    # Cluster 1 (alice) has a better sighting with a crop than ev-a's none.
+    _crop(client, "ev-a", 0.9)
+    sim = client.get("/enrich/clusters.json").json()["similar"]
+    assert sim["2"]["handle"] == handle_for(1)
+    assert "avatar" not in sim["2"]  # additive handle only on the JSON route
+    html = client.get("/enrich/clusters").text
+    assert 'src="/enrich/face/ev-a/0.jpg"' in html and 'class="id-sim-av"' in html
+    # Partner without a crop falls back to its Frigate thumbnail.
+    assert 'src="/enrich/thumb/ev-b"' in html  # cluster 1 looks like cluster 2 too
+
+
+def test_button_text_has_handle_and_never_unknown_number(client: TestClient) -> None:
+    _close_pair(client)
+    html = client.get("/enrich/clusters").text
+    assert "unknown #" not in html.lower()
+    assert "Unknown #" not in html
+    # Cluster 2 is unnamed; its partner (alice) shows by name, and alice's
+    # partner (cluster 2) shows as "Handle · #2".
+    assert "Looks like alice, merge?" in html
+    assert f"Looks like {handle_for(2)} · #2, merge?" in html
+
+
+def test_faces_json_order_limit_and_exclusions(client: TestClient) -> None:
+    for i, q in enumerate((0.2, 0.9, 0.5, 0.7, 0.6, 0.4, 0.3, 0.8)):
+        _crop(client, f"f{i}", q, cluster=2)
+    _crop(client, "gone", 0.99, cluster=2, excluded=True)
+    body = client.get("/enrich/clusters/2/faces.json").json()
+    assert [f["event_id"] for f in body["faces"]] == ["f1", "f7", "f3", "f4", "f2", "f5"]
+    assert body["faces"][0]["url"] == "/enrich/face/f1/0.jpg"
+    assert len(client.get("/enrich/clusters/2/faces.json?limit=2").json()["faces"]) == 2
+    assert client.get("/enrich/clusters/2/faces.json?limit=0").status_code == 422
+    # A live sighting with no stored crop is skipped (ev-b has none).
+    assert "ev-b" not in [f["event_id"] for f in body["faces"]]
+    assert client.get("/enrich/clusters/99/faces.json").status_code == 404
+
+
+def test_faces_json_is_behind_the_auth_gate(
+    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path
+) -> None:
+    cfg = tmp_path / "c.yml"
+    cfg.write_text("cameras: {}\n")
+    settings = Settings(
+        frigate=FrigateSection(config_path=cfg, db_path=frigate_db_path),
+        sidecar=SidecarSection(db_path=sidecar_db_path, bind_port=5001, require_frigate_auth=True),
+        face_enrich=FaceEnrichSection(enabled=True),
+    )
+    anon = TestClient(create_app(settings))
+    sibling = anon.get("/enrich/clusters/index.json").status_code
+    assert sibling in (401, 403)
+    assert anon.get("/enrich/clusters/1/faces.json").status_code == sibling
+
+
+def test_no_unknown_number_wording_left(client: TestClient) -> None:
+    from pathlib import Path as P
+
+    root = P(__file__).resolve().parent.parent / "src" / "marcellus"
+    for rel in ("templates/enrich.html", "templates/face_captures.html", "static/js/enrich.js"):
+        assert "unknown #" not in (root / rel).read_text().lower(), rel

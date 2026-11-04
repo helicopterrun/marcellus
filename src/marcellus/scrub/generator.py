@@ -19,6 +19,7 @@ failed with EXDEV and were silently swallowed, leaving black sheets.
 from __future__ import annotations
 
 import asyncio
+import bisect
 import contextlib
 import logging
 import os
@@ -27,16 +28,17 @@ import sqlite3
 import tempfile
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
 
 from marcellus import db
-from marcellus.config import Settings
+from marcellus.config import ScrubSection, Settings
 from marcellus.scrub import ffmpeg_io, grid, tiling
 from marcellus.scrub.mapping import map_recording_path
+from marcellus.scrub.stats import CycleStats
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +48,45 @@ logger = logging.getLogger(__name__)
 # rely on cell-assignment's own drift check to catch anything that slips.
 _GOP_TOLERANCE = 1.3
 
+#: How far behind the live edge's resume point remembered segments are kept.
+_FED_RETAIN_S = 300.0
+
+#: How long an aged-tier span that decimated to nothing stays skipped. Keeps
+#: nearly all of the saving (a dead span is retried 4x a day, not 4,000x)
+#: while capping anything wrongly marked dead at hours rather than until the
+#: next restart.
+_DEAD_SPAN_TTL_S = 6 * 3600.0
+
+#: Consecutive hardware-decode failures (each recovered by a software retry)
+#: after which hwaccel is disabled for the rest of the process.
+_HW_DISABLE_AFTER = 3
+
 _WORK_DIRNAME = ".work"
 _CELLS_DIRNAME = ".cells"
+
+
+@dataclass
+class _FedSegments:
+    """Recordings a live-edge decode has already fed to the tier in full, with
+    their `end_time` (path -> end_time).
+
+    `consumed_through` (#112) skips a segment once its end is within one interval
+    of the last stored frame, but that is an inequality on a float: prod showed
+    margins of +0.000/+0.001 s that landed on the wrong side every tick, and
+    cameras whose keyframes are unevenly spaced (last stored keyframe 8.0 s into a
+    10.001 s segment) whose newest segment always ends past the criterion. Both
+    re-decoded the same segment every tick for nothing. Remembering the exact
+    segments that were fed completely settles it without any arithmetic.
+
+    In memory only: a restart empties it, costing at most one extra decode per
+    camera.
+    """
+
+    ends: dict[str, float] = field(default_factory=dict)
+    #: The tier's `generated_through` when `ends` was last used. If it goes
+    #: backwards or vanishes, the tier's data was dropped (retention, a manual
+    #: `drop_intervals`) and what we remember having fed no longer exists.
+    seen_through: float | None = None
 
 
 @dataclass
@@ -64,18 +103,49 @@ class SourceProfile:
     state rather than a stream property: each is the camera the next cycle's
     backfill (resp. live-edge) pass starts from, and they live here because
     this is already the object the generation loop keeps between cycles.
+    `decimation_cursor` is the same thing for Pass 3.
     """
 
     gop_s: dict[str, float]
     aspect: dict[str, float]
     backfill_cursor: int
     live_edge_cursor: int
+    decimation_cursor: int
+    stats: CycleStats
+    canvas_cache: tiling.CanvasCache
+    fed_segments: dict[tuple[str, float], _FedSegments]
+    dead_aged_spans: dict[str, dict[tuple[float, float], float]]
+    cache_sizing_logged: bool
+    hw_failures: int
+    hwaccel_disabled: bool
 
     def __init__(self) -> None:
         self.gop_s = {}
         self.aspect = {}
         self.backfill_cursor = 0
         self.live_edge_cursor = 0
+        self.decimation_cursor = 0
+        # In-progress sheet canvases (capacity set from `scrub.canvas_cache_sheets`
+        # by each writer, so the profile needn't know the settings). Lives here
+        # because it must outlive a cycle to be of any use.
+        self.canvas_cache = tiling.CanvasCache(0)
+        # camera -> {aged-tier span: monotonic time marked} for spans that
+        # decimated to nothing with time to spare and no read error (no sheet
+        # rows, sheet files gone, or no cell on the aged grid). Old recent-tier
+        # data doesn't come back, so `generate_aged_tier` skips them for
+        # `_DEAD_SPAN_TTL_S` rather than re-trying them at the head of every
+        # cycle's budget. Per-process: a restart re-learns them in a cycle or two.
+        self.dead_aged_spans = {}
+        # (camera, tier interval) -> segments the live edge has fed completely.
+        self.fed_segments = {}
+        self.cache_sizing_logged = False
+        # Consecutive hardware-decode failures that a software retry then
+        # recovered; at `_HW_DISABLE_AFTER` hwaccel is off for the process.
+        self.hw_failures = 0
+        self.hwaccel_disabled = False
+        # Reset by `generate_cycle`; lives here because every generation entry
+        # point already takes the profile.
+        self.stats = CycleStats()
 
 
 def _cells_dir(cache_dir: Path, camera: str, interval_s: float, sheet_start: float) -> Path:
@@ -103,6 +173,22 @@ def _work_root(cache_dir: Path) -> Path:
     return work
 
 
+def hwaccel_input_args(scrub: ScrubSection, profile: SourceProfile) -> list[str]:
+    """ffmpeg input options for hardware decode, or [] when it is off (not
+    configured, or disabled for this process after repeated failures)."""
+    if scrub.hwaccel == "none" or profile.hwaccel_disabled:
+        return []
+    return ["-hwaccel", scrub.hwaccel, "-hwaccel_device", scrub.hwaccel_device]
+
+
+def _clear_dir(work_dir: Path) -> None:
+    for child in work_dir.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+
+
 async def _sample_segment(
     seg_path: Path,
     seg_start: float,
@@ -113,18 +199,28 @@ async def _sample_segment(
     *,
     cell_w: int,
     cell_h: int,
+    stats: CycleStats | None = None,
+    scrub: ScrubSection | None = None,
+    profile: SourceProfile | None = None,
 ) -> list[grid.Frame]:
     """Extract frames from one segment into `work_dir`, returning achieved
     (timestamp, path) pairs. Chooses keyframe-only decode when GOP ~= interval,
     else the full-decode fps fallback (§5.2).
 
+    With hwaccel configured (`scrub` and `profile` given), a hardware decode that
+    fails with `FfmpegError` is retried once in software; see `hwaccel_input_args`
+    and `_HW_DISABLE_AFTER`.
+
     The caller owns `work_dir` and deletes it once the frames have been either
     accepted into the cell store or discarded, so nothing survives the cycle.
     """
-    async with sem:
+
+    async def _extract(hw_args: list[str]) -> list[grid.Frame]:
+        # Only passed when set, so extractors without the parameter still work.
+        extra: dict[str, Any] = {"hwaccel_args": hw_args} if hw_args else {}
         if gop_s <= interval_s * _GOP_TOLERANCE:
             extracted = await ffmpeg_io.extract_keyframes_with_pts(
-                seg_path, work_dir, cell_w=cell_w, cell_h=cell_h
+                seg_path, work_dir, cell_w=cell_w, cell_h=cell_h, **extra
             )
             frames = [
                 grid.Frame(timestamp=seg_start + pts, path=str(path))
@@ -137,12 +233,56 @@ async def _sample_segment(
             # splitting the bucket.
             return grid.decimate_to_grid(frames, interval_s)
         jpgs = await ffmpeg_io.extract_fps(
-            seg_path, work_dir, interval_s, cell_w=cell_w, cell_h=cell_h
+            seg_path, work_dir, interval_s, cell_w=cell_w, cell_h=cell_h, **extra
         )
         return [
             grid.Frame(timestamp=seg_start + i * interval_s, path=str(jpgs[i]))
             for i in range(len(jpgs))
         ]
+
+    async with sem:
+        spawned = time.monotonic()
+        if stats is not None:
+            stats.extraction_started(spawned)
+        try:
+            hw_args = (
+                hwaccel_input_args(scrub, profile)
+                if scrub is not None and profile is not None else []
+            )
+            if not hw_args:
+                return await _extract([])
+            assert profile is not None
+            try:
+                frames = await _extract(hw_args)
+            except ffmpeg_io.FfmpegInterrupted:
+                raise
+            except ffmpeg_io.FfmpegError as hw_exc:
+                logger.warning(
+                    "scrub: hardware decode failed for %s, retrying in software: %s",
+                    seg_path, hw_exc,
+                )
+                # Partial JPEGs from the failed run must not reach the retry.
+                await asyncio.to_thread(_clear_dir, work_dir)
+                frames = await _extract([])  # failure here: genuine, propagates
+                if stats is not None:
+                    stats.ffmpeg_hw_fallbacks += 1
+                profile.hw_failures += 1
+                if profile.hw_failures >= _HW_DISABLE_AFTER and not profile.hwaccel_disabled:
+                    profile.hwaccel_disabled = True
+                    logger.error(
+                        "scrub: hardware decode failed %d times in a row; disabling "
+                        "hwaccel until the process restarts",
+                        profile.hw_failures,
+                    )
+                return frames
+            profile.hw_failures = 0
+            return frames
+        finally:
+            if stats is not None:
+                stats.ffmpeg_spawns += 1
+                stats.segments_decoded += 1
+                stats.ffmpeg_s += time.monotonic() - spawned
+                stats.extraction_finished(time.monotonic())
 
 
 def _publish_sheet_version(
@@ -156,6 +296,8 @@ def _publish_sheet_version(
     cell_w: int,
     cell_h: int,
     fmt: str,
+    stats: CycleStats | None = None,
+    canvas_cache: tiling.CanvasCache | None = None,
 ) -> tuple[str, int] | None:
     """Tile the current cell files for this sheet and atomically publish a new
     immutable version (URL includes `count`, §4.3). Returns the on-disk
@@ -183,6 +325,12 @@ def _publish_sheet_version(
     contract it inherits: cell k is `sheet_start + k * interval_s`, which is only
     true while the cells are contiguous from zero. Cells past a hole are kept on
     disk, not discarded.
+
+    With `canvas_cache`, the sheet's canvas is kept in memory between flushes and
+    only cells new or changed since the last one are decoded (`tiling.CanvasCache`).
+    The generator publishes one sheet from one place at a time, and the cache
+    serialises per sheet regardless. A sheet published full is evicted: its cell
+    store is dropped right after, so nothing will grow it again.
     """
     cells_dir = _cells_dir(cache_dir, camera, interval_s, sheet_start)
     cells: list[tiling.Cell] = []
@@ -210,7 +358,18 @@ def _publish_sheet_version(
     tmp = Path(tmp_name)
     try:
         tile = tiling.tile_sheet_webp if fmt == "webp" else tiling.tile_sheet
-        tile(cells, cols=cols, rows=rows, cell_w=cell_w, cell_h=cell_h, out_path=tmp)
+        key: tiling.CanvasKey = (
+            camera, interval_s, sheet_start, cols, rows, cell_w, cell_h, fmt
+        )
+        decoded = tile(
+            cells, cols=cols, rows=rows, cell_w=cell_w, cell_h=cell_h, out_path=tmp,
+            cache=canvas_cache, cache_key=key,
+        )
+        if canvas_cache is not None and count >= cols * rows:
+            canvas_cache.evict(key)
+        if stats is not None:
+            stats.pil_decodes += decoded
+            stats.pil_sheet_encodes += 1
         os.replace(tmp, out_path)  # atomic publish (mirrors wildlife.py)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -245,6 +404,15 @@ def _persist_cells(
                 logger.warning("scrub: could not store cell %s -> %s: %s", a.path, dst, exc)
 
 
+def _commit(conn: sqlite3.Connection, stats: CycleStats | None) -> None:
+    """`conn.commit()`, counted in the cycle's stats (count and wall time)."""
+    started = time.monotonic()
+    conn.commit()
+    if stats is not None:
+        stats.db_commits += 1
+        stats.db_commit_s += time.monotonic() - started
+
+
 def _retire_overclaiming_sheets(
     conn: sqlite3.Connection,
     cache_dir: Path,
@@ -252,6 +420,7 @@ def _retire_overclaiming_sheets(
     interval_s: float,
     sheet_start: float,
     kept_count: int,
+    stats: CycleStats | None = None,
 ) -> None:
     """Delete already-published versions of this sheet that claim more cells
     than the cell store can back.
@@ -276,7 +445,7 @@ def _retire_overclaiming_sheets(
         "WHERE camera = ? AND interval_s = ? AND start_ts = ? AND count > ?",
         (camera, interval_s, sheet_start, kept_count),
     )
-    conn.commit()
+    _commit(conn, stats)
     for row in rows:
         with contextlib.suppress(OSError):
             (cache_dir / row["path"]).unlink()
@@ -394,20 +563,79 @@ def _reap_orphaned_publish_temp(cache_dir: Path, *, now: float, max_age_s: float
 
 
 def _span_covered_by_aged(
-    aged_rows: list[sqlite3.Row], start_ts: float, end_ts: float
+    aged_rows: list[sqlite3.Row],
+    start_ts: float,
+    end_ts: float,
+    tolerance_s: float = 0.0,
 ) -> bool:
-    """Whether `aged_rows` (sorted by `start_ts`) together cover `[start_ts,
-    end_ts)` with no gap. Adjacent/overlapping rows merge; a gap anywhere in
-    the span, or no aged coverage at all, means the span is not covered.
+    """Reference (brute-force) coverage check: whether `aged_rows` (sorted by
+    `start_ts`) together cover `[start_ts, end_ts)`.
+
+    Adjacent/overlapping rows merge. With `tolerance_s == 0` any gap, or no
+    aged coverage at all, means not covered. With `tolerance_s > 0` (the aged
+    interval -- the same "a hole narrower than one interval can't hold a
+    frame" rule `uncovered_spans` applies) a gap breaks coverage only when
+    `next.start > covered_through + tolerance_s`, the span's end is satisfied
+    at `covered_through >= end - tolerance_s`, and at least one aged row must
+    touch the span's tolerance-widened neighbourhood (so a span narrower than
+    the tolerance is never "covered" by nothing at all).
     """
     covered_through = start_ts
     for row in aged_rows:
-        if row["start_ts"] > covered_through:
+        if row["start_ts"] > covered_through + tolerance_s:
             break
         covered_through = max(covered_through, row["end_ts"])
-        if covered_through >= end_ts:
-            return True
-    return covered_through >= end_ts
+    if covered_through < end_ts - tolerance_s:
+        return False
+    if tolerance_s > 0 and start_ts < end_ts:
+        return any(
+            r["end_ts"] > start_ts - tolerance_s and r["start_ts"] < end_ts + tolerance_s
+            for r in aged_rows
+        )
+    return True
+
+
+class _AgedCoverage:
+    """`aged_rows` merged once into sorted disjoint intervals, so "is this span
+    fully covered" is a `bisect` instead of a scan from the first aged row.
+
+    Same semantics as `_span_covered_by_aged`, including `tolerance_s`: rows
+    whose gap is at most the tolerance merge, and the span's end is satisfied
+    within the tolerance.
+    """
+
+    def __init__(self, aged_rows: Sequence[Any], tolerance_s: float = 0.0) -> None:
+        self._tol = tolerance_s
+        spans = sorted((r["start_ts"], r["end_ts"]) for r in aged_rows)
+        starts: list[float] = []
+        ends: list[float] = []
+        for s, e in spans:
+            if ends and s <= ends[-1] + tolerance_s:
+                if e > ends[-1]:
+                    ends[-1] = e
+            else:
+                starts.append(s)
+                ends.append(e)
+        # Raw (unmerged) extents, for the tolerance>0 "something touches" test.
+        self._starts = starts
+        self._ends = ends
+
+    def covers(self, start_ts: float, end_ts: float) -> bool:
+        tol = self._tol
+        i = bisect.bisect_right(self._starts, start_ts + tol) - 1
+        covered = start_ts
+        if i >= 0:
+            covered = max(covered, self._ends[i])
+        if covered < end_ts - tol:
+            return False
+        if tol > 0 and start_ts < end_ts:
+            # Some aged data must touch the span's neighbourhood. Merged
+            # intervals can be wider than raw rows by up to `tol` only at their
+            # joins, which are themselves inside the data's extent, so testing
+            # the merged intervals is equivalent to testing the rows.
+            j = bisect.bisect_right(self._ends, start_ts - tol)
+            return j < len(self._starts) and self._starts[j] < end_ts + tol
+        return True
 
 
 def _retire_stale_recent_buckets(
@@ -417,6 +645,7 @@ def _retire_stale_recent_buckets(
     recent_interval_s: float,
     boundary: float,
     aged_interval_s: float | None = None,
+    stats: CycleStats | None = None,
 ) -> None:
     """Drop any recent-tier bucket/sheet that now falls (even partially)
     before `boundary` (§4.2 non-overlap, §5.5 thinning) -- but only once the
@@ -433,7 +662,12 @@ def _retire_stale_recent_buckets(
     are still on disk within retention.
 
     `aged_interval_s`, when given, gates retirement on the aged tier already
-    covering the stale bucket's exact span: backfill runs on its own budget
+    covering the stale bucket's span -- allowing a gap of at most one aged
+    interval, the same tolerance `uncovered_spans` applies (the 5 s tier has a
+    ~5 s hole at nearly every 1 s bucket seam because `_decimate_source` keeps
+    only the cell exactly on the aged grid; a strict gate never opened: 0 of
+    thousands of buckets retirable). Nothing looser than one interval, so the
+    original protection holds: backfill runs on its own budget
     and can lag behind the boundary by cycles, and retiring the recent-tier
     data before the aged tier has regenerated it erases that span with
     nothing to refill it from at the finer cadence -- measured live as a
@@ -455,10 +689,11 @@ def _retire_stale_recent_buckets(
             "WHERE camera = ? AND interval_s = ? ORDER BY start_ts",
             (camera, aged_interval_s),
         ).fetchall()
+        coverage = _AgedCoverage(aged_rows, tolerance_s=aged_interval_s)
         retirable_ranges = [
             (r["start_ts"], r["end_ts"])
             for r in stale
-            if _span_covered_by_aged(aged_rows, r["start_ts"], r["end_ts"])
+            if coverage.covers(r["start_ts"], r["end_ts"])
         ]
     else:
         retirable_ranges = [(r["start_ts"], r["end_ts"]) for r in stale]
@@ -500,7 +735,7 @@ def _retire_stale_recent_buckets(
             f"WHERE camera = ? AND interval_s = ? AND start_ts IN ({sheet_placeholders})",
             (camera, recent_interval_s, *sheet_starts),
         )
-    sidecar_conn.commit()
+    _commit(sidecar_conn, stats)
     for r in sheet_rows:
         p = cache_dir / r["path"]
         with contextlib.suppress(OSError):
@@ -529,8 +764,20 @@ class _TierWriter:
         cell_w: int,
         cell_h: int,
         sidecar_conn: sqlite3.Connection,
+        stats: CycleStats | None = None,
+        canvas_cache: tiling.CanvasCache | None = None,
+        use_canvas_cache: bool = False,
     ) -> None:
         self.settings = settings
+        self.stats = stats
+        # Opt-in per writer: only the tiers that re-flush a growing sheet every
+        # tick (ffmpeg-decoded recent, and the aged tier) benefit. Derived tiers
+        # flush rarely and would only crowd those out of the LRU.
+        if not use_canvas_cache:
+            canvas_cache = None
+        self.canvas_cache = canvas_cache
+        if canvas_cache is not None:
+            canvas_cache.set_capacity(settings.scrub.canvas_cache_sheets)
         self.camera = camera
         self.interval_s = interval_s
         self.window_start = window_start
@@ -587,6 +834,14 @@ class _TierWriter:
             round(open_bucket["generated_through"] / self.interval_s) if open_bucket else None
         )
 
+    def _bucket_sealed(self) -> None:
+        """A sealed bucket takes no more cells, so its sheets' canvases are dead
+        weight (the LRU would get there eventually, at 37 MB apiece)."""
+        if self.canvas_cache is not None and self._bucket_start is not None:
+            self.canvas_cache.evict_range(
+                self.camera, self.interval_s, self._bucket_start, self._generated_through
+            )
+
     async def _flush_sheet(self, sheet_start: float, count: int) -> None:
         """Publish this sheet at whatever count its cell store can actually back.
 
@@ -600,7 +855,8 @@ class _TierWriter:
         published = await asyncio.to_thread(
             _publish_sheet_version,
             scrub.cache_dir, self.camera, self.interval_s, sheet_start,
-            count, self.cols, self.rows, self.cell_w, self.cell_h, scrub.format,
+            count, self.cols, self.rows, self.cell_w, self.cell_h, scrub.format, self.stats,
+            self.canvas_cache,
         )
         if published is None:
             return
@@ -611,9 +867,10 @@ class _TierWriter:
             cols=self.cols, rows=self.rows, cell_w=self.cell_w, cell_h=self.cell_h,
             count=real_count, path=rel, complete=complete,
         )
-        self.conn.commit()
+        _commit(self.conn, self.stats)
         _retire_overclaiming_sheets(
-            self.conn, scrub.cache_dir, self.camera, self.interval_s, sheet_start, real_count
+            self.conn, scrub.cache_dir, self.camera, self.interval_s, sheet_start, real_count,
+            self.stats,
         )
         if complete:
             # Only a sheet published full can lose its cells: a sheet held short
@@ -622,14 +879,17 @@ class _TierWriter:
             self._sealed.add(sheet_start)
             _drop_cells_dir(scrub.cache_dir, self.camera, self.interval_s, sheet_start)
 
-    async def feed(self, frames: list[grid.Frame]) -> None:
+    async def feed(self, frames: list[grid.Frame]) -> int:
         """Take whatever of `frames` belongs to this tier and store it.
 
         The caller decodes at the finest interval in play, so a coarser tier
         gets several candidates per slot and has to thin them here -- handing
         colliding frames to `assign_cells` makes it split the bucket on every
         frame.
+
+        Returns how many cells were accepted.
         """
+        accepted_total = 0
         scrub = self.settings.scrub
         # Skip anything already represented: compare *grid slots*, not raw
         # timestamps. Each segment is decimated independently, so a slot
@@ -673,10 +933,12 @@ class _TierWriter:
                     width=self.cell_w, height=self.cell_h,
                     generated_through=self._generated_through, complete=True,
                 )
-                self.conn.commit()
+                _commit(self.conn, self.stats)
+                self._bucket_sealed()
                 self._bucket_start = pending[0].timestamp
             result = grid.assign_cells(pending, self._bucket_start, self.interval_s)
             self.new_frames += len(result.accepted)
+            accepted_total += len(result.accepted)
 
             if result.accepted:
                 # Route accepted cells into their sheet (a bucket ~30 sheets deep).
@@ -734,7 +996,7 @@ class _TierWriter:
                     width=self.cell_w, height=self.cell_h,
                     generated_through=self._generated_through, complete=False,
                 )
-                self.conn.commit()
+                _commit(self.conn, self.stats)
 
             if result.split_at is not None:
                 # Seal the current bucket and start a fresh one at split_at.
@@ -745,11 +1007,13 @@ class _TierWriter:
                     width=self.cell_w, height=self.cell_h,
                     generated_through=self._generated_through, complete=True,
                 )
-                self.conn.commit()
+                _commit(self.conn, self.stats)
+                self._bucket_sealed()
                 self._bucket_start = None
                 pending = result.remaining
             else:
                 pending = []
+        return accepted_total
 
     async def flush(self) -> None:
         """One version per still-filling sheet per cycle, not per segment."""
@@ -776,7 +1040,8 @@ class _TierWriter:
                 width=self.cell_w, height=self.cell_h,
                 generated_through=self._generated_through, complete=True,
             )
-            self.conn.commit()
+            _commit(self.conn, self.stats)
+            self._bucket_sealed()
             self._bucket_start = None
 
 
@@ -798,6 +1063,7 @@ async def _tier_writer(
         settings, camera,
         interval_s=interval_s, window_start=window_start, window_end=window_end,
         cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn,
+        stats=profile.stats, canvas_cache=profile.canvas_cache, use_canvas_cache=True,
     )
 
 
@@ -816,6 +1082,10 @@ async def _generate_tier(
     sem: asyncio.Semaphore,
     deadline: float | None = None,
     newest_first: bool = False,
+    consumed_through: float | None = None,
+    min_segments: int = 0,
+    fed: _FedSegments | None = None,
+    derived_writers: Sequence[_TierWriter] = (),
 ) -> dict[str, Any]:
     """Sample `[since, window_end)` for one thinning tier, never emitting frames
     outside `[window_start, window_end)` (§4.2 non-overlap, §5.5 thinning tiers).
@@ -829,6 +1099,9 @@ async def _generate_tier(
 
     `newest_first`, when set, picks the *newest* `budget` segments of
     `[since, window_end)` rather than the oldest -- see `_generate_tiers`.
+
+    `consumed_through`, `min_segments`, `fed`, `derived_writers` -- see
+    `_generate_tiers`.
     """
     if window_end <= window_start or budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0}
@@ -845,6 +1118,8 @@ async def _generate_tier(
         budget=budget,
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
         profile=profile, sem=sem, deadline=deadline, newest_first=newest_first,
+        consumed_through=consumed_through, min_segments=min_segments, fed=fed,
+        derived_writers=derived_writers,
     )
 
 
@@ -863,6 +1138,10 @@ async def _generate_tiers(
     sem: asyncio.Semaphore,
     deadline: float | None = None,
     newest_first: bool = False,
+    consumed_through: float | None = None,
+    min_segments: int = 0,
+    fed: _FedSegments | None = None,
+    derived_writers: Sequence[_TierWriter] = (),
 ) -> dict[str, Any]:
     """Open each segment in `[since, window_end)` and feed it to `writer`.
 
@@ -885,20 +1164,59 @@ async def _generate_tiers(
     several cycles. Skipping straight to the newest segments leaves a hole
     behind them instead, which `_backfill_tier` already fills newest-first
     (§5.4), so nothing is left permanently uncovered.
+
+    `consumed_through`, when given, is the timestamp of the last frame the
+    tier has stored. A segment is a closed file once it has a row, so one
+    that was fed in full has no frame later than that, and the grid keeps one
+    frame per slot, so nothing further than one interval past it either.
+    Skipping `end_time <= consumed_through + drive_interval_s` stops the
+    segment holding the last stored frame being ffmpeg-decoded again every
+    tick only to have `_TierWriter.feed` discard all of it. The criterion is
+    per frame, not per segment: one that failed to decode, was cut off by the
+    deadline or budget, or has frames past the last stored one ends later
+    than that and still matches.
+
+    `min_segments` segments are processed even when `deadline` has already
+    passed. The deadline is otherwise checked before the *first* segment too, so
+    a pass that starts late does nothing at all -- the live edge uses this to
+    guarantee that the first camera of a cycle advances by at least its newest
+    segment however far behind the cycle is.
+
+    `fed`, when given, is exact memory of segments this tier has already
+    consumed in full, and rows in it are skipped regardless of the arithmetic in
+    `consumed_through`. A segment goes in only once its frames were all handed to
+    the writer: a failed or missing file, a decode cut off by the deadline or
+    budget, or one extending past `window_end` (frames beyond it were dropped,
+    and a later tick has a wider window) is not remembered and is retried.
     """
     scrub = settings.scrub
     if budget <= 0:
         return {"camera": camera, "segments": 0, "new_frames": 0}
+    min_end = since
+    if consumed_through is not None:
+        min_end = max(min_end, consumed_through + drive_interval_s)
 
     # Oldest-first and budgeted: a cold start has no resume point, so `since` is
     # the far edge of the retention window and this query would otherwise return
     # days of segments to chew through before the loop yields.
     order = "start_time DESC" if newest_first else "start_time"
+    if fed is not None:
+        if consumed_through is None or (
+            fed.seen_through is not None and consumed_through < fed.seen_through
+        ):
+            fed.ends.clear()
+        fed.seen_through = consumed_through
+    # Remembered rows still occupy LIMIT slots, so over-fetch by their number and
+    # trim after filtering; otherwise `budget` rows that are all skippable would
+    # hide the one new segment behind them.
+    limit = max(1, budget) + (len(fed.ends) if fed is not None else 0)
     rows_ = frigate_conn.execute(
         f"SELECT path, start_time, end_time FROM recordings "
         f"WHERE camera = ? AND end_time > ? AND start_time < ? ORDER BY {order} LIMIT ?",
-        (camera, since, window_end, max(1, budget)),
+        (camera, min_end, window_end, limit),
     ).fetchall()
+    if fed is not None:
+        rows_ = [r for r in rows_ if fed.ends.get(r["path"]) != r["end_time"]][: max(1, budget)]
     if newest_first:
         rows_ = list(reversed(rows_))
     if not rows_:
@@ -916,41 +1234,119 @@ async def _generate_tiers(
     cell_w, cell_h = writer.cell_w, writer.cell_h
     missing_segments = 0
     processed = 0
-    for row in rows_:
+    # Decode in windows of `ffmpeg_concurrency` segments: the ffmpeg children of
+    # one window run side by side (`sem` is what actually bounds them), then the
+    # frames are fed in segment order. Only the *decode* is concurrent -- cell
+    # assignment is order-dependent, and the writer, the DB, `fed` and the stats
+    # all stay on one task in row order, exactly as when this was serial.
+    window_size = max(1, scrub.ffmpeg_concurrency)
+    live_derived = list(derived_writers)
+    idx = 0
+    while idx < len(rows_):
+        size = window_size
         if deadline is not None and time.monotonic() >= deadline:
-            break
-        processed += 1
-        seg_path = map_recording_path(
-            row["path"], settings.frigate.media_path, settings.frigate.recordings_path
-        )
-        if not seg_path.exists():
-            missing_segments += 1
-            continue
-        # One scratch dir per segment, inside cache_dir: the extractor writes
-        # straight into it and it is removed whether or not the frames were
-        # used, so nothing accumulates.
-        with tempfile.TemporaryDirectory(
-            prefix="extract-", dir=_work_root(scrub.cache_dir)
-        ) as td:
-            work_dir = Path(td)
-            try:
-                frames = await _sample_segment(
-                    seg_path, row["start_time"], drive_interval_s, gop_s, sem, work_dir,
-                    cell_w=cell_w, cell_h=cell_h,
-                )
-            except ffmpeg_io.FfmpegInterrupted as exc:
-                # Shutdown took the child with it; not a fault of the segment,
-                # and the hole-finder picks it up next cycle.
-                logger.debug("scrub: sampling interrupted for %s: %s", seg_path, exc)
+            if processed >= min_segments:
+                break
+            # Past the deadline, run only what `min_segments` still owes rather
+            # than a whole window: a late pass should do the minimum, not the
+            # maximum parallelism.
+            size = min(size, min_segments - processed)
+        window = rows_[idx:idx + size]
+        idx += len(window)
+        processed += len(window)
+
+        runnable: list[tuple[sqlite3.Row, Path]] = []
+        for row in window:
+            seg_path = map_recording_path(
+                row["path"], settings.frigate.media_path, settings.frigate.recordings_path
+            )
+            if not seg_path.exists():
+                missing_segments += 1
                 continue
-            except ffmpeg_io.FfmpegError as exc:
-                logger.warning("scrub: sampling failed for %s: %s", seg_path, exc)
-                continue
-            if not frames:
-                continue
-            await writer.feed(frames)
+            runnable.append((row, seg_path))
+
+        # One scratch dir per in-flight segment, inside cache_dir: concurrent
+        # extractions would otherwise collide on `%06d.jpg`. The frames must
+        # outlive their decode (the writer reads them in `feed`), so the dirs
+        # are only removed when the whole window has been fed -- or discarded,
+        # on any exit path -- so nothing accumulates.
+        with contextlib.ExitStack() as stack:
+            work_dirs = [
+                Path(stack.enter_context(
+                    tempfile.TemporaryDirectory(
+                        prefix="extract-", dir=_work_root(scrub.cache_dir)
+                    )
+                ))
+                for _ in runnable
+            ]
+            results = await asyncio.gather(
+                *(
+                    _sample_segment(
+                        seg_path, row["start_time"], drive_interval_s, gop_s, sem, work_dir,
+                        cell_w=cell_w, cell_h=cell_h, stats=profile.stats,
+                        scrub=scrub, profile=profile,
+                    )
+                    for (row, seg_path), work_dir in zip(runnable, work_dirs, strict=True)
+                ),
+                return_exceptions=True,
+            )
+            for (row, seg_path), result in zip(runnable, results, strict=True):
+                if isinstance(result, ffmpeg_io.FfmpegInterrupted):
+                    # Shutdown took the child with it; not a fault of the segment,
+                    # and the hole-finder picks it up next cycle.
+                    logger.debug("scrub: sampling interrupted for %s: %s", seg_path, result)
+                    continue
+                if isinstance(result, ffmpeg_io.FfmpegError):
+                    logger.warning("scrub: sampling failed for %s: %s", seg_path, result)
+                    continue
+                if isinstance(result, BaseException):
+                    raise result
+                if result:
+                    await writer.feed(result)
+                    for dw in list(live_derived):
+                        # Only frames on the derived grid *as the drive tier sees
+                        # it* -- exactly the cells Pass 3's `_decimate_source`
+                        # would pick. Without this a writer takes the first frame
+                        # of the slot's half-interval window it is handed (decoded
+                        # segments are ~10s long), which for an hourly tier is up
+                        # to half an hour before the slot, and `_last_slot` then
+                        # refuses the frame that sits on it.
+                        ratio = round(dw.interval_s / drive_interval_s)
+                        on_grid = [
+                            f for f in result
+                            if round(f.timestamp / drive_interval_s) % ratio == 0
+                        ]
+                        if not on_grid:
+                            continue
+                        try:
+                            accepted = await dw.feed(on_grid)
+                        except Exception:
+                            logger.warning(
+                                "scrub: feeding derived %gs tier for %s from the live edge "
+                                "failed; Pass 3 will carry on from what it stored",
+                                dw.interval_s, camera, exc_info=True,
+                            )
+                            live_derived.remove(dw)
+                            continue
+                        profile.stats.derived_live_cells += accepted
+                if fed is not None and row["end_time"] <= window_end:
+                    fed.ends[row["path"]] = row["end_time"]
 
     await writer.flush()
+    for dw in live_derived:
+        try:
+            await dw.flush()
+        except Exception:
+            logger.warning(
+                "scrub: flushing derived %gs tier for %s failed", dw.interval_s, camera,
+                exc_info=True,
+            )
+    if fed is not None:
+        # Anything this far behind the tier's frontier can never match the query
+        # again (`min_end` only moves forward), so don't let the memory grow.
+        horizon = min_end - _FED_RETAIN_S
+        for path in [p for p, end in fed.ends.items() if end < horizon]:
+            del fed.ends[path]
 
     if missing_segments:
         logger.warning(
@@ -1000,6 +1396,32 @@ def uncovered_spans(
     return spans
 
 
+def _subtract_covered(
+    holes: list[tuple[float, float]],
+    covered: list[tuple[float, float]],
+    min_width_s: float,
+) -> list[tuple[float, float]]:
+    """`holes` with every part inside `covered` removed.
+
+    Remainders narrower than `min_width_s` are dropped, as `uncovered_spans`
+    does: they can't hold a frame.
+    """
+    out: list[tuple[float, float]] = []
+    for h_start, h_end in holes:
+        cursor = h_start
+        for c_start, c_end in sorted(covered):
+            if c_end <= cursor or c_start >= h_end:
+                continue
+            if c_start - cursor >= min_width_s:
+                out.append((cursor, c_start))
+            cursor = max(cursor, c_end)
+            if cursor >= h_end:
+                break
+        if h_end - cursor >= min_width_s:
+            out.append((cursor, h_end))
+    return out
+
+
 async def _backfill_tier(
     settings: Settings,
     camera: str,
@@ -1013,6 +1435,7 @@ async def _backfill_tier(
     profile: SourceProfile,
     sem: asyncio.Semaphore,
     deadline: float | None = None,
+    decimated_from: float | None = None,
 ) -> dict[str, int]:
     """Fill holes in one tier, newest first, each from its newest end.
 
@@ -1030,10 +1453,28 @@ async def _backfill_tier(
     `deadline`, when given, is passed all the way down to `_generate_tiers`'
     per-segment check -- see there for why the per-camera check alone isn't
     tight enough.
+
+    `decimated_from`, when given, is the interval of a finer tier whose
+    published buckets this tier is cropped from by `generate_aged_tier`
+    (Pass 3 of every cycle). Parts of a hole that tier already covers are not
+    ffmpeg-decoded here: backfill runs *before* that pass, so a span that
+    has just aged out of the recent tier -- a segment straddling the
+    boundary included -- would otherwise be decoded for the aged tier even
+    though its cells are already on disk. Only what the finer tier doesn't
+    cover (nothing to decimate from) is left to decode.
     """
     segments = 0
     frames = 0
     spans = uncovered_spans(sidecar_conn, camera, interval_s, window_start, window_end)
+    if decimated_from is not None and spans:
+        finer = sidecar_conn.execute(
+            "SELECT start_ts, end_ts FROM scrub_buckets "
+            "WHERE camera = ? AND interval_s = ? AND end_ts > ? AND start_ts < ?",
+            (camera, decimated_from, window_start, window_end),
+        ).fetchall()
+        spans = _subtract_covered(
+            spans, [(r["start_ts"], r["end_ts"]) for r in finer], interval_s
+        )
     for hole_start, hole_end in list(reversed(spans))[:_MAX_HOLES_PER_CYCLE]:
         if budget <= 0 or (deadline is not None and time.monotonic() >= deadline):
             break
@@ -1107,6 +1548,7 @@ async def camera_gop_seconds(
         )
         if not seg.exists():
             continue
+        profile.stats.ffprobe_calls += 1
         try:
             found = await ffmpeg_io.probe_keyframe_deltas(seg)
         except ffmpeg_io.FfmpegError:
@@ -1115,6 +1557,7 @@ async def camera_gop_seconds(
             deltas.extend(found)
         elif fallback is None:
             # No keyframe pair anywhere in the segment: one per segment at most.
+            profile.stats.ffprobe_calls += 1
             with contextlib.suppress(ffmpeg_io.FfmpegError):
                 fallback = await ffmpeg_io.probe_gop_seconds(seg)
 
@@ -1156,6 +1599,7 @@ async def camera_cell_size(
     if aspect is None:
         seg = _newest_segment(settings, camera, frigate_conn)
         if seg is not None:
+            profile.stats.ffprobe_calls += 1
             try:
                 measured = await ffmpeg_io.probe_display_aspect(seg)
             except ffmpeg_io.FfmpegError:
@@ -1279,7 +1723,7 @@ async def generate_camera(
     # produced it.
     _retire_stale_recent_buckets(
         sidecar_conn, scrub.cache_dir, camera, scrub.recent_interval_s,
-        effective_boundary, aged_interval_s=scrub.aged_interval_s,
+        effective_boundary, aged_interval_s=scrub.aged_interval_s, stats=profile.stats,
     )
     return {
         "camera": camera,
@@ -1299,6 +1743,7 @@ async def generate_live_edge(
     profile: SourceProfile,
     sem: asyncio.Semaphore,
     deadline: float | None = None,
+    min_segments: int = 0,
 ) -> dict[str, Any]:
     """Hold `camera`'s recent tier against wall clock. Cheap and always first.
 
@@ -1311,7 +1756,8 @@ async def generate_live_edge(
     segments -- never mid-segment. `generate_cycle` sets this so a slow live
     edge stops with time left for backfill's own guaranteed share, rather
     than consuming the whole tick and leaving backfill nothing (see
-    `scrub.backfill_min_share_s`).
+    `scrub.backfill_min_share_s`). `min_segments` is how many segments are
+    decoded regardless of the deadline (see `_generate_tiers`).
     """
     scrub = settings.scrub
     gop_s = await camera_gop_seconds(
@@ -1335,6 +1781,12 @@ async def generate_live_edge(
     live_since = max(window_start, now - scrub.live_edge_lookback_s)
     if recent_through is not None and recent_through > live_since:
         live_since = recent_through
+    derived_writers: list[_TierWriter] = []
+    if scrub.derived_from_live_edge:
+        derived_writers = await _open_derived_writers(
+            settings, camera, drive_interval_s=interval_s, live_since=live_since,
+            frigate_conn=frigate_conn, sidecar_conn=sidecar_conn, now=now, profile=profile,
+        )
     result = await _generate_tier(
         settings, camera,
         interval_s=interval_s,
@@ -1343,6 +1795,9 @@ async def generate_live_edge(
         budget=max(1, scrub.live_edge_segments),
         frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
         profile=profile, sem=sem, newest_first=True, deadline=deadline,
+        consumed_through=recent_through, min_segments=min_segments,
+        fed=profile.fed_segments.setdefault((camera, interval_s), _FedSegments()),
+        derived_writers=derived_writers,
     )
     return {"camera": camera, **result}
 
@@ -1405,6 +1860,9 @@ async def generate_backfill(
                 budget=alloc,
                 frigate_conn=frigate_conn, sidecar_conn=sidecar_conn,
                 profile=profile, sem=sem, deadline=deadline,
+                # Every tier after the first is cropped from the recent
+                # tier's sheets where those exist (`generate_aged_tier`).
+                decimated_from=plan[0][0] if (interval_s, w_start, w_end) != plan[0] else None,
             )
             segments += result["segments"]
             frames += result["new_frames"]
@@ -1438,9 +1896,16 @@ async def _decimate_source(
     window_end: float,
     work_dir: Path,
     deadline: float | None = None,
+    stats: CycleStats | None = None,
+    read_errors: list[Path] | None = None,
 ) -> list[grid.Frame]:
     """Select every Nth already-published cell of `finer_interval_s`'s sheets
     landing on `derived_interval_s`'s epoch grid, cropped to its own temp file.
+
+    A sheet that can't be read (truncated, briefly locked, out of file
+    handles) is logged and skipped; when `read_errors` is given its path is
+    appended there too, so a caller can tell "nothing here" from "couldn't
+    look".
 
     No ffmpeg involved -- the source is a finer decode tier's own published
     sheet image, sliced with PIL. Grid alignment is exact: a finer tier's
@@ -1465,8 +1930,6 @@ async def _decimate_source(
         if deadline is not None and time.monotonic() >= deadline:
             break
         img_path = cache_dir / sheet["path"]
-        if not img_path.exists():
-            continue
         cols = sheet["cols"]
         cell_w, cell_h = sheet["cell_w"], sheet["cell_h"]
         wanted: list[tuple[int, float]] = []
@@ -1477,7 +1940,10 @@ async def _decimate_source(
             if round(cell_t / finer_interval_s) % ratio:
                 continue
             wanted.append((k, cell_t))
-        if not wanted:
+        # Decided before the image is touched: most sheets overlapping the
+        # window hold no cell on the derived grid, and opening one costs a full
+        # decode of a multi-megapixel image.
+        if not wanted or not img_path.exists():
             continue
 
         def _slice_sheet(
@@ -1493,6 +1959,8 @@ async def _decimate_source(
             # range requests included) keeps serving while a derived tier
             # catches up.
             out_frames: list[grid.Frame] = []
+            if stats is not None:
+                stats.pil_decodes += 1
             with Image.open(img_path) as im:
                 rgb = im.convert("RGB")
                 for k, cell_t in wanted:
@@ -1502,6 +1970,8 @@ async def _decimate_source(
                     )
                     out = work_dir / f"{k:06d}-{base + len(out_frames):06d}.jpg"
                     crop.save(out, format="JPEG", quality=90)
+                    if stats is not None:
+                        stats.pil_cell_encodes += 1
                     out_frames.append(grid.Frame(timestamp=cell_t, path=str(out)))
             return out_frames
 
@@ -1511,9 +1981,86 @@ async def _decimate_source(
             logger.warning(
                 "scrub: could not read source sheet %s for decimation: %s", img_path, exc
             )
+            if read_errors is not None:
+                read_errors.append(img_path)
             continue
     frames.sort(key=lambda f: f.timestamp)
     return frames
+
+
+async def _open_derived_writer(
+    settings: Settings,
+    camera: str,
+    *,
+    interval_s: float,
+    frigate_conn: sqlite3.Connection,
+    sidecar_conn: sqlite3.Connection,
+    now: float,
+    profile: SourceProfile,
+) -> tuple[_TierWriter, float | None, float]:
+    """Build and resume the writer for one derived tier.
+
+    The single place a derived writer is constructed -- Pass 3
+    (`generate_derived_tier`) and the live edge (`_open_derived_writers`) must
+    agree on window, geometry, canvas-cache use and resume point, or they would
+    fight over the same buckets. Returns `(writer, since, resume_since)`: the
+    tier's `latest_generated_through` (None when it has no data) and where the
+    writer was resumed.
+    """
+    retention_cutoff = now - settings.scrub.retention_days * 86400
+    cell_w, cell_h = await camera_cell_size(
+        settings, camera, frigate_conn=frigate_conn, profile=profile
+    )
+    writer = _TierWriter(
+        settings, camera, interval_s=interval_s,
+        window_start=retention_cutoff, window_end=now,
+        cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn, stats=profile.stats,
+    )
+    since = db.latest_generated_through(sidecar_conn, camera, interval_s)
+    resume_since = since if since is not None else retention_cutoff
+    writer.resume(resume_since)
+    return writer, since, resume_since
+
+
+async def _open_derived_writers(
+    settings: Settings,
+    camera: str,
+    *,
+    drive_interval_s: float,
+    live_since: float,
+    frigate_conn: sqlite3.Connection,
+    sidecar_conn: sqlite3.Connection,
+    now: float,
+    profile: SourceProfile,
+) -> list[_TierWriter]:
+    """Writers for the derived tiers the live edge can feed.
+
+    A derived interval qualifies when Pass 3 would build it from the recent
+    tier (`_is_whole_multiple`) and the tier's next slot is at or after where
+    the live edge resumes. The second condition matters: a writer drops everything
+    at or behind the newest slot it holds, and Pass 3 resumes from the tier's
+    `generated_through`, so feeding frames from the edge into a tier that is
+    still behind (cold start, restart, Pass 3 starved by a deadline) would
+    jump it forward and strand the span in between for good. Such a tier is
+    left to Pass 3 until it catches up.
+    """
+    writers: list[_TierWriter] = []
+    for interval_s in settings.scrub.derived_intervals_s:
+        if not _is_whole_multiple(interval_s, drive_interval_s):
+            continue
+        through = db.latest_generated_through(sidecar_conn, camera, interval_s)
+        # `through` is the last stored cell's timestamp; its next slot must not
+        # fall before the live edge, or it sits in segments Pass 1 already
+        # consumed -- only Pass 3 can still fill it, and feeding a later slot
+        # first would strand it.
+        if through is None or (round(through / interval_s) + 1) * interval_s < live_since:
+            continue
+        writer, _since, _resume = await _open_derived_writer(
+            settings, camera, interval_s=interval_s,
+            frigate_conn=frigate_conn, sidecar_conn=sidecar_conn, now=now, profile=profile,
+        )
+        writers.append(writer)
+    return writers
 
 
 async def generate_derived_tier(
@@ -1551,23 +2098,24 @@ async def generate_derived_tier(
     if not decode_plan:
         return {"camera": camera, "interval_s": interval_s, "new_frames": 0}
 
-    cell_w, cell_h = await camera_cell_size(
-        settings, camera, frigate_conn=frigate_conn, profile=profile
-    )
-    writer = _TierWriter(
+    writer, since, resume_since = await _open_derived_writer(
         settings, camera, interval_s=interval_s,
-        window_start=retention_cutoff, window_end=now,
-        cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn,
+        frigate_conn=frigate_conn, sidecar_conn=sidecar_conn, now=now, profile=profile,
     )
-    since = db.latest_generated_through(sidecar_conn, camera, interval_s)
-    resume_since = since if since is not None else retention_cutoff
-    writer.resume(resume_since)
+    # Where decimation starts reading. `since` is the last derived cell
+    # already stored, so a source window opening *at* it selects that cell
+    # again -- and `_decimate_source` decodes the whole source sheet around it
+    # to do so, only for `feed` to discard the result as seen. Start half a
+    # derived interval later instead: the next wanted cell is a full interval
+    # on, and half an interval is slack against float noise in cell
+    # timestamps (`start_ts + k * finer`).
+    read_from = resume_since + interval_s / 2 if since is not None else resume_since
 
     new_frames = 0
     with tempfile.TemporaryDirectory(prefix="derive-", dir=_work_root(scrub.cache_dir)) as td:
         work_dir = Path(td)
         for finer_interval, seg_ws, seg_we in decode_plan:
-            span_start = max(seg_ws, retention_cutoff, resume_since)
+            span_start = max(seg_ws, retention_cutoff, read_from)
             span_end = min(seg_we, now)
             if span_end <= span_start:
                 continue
@@ -1575,7 +2123,7 @@ async def generate_derived_tier(
                 sidecar_conn, scrub.cache_dir, camera,
                 finer_interval_s=finer_interval, derived_interval_s=interval_s,
                 window_start=span_start, window_end=span_end, work_dir=work_dir,
-                deadline=deadline,
+                deadline=deadline, stats=profile.stats,
             )
             if frames:
                 await writer.feed(frames)
@@ -1622,9 +2170,27 @@ async def generate_aged_tier(
 
     Registers each decimated span as an ordinary aged bucket/sheet set --
     same `scrub_buckets`/`scrub_sheets` rows a backfill pass would have
-    written, `interval_s == aged_interval_s` -- and seals the trailing
-    bucket of each span complete (`_TierWriter.close`), since the span is
-    fully bounded and nothing more will ever arrive for it from this pass.
+    written, `interval_s == aged_interval_s`.
+
+    Every span goes through **one** writer, left open at the end (`flush`,
+    never `close`) -- the shape `generate_derived_tier` already uses. A
+    writer per span, sealed with `close()`, looked safe ("the span is
+    bounded, nothing more will arrive") and was wrong at the trailing edge:
+    `_TierWriter.resume` attaches only to a bucket with `complete = 0`, and
+    the recent tier's live bucket grows by about `live_edge_interval_s`
+    every tick, so each tick opened a *new* hole immediately after the one
+    just sealed. Unable to attach, it started a fresh bucket at its own
+    span start -- and since sheet starts derive from the bucket start, the
+    tier published one sheet per tick instead of growing one sheet to
+    `sheet_cols * sheet_rows`. Measured on prod before this fix: 16,057
+    sheets on one camera's 5s tier where an aligned grid needs ~1,260,
+    13,169 of them holding 4 cells on a 96-cell canvas -- 27.8 KB/cell
+    against the 1s tier's 12.9, and 24x the sheet requests a drag costs.
+
+    Interior buckets still get sealed, by `feed`'s own gap detection when a
+    later non-contiguous span arrives (§5.2) -- which is where that decision
+    belongs, since it is the only place that knows whether two spans are
+    actually adjacent on the grid.
     """
     scrub = settings.scrub
     gop_s = profile.gop_s.get(camera)
@@ -1647,6 +2213,7 @@ async def generate_aged_tier(
     holes = uncovered_spans(sidecar_conn, camera, aged_interval_s, retention_cutoff, boundary)
     if not holes:
         return {"camera": camera, "new_frames": 0}
+    hole_desc = f"{len(holes)} hole(s) first={holes[0][0]:.2f}-{holes[0][1]:.2f}"
 
     # Not filtered on the bucket-row `complete` flag: that marks a bucket as
     # sealed (never receiving more frames), which the live-edge's own
@@ -1660,51 +2227,145 @@ async def generate_aged_tier(
         (camera, recent_interval_s),
     ).fetchall()
     if not recent_rows:
+        logger.info(
+            "scrub: aged tier %s: %s but no %gs recent-tier buckets to decimate from",
+            camera, hole_desc, recent_interval_s,
+        )
         return {"camera": camera, "new_frames": 0}
 
     cell_w, cell_h = await camera_cell_size(
         settings, camera, frigate_conn=frigate_conn, profile=profile
     )
+
+    # A hole is matched against each recent-tier bucket row rather than
+    # requiring one row to cover it whole: the aged window
+    # (retention_cutoff .. boundary) is usually far wider than anything the
+    # recent tier has ever actually recorded, e.g. on a deployment still
+    # inside its first retention_days -- most of that width has no data at
+    # all (recent tier included) and must stay a genuine hole for backfill,
+    # but the sub-span that a recent bucket *does* cover should still be
+    # decimated instead of ffmpeg-decoded.
+    #
+    # Materialised and sorted up front rather than streamed from the nested
+    # loop, because one writer now spans them all and `feed` drops anything
+    # at or behind the newest slot it has stored: fed out of order, a span
+    # would be silently discarded instead of bucketed.
+    spans = sorted(
+        (max(h_start, r_start), min(h_end, r_end))
+        for h_start, h_end in holes
+        for r_start, r_end in recent_rows
+        if min(h_end, r_end) > max(h_start, r_start)
+    )
+    if not spans:
+        logger.info(
+            "scrub: aged tier %s: %s but none overlap a %gs recent-tier bucket "
+            "(%d recent rows, first=%.2f last_end=%.2f)",
+            camera, hole_desc, recent_interval_s, len(recent_rows),
+            recent_rows[0]["start_ts"], recent_rows[-1]["end_ts"],
+        )
+        return {"camera": camera, "new_frames": 0}
+
+    # Spans that already decimated to nothing are skipped: left in, they sit
+    # at the head of the sorted list and re-spend the budget every cycle.
+    # Measured on prod (street, 2026-10-24..28): 116 such spans tried per
+    # cycle, zero frames, deadline -- the tier made no progress for 4 days.
+    # Matched by containment, not equality: the oldest span starts at the
+    # retention cutoff, which moves every cycle, so an exact tuple never
+    # matches again. Marks expire after `_DEAD_SPAN_TTL_S`, and ones that no
+    # longer overlap any span are dropped, so the map can't outgrow the window.
+    dead = profile.dead_aged_spans.setdefault(camera, {})
+    mono = time.monotonic()
+    for key, marked_at in list(dead.items()):
+        if mono - marked_at >= _DEAD_SPAN_TTL_S or not any(
+            a < key[1] and key[0] < b for a, b in spans
+        ):
+            del dead[key]
+    live_spans = [
+        sp for sp in spans if not any(d0 <= sp[0] and sp[1] <= d1 for d0, d1 in dead)
+    ]
+
+    # Window is the whole aged tier, not one span: this writer outlives each
+    # of them, and `feed`'s own bounds check would otherwise throw away every
+    # span but the first.
+    writer = _TierWriter(
+        settings, camera, interval_s=aged_interval_s,
+        window_start=retention_cutoff, window_end=boundary,
+        cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn, stats=profile.stats,
+        canvas_cache=profile.canvas_cache, use_canvas_cache=True,
+    )
+    # Resumed at the first span that actually yields frames, not at spans[0]:
+    # last cycle's open bucket ends where the last FED span did, and a dead
+    # span ahead of it made `resume` miss it -- so every cycle opened a fresh
+    # bucket and left a part-filled sheet behind (6 adjacent open buckets in
+    # 6 cycles on prod's street camera).
+    resumed = False
+    resume_before = attached = None
+
     new_frames = 0
+    spans_tried = spans_with_frames = frames_in = accepted_total = 0
+    deadline_hit = False
     with tempfile.TemporaryDirectory(prefix="age-", dir=_work_root(scrub.cache_dir)) as td:
         work_dir = Path(td)
-        for hole_start, hole_end in holes:
+        for span in live_spans:
+            span_start, span_end = span
             if deadline is not None and time.monotonic() >= deadline:
+                deadline_hit = True
                 break
-            # A hole is matched against each recent-tier bucket row rather
-            # than requiring one row to cover it whole: the aged window
-            # (retention_cutoff .. boundary) is usually far wider than
-            # anything the recent tier has ever actually recorded, e.g. on a
-            # deployment still inside its first retention_days -- most of
-            # that width has no data at all (recent tier included) and must
-            # stay a genuine hole for backfill, but the sub-span that a
-            # recent bucket *does* cover should still be decimated instead
-            # of ffmpeg-decoded.
-            for r_start, r_end in recent_rows:
+            spans_tried += 1
+            read_errors: list[Path] = []
+            frames = await _decimate_source(
+                sidecar_conn, scrub.cache_dir, camera,
+                finer_interval_s=recent_interval_s, derived_interval_s=aged_interval_s,
+                window_start=span_start, window_end=span_end, work_dir=work_dir,
+                deadline=deadline, stats=profile.stats, read_errors=read_errors,
+            )
+            if not frames:
+                # Empty because the deadline cut the source scan short, or
+                # because a sheet couldn't be read, says nothing about the
+                # span; only an unhurried, error-free empty one is dead.
                 if deadline is not None and time.monotonic() >= deadline:
+                    deadline_hit = True
                     break
-                span_start = max(hole_start, r_start)
-                span_end = min(hole_end, r_end)
-                if span_end <= span_start:
-                    continue
-                frames = await _decimate_source(
-                    sidecar_conn, scrub.cache_dir, camera,
-                    finer_interval_s=recent_interval_s, derived_interval_s=aged_interval_s,
-                    window_start=span_start, window_end=span_end, work_dir=work_dir,
-                    deadline=deadline,
-                )
-                if not frames:
-                    continue
-                writer = _TierWriter(
-                    settings, camera, interval_s=aged_interval_s,
-                    window_start=span_start, window_end=span_end,
-                    cell_w=cell_w, cell_h=cell_h, sidecar_conn=sidecar_conn,
-                )
+                if not read_errors:
+                    dead[span] = time.monotonic()
+                continue
+            if not resumed:
                 writer.resume(span_start)
-                await writer.feed(frames)
-                await writer.close()
-                new_frames += len(frames)
-    return {"camera": camera, "new_frames": new_frames}
+                resume_before = writer._generated_through
+                attached = writer._bucket_start is not None
+                resumed = True
+            spans_with_frames += 1
+            frames_in += len(frames)
+            accepted_total += await writer.feed(frames)
+            new_frames += len(frames)
+    # Publishes the still-filling sheet and leaves its bucket open, including
+    # when the loop stopped on the deadline: cells live under `cache_dir`, not
+    # `work_dir`, so this is safe outside the temp directory.
+    await writer.flush()
+    # One line per camera per cycle that had aged-tier work (a non-empty span
+    # list), which is also every cycle a tier is stuck: `frames_in` > 0 with
+    # `accepted` == 0 means `feed` is rejecting what the source returns
+    # (resume slot / window), `frames_in` == 0 means the source sheets are
+    # missing or off the grid.
+    logger.info(
+        "scrub: aged tier %s: %s spans=%d dead=%d first=%.2f-%.2f tried=%d with_frames=%d "
+        "source_frames=%d fed_accepted=%d resume_attached=%s resume_before=%s "
+        "resume_after=%s%s",
+        camera, hole_desc, len(spans), len(spans) - len(live_spans),
+        spans[0][0], spans[0][1], spans_tried, spans_with_frames, frames_in,
+        accepted_total, attached,
+        f"{resume_before:.2f}" if resume_before is not None else "-",
+        f"{writer._generated_through:.2f}" if resumed else "-",
+        " deadline" if deadline_hit else "",
+    )
+    # Starved = had live work but no time to try any of it. Pass 3 then
+    # doesn't count the camera as served, so it leads the next cycle instead
+    # of being rotated past with nothing done.
+    return {
+        "camera": camera,
+        "new_frames": new_frames,
+        "starved": deadline_hit and spans_tried == 0,
+    }
 
 
 async def generate_derived(
@@ -1767,6 +2428,7 @@ async def generate_cycle(
     scrub = settings.scrub
     sem = asyncio.Semaphore(scrub.ffmpeg_concurrency)
     profile = profile if profile is not None else SourceProfile()
+    profile.stats = stats = CycleStats()
 
     conn = db.open_joined(settings.frigate.db_path, settings.sidecar.db_path)
     try:
@@ -1784,6 +2446,16 @@ async def generate_cycle(
         if not cameras:
             return []
 
+        if not profile.cache_sizing_logged:
+            profile.cache_sizing_logged = True
+            if 0 < scrub.canvas_cache_sheets < 2 * len(cameras):
+                logger.info(
+                    "scrub: canvas_cache_sheets=%d is below 2 x %d cameras (recent + aged "
+                    "sheets grow every tick); the cache will thrash -- raise it to %d "
+                    "(about 37 MB per sheet at 480x270 cells)",
+                    scrub.canvas_cache_sheets, len(cameras), 2 * len(cameras),
+                )
+
         totals: dict[str, dict[str, Any]] = {
             c: {"camera": c, "segments": 0, "new_frames": 0, "backfilled": False}
             for c in cameras
@@ -1798,8 +2470,8 @@ async def generate_cycle(
         # both per camera meant the last camera in the list waited out every
         # earlier camera's backfill before its edge was touched at all.
         #
-        # Bounded by `live_edge_deadline`, checked between cameras (never
-        # mid-segment -- `_generate_tiers` only checks between segments) so
+        # Bounded by `live_edge_deadline`, checked between cameras and between
+        # segments (never mid-segment -- an ffmpeg child is not interrupted) so
         # that even a live edge slow enough to eat the whole tick (measured
         # live: 16-20s cycles against a 20s tick, decoding every frame for
         # cameras whose GOP is coarser than `recent_interval_s`) still leaves
@@ -1827,16 +2499,30 @@ async def generate_cycle(
         # climbing ~20 s per cycle -- so the operator must be able to hand the
         # whole tick back to the edge while the aged tier is produced another
         # way (decimation of the recent tier, see `generate_derived_tier`).
-        live_edge_deadline: float | None = (
-            tick_end - pass3_reserve - scrub.backfill_min_share_s
-            if scrub.backfill_min_share_s > 0 else None
-        )
+        #
+        # With the share at 0 the edge is still bounded by the tick, less
+        # `decimation_min_share_s`: no deadline at all let a contended box run
+        # Pass 1 for 90-170 s against a 20 s tick (every segment of every camera
+        # decoded at the pace the box allowed), and Pass 2/3 started long past
+        # their own deadlines. Cut-off cameras rotate to the front via
+        # `live_edge_cursor`, so none starves; throughput per wall second is
+        # unchanged, the work just arrives in tick-sized instalments.
+        live_edge_deadline: float | None
+        if scrub.backfill_min_share_s > 0:
+            live_edge_deadline = tick_end - pass3_reserve - scrub.backfill_min_share_s
+        elif scrub.decimation_min_share_s > 0:
+            live_edge_deadline = tick_end - scrub.decimation_min_share_s
+        else:
+            live_edge_deadline = None
+        pass1_started = _time.monotonic()
         start_le = profile.live_edge_cursor % len(cameras)
         order_le = cameras[start_le:] + cameras[:start_le]
         served_le = 0
         for camera in order_le:
             # Always run at least one camera per cycle, even past the
-            # deadline, so the live edge itself can never be starved.
+            # deadline, so the live edge itself can never be starved -- and give
+            # that camera at least its newest segment below, since the segment
+            # loop checks the deadline before its first segment too.
             if (
                 live_edge_deadline is not None
                 and served_le > 0
@@ -1848,11 +2534,13 @@ async def generate_cycle(
                 _merge(camera, await generate_live_edge(
                     settings, camera, frigate_conn=conn, sidecar_conn=conn,
                     now=now, profile=profile, sem=sem, deadline=live_edge_deadline,
+                    min_segments=1 if served_le == 1 else 0,
                 ))
             except Exception:
                 logger.exception("scrub: live edge failed for camera %s", camera)
                 totals[camera]["error"] = True
         profile.live_edge_cursor = start_le + served_le
+        stats.pass1_s = _time.monotonic() - pass1_started
         if served_le < len(cameras):
             logger.info(
                 "scrub: live-edge cut short (%d/%d cameras done)", served_le, len(cameras)
@@ -1862,6 +2550,7 @@ async def generate_cycle(
         # as segment count -- how long a segment takes depends on the box, and
         # an over-long cycle delays the next live-edge pass, which is what let
         # the edge slip behind in the first place.
+        pass2_started = _time.monotonic()
         share = max(1, scrub.backfill_segments_per_cycle // len(cameras))
         deadline = _time.monotonic() + scrub.backfill_time_budget_s
         if backfill_deadline is not None:
@@ -1903,6 +2592,7 @@ async def generate_cycle(
                 logger.exception("scrub: backfill failed for camera %s", camera)
                 totals[camera]["error"] = True
         profile.backfill_cursor = start + served
+        stats.pass2_s = _time.monotonic() - pass2_started
 
         # Pass 3: aged-tier decimation, then derived tiers, both decimated
         # from already-published decode-tier sheets -- no ffmpeg, so this
@@ -1920,31 +2610,65 @@ async def generate_cycle(
         # the one that actually earned it, and with `retention_days` at 7 and
         # the recent tier at ~8 GB/day, an un-retired recent tier piles up
         # forever.
+        pass3_started = _time.monotonic()
+        # Pass 3 shares backfill's `deadline`, which a late cycle has already
+        # passed by the time it gets here: the check below then skipped every
+        # camera, every cycle (measured on prod: pass3=0.00s for as long as the
+        # box was contended, aged and derived tiers stalled outright). Floor it
+        # at `decimation_min_share_s` from now; when the cycle is on time the
+        # normal deadline is later than that and nothing changes.
+        pass3_deadline = deadline
+        if scrub.decimation_min_share_s > 0:
+            pass3_deadline = max(deadline, pass3_started + scrub.decimation_min_share_s)
         retention_cutoff = now - scrub.retention_days * 86400
         effective_boundary = max(now - scrub.aged_after_h * 3600, retention_cutoff)
-        for camera in cameras:
-            if _time.monotonic() >= deadline:
+        # Start where the last cycle stopped, like the other two passes: a floor
+        # of a few seconds covers only a camera or two, and restarting at
+        # cameras[0] every cycle would let the tail starve.
+        start_d = profile.decimation_cursor % len(cameras)
+        served_d = 0
+        for camera in cameras[start_d:] + cameras[:start_d]:
+            if _time.monotonic() >= pass3_deadline:
                 break
+            served_d += 1
             try:
-                aged_result = await generate_aged_tier(
-                    settings, camera, frigate_conn=conn, sidecar_conn=conn,
-                    now=now, profile=profile, deadline=deadline,
-                )
+                aged_started = _time.monotonic()
+                try:
+                    aged_result = await generate_aged_tier(
+                        settings, camera, frigate_conn=conn, sidecar_conn=conn,
+                        now=now, profile=profile, deadline=pass3_deadline,
+                    )
+                finally:
+                    stats.pass3_aged_s += _time.monotonic() - aged_started
+                if aged_result.get("starved"):
+                    # The deadline passed during setup, before a single span:
+                    # not served. Counting it rotated such cameras to the back
+                    # every cycle (prod: gate-walkway / stairway-wide logging
+                    # tried=0 behind street), so the starved stayed starved.
+                    served_d -= 1
+                    break
                 totals[camera]["new_frames"] += aged_result["new_frames"]
-                derived_result = await generate_derived(
-                    settings, camera, frigate_conn=conn, sidecar_conn=conn,
-                    now=now, profile=profile, deadline=deadline,
-                )
+                derived_started = _time.monotonic()
+                try:
+                    derived_result = await generate_derived(
+                        settings, camera, frigate_conn=conn, sidecar_conn=conn,
+                        now=now, profile=profile, deadline=pass3_deadline,
+                    )
+                finally:
+                    stats.pass3_derived_s += _time.monotonic() - derived_started
                 totals[camera]["new_frames"] += derived_result["new_frames"]
                 _retire_stale_recent_buckets(
                     conn, scrub.cache_dir, camera, scrub.recent_interval_s,
                     effective_boundary, aged_interval_s=scrub.aged_interval_s,
+                    stats=stats,
                 )
             except Exception:
                 logger.exception(
                     "scrub: aged/derived-tier generation failed for camera %s", camera
                 )
                 totals[camera]["error"] = True
+        profile.decimation_cursor = start_d + served_d
+        stats.pass3_s = _time.monotonic() - pass3_started
 
         # One line per cycle. Whether the edge is being held is otherwise only
         # visible by querying the DB and inferring it from timestamps, and the
@@ -1991,9 +2715,10 @@ async def generate_cycle(
         )
         logger.info(
             "scrub: cycle %.0fs, %d cameras (%d backfilled), %d segments, %d frames; "
-            "coverage %s; worst live-edge lag %.0fs",
+            "coverage %s; worst live-edge lag %.0fs; %s",
             elapsed, len(cameras), served, live_total,
             sum(r["new_frames"] for r in totals.values()), tiers or "none", worst_lag,
+            stats.summary(),
         )
         if worst_lag > elapsed * 3 and elapsed > 0:
             logger.warning(

@@ -8,9 +8,9 @@ import logging
 import os
 import shutil
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -25,6 +25,7 @@ from marcellus.auth import FrigateAuthMiddleware
 from marcellus.config import Settings, load_settings
 from marcellus.db import FrigateDBMissingError
 from marcellus.errors import error_detail
+from marcellus.faces.handles import handle_for
 from marcellus.frigate_api import FrigateClient
 from marcellus.guide import load_guide
 from marcellus.push import delivery, delivery_wire
@@ -42,10 +43,12 @@ from marcellus.routes import face_captures as face_capture_routes
 from marcellus.routes import fps_budget as fps_budget_routes
 from marcellus.routes import guide as guide_routes
 from marcellus.routes import health as health_routes
+from marcellus.routes import inbox as inbox_routes
 from marcellus.routes import login_page as login_page_routes
 from marcellus.routes import map_page as map_page_routes
 from marcellus.routes import motion as motion_routes
 from marcellus.routes import observations as observations_routes
+from marcellus.routes import people as people_routes
 from marcellus.routes import placement as placement_routes
 from marcellus.routes import protect as protect_routes
 from marcellus.routes import proxy as proxy_routes
@@ -56,15 +59,17 @@ from marcellus.routes import push_settings as push_settings_routes
 from marcellus.routes import replay as replay_routes
 from marcellus.routes import score_histogram as score_histogram_routes
 from marcellus.routes import scrub as scrub_routes
-from marcellus.routes import scrub_ui as scrub_ui_routes
 from marcellus.routes import search as search_routes
 from marcellus.routes import settings_page as settings_page_routes
+from marcellus.routes import sources as sources_routes
 from marcellus.routes import status as status_routes
 from marcellus.routes import timeline as timeline_routes
 from marcellus.routes import topology as topology_routes
 from marcellus.routes import toybox as toybox_routes
 from marcellus.routes import triage as triage_routes
 from marcellus.routes import tuning as tuning_routes
+from marcellus.routes import tuning_page as tuning_page_routes
+from marcellus.routes import wildlife as wildlife_routes
 from marcellus.routes import zone_hits as zone_hits_routes
 from marcellus.scrub.lock import ScrubCacheLock, ScrubLockHeld
 
@@ -97,6 +102,8 @@ class _CachedStaticFiles(StaticFiles):
 # The proxy's catch-all: everything registered before it is a route the sidecar
 # owns and therefore gates behind a Frigate session (auth.py).
 _PROXY_CATCH_ALL = "/{path:path}"
+
+T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +140,49 @@ def _below_free_space_floor(cache_dir: Path, min_free_bytes: int) -> bool:
                 cache_dir,
             )
         return False
+
+
+async def run_in_worker_loop(coro: Coroutine[Any, Any, T]) -> T:
+    """Run `coro` to completion on a private event loop in a worker thread.
+
+    The scrub generation cycle does a lot of synchronous sqlite/filesystem/CPU
+    work between its awaits (measured on prod: 5-13 s of loop-blocking CPU in
+    the Pass 3 retire step). Awaited on uvicorn's loop it starves every
+    request for that long; on its own loop, only the cycle stalls. The
+    coroutine must not touch objects bound to the main loop -- `generate_cycle`
+    builds its own semaphore, sqlite connection and subprocesses, and shares
+    only the plain-data `SourceProfile`, which only the (sequential) cycles use.
+
+    Cancelling the awaiting task cancels the inner task on its own loop and
+    waits for the thread to unwind, so shutdown stays prompt and no ffmpeg
+    child is orphaned.
+    """
+    loop = asyncio.new_event_loop()
+    task = loop.create_task(coro)
+
+    def _run() -> T:
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(task)
+        finally:
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            finally:
+                asyncio.set_event_loop(None)
+                loop.close()
+
+    fut = asyncio.ensure_future(asyncio.to_thread(_run))
+    try:
+        return await asyncio.shield(fut)
+    except asyncio.CancelledError:
+        if not fut.done():
+            # We were cancelled from outside: stop the inner task on its own
+            # loop, then wait for the thread to unwind before propagating.
+            with contextlib.suppress(RuntimeError):  # loop already closed
+                loop.call_soon_threadsafe(task.cancel)
+            with contextlib.suppress(BaseException):
+                await fut
+        raise
 
 
 async def _scrub_generation_loop(app: FastAPI) -> None:
@@ -189,8 +239,10 @@ async def _scrub_generation_loop(app: FastAPI) -> None:
         else:
             app.state.scrub_low_disk = False
             try:
-                await generate_cycle(
-                    settings, now=time.time(), profile=profile, backfill_deadline=deadline
+                await run_in_worker_loop(
+                    generate_cycle(
+                        settings, now=time.time(), profile=profile, backfill_deadline=deadline
+                    )
                 )
             except Exception:
                 logger.exception("scrub: generation cycle failed")
@@ -383,6 +435,35 @@ async def _activity_sweep_loop(app: FastAPI) -> None:
             logger.exception("push: activity sweep failed")
 
 
+_PROXY_WATCHDOG_INTERVAL_S = 10.0
+
+
+async def _proxy_watchdog_loop(app: FastAPI) -> None:
+    """Keep the media proxy's stream pool from wedging for good.
+
+    Two jobs on a fixed cadence: close any upstream response that has been
+    open past its maximum life (`proxy.reap_stale_upstreams`, a leak), and run
+    the stalled-pool checks that recycle a stream client (`check_stream_pool`,
+    `check_vod_stream_pool`) -- which used to run only inside `/healthz`, and
+    nothing on the NVR polls that (2026-10-17: 64/64 connections wedged for
+    40 minutes).
+    """
+    from marcellus.routes import proxy as proxy_routes
+    from marcellus.routes.health import check_stream_pool, check_vod_stream_pool
+
+    while True:
+        await asyncio.sleep(_PROXY_WATCHDOG_INTERVAL_S)
+        try:
+            await proxy_routes.reap_stale_upstreams(app)
+            now = time.time()
+            check_stream_pool(app, now)
+            check_vod_stream_pool(app, now)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("proxy watchdog: cycle failed")
+
+
 async def _face_enrich_loop(app: FastAPI) -> None:
     """Drive faces/enrich.py's run_cycle on a fixed cadence.
 
@@ -406,6 +487,24 @@ async def _face_enrich_loop(app: FastAPI) -> None:
             return
         except Exception:
             logger.exception("face_enrich: cycle failed")
+
+
+async def _plus_outbox_loop(app: FastAPI) -> None:
+    """Send due Frigate+ uploads (triage/outbox.py) every
+    `triage.outbox_interval_s`. Each upload is one blocking HTTP call, so the
+    pass runs in a thread. An idle pass is one indexed SELECT.
+    """
+    from marcellus.triage import outbox as plus_outbox
+
+    settings: Settings = app.state.settings
+    while True:
+        await asyncio.sleep(settings.triage.outbox_interval_s)
+        try:
+            await asyncio.to_thread(plus_outbox.drain, settings)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("plus outbox: drain failed")
 
 
 async def _encounters_loop(app: FastAPI) -> None:
@@ -454,6 +553,7 @@ async def _delivery_resound_sweep_loop(app: FastAPI) -> None:
         await asyncio.sleep(interval)
         try:
             from marcellus import db
+            from marcellus.push import policy_settings
 
             conn = db.open_sidecar(engine.db_path)
             try:
@@ -466,6 +566,7 @@ async def _delivery_resound_sweep_loop(app: FastAPI) -> None:
                     enabled=settings.push.delivery_urgent_resound_enabled,
                     max_resounds=settings.push.delivery_urgent_resound_max,
                     payload_for_resound=delivery_wire.resound_payload_for,
+                    muted=bool(policy_settings.get_active().get("mute_sounds")),
                 )
             finally:
                 conn.close()
@@ -501,6 +602,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         from marcellus.faces import crosscam as _crosscam
 
         _crosscam.check_inputs(settings)
+
+    if settings.wildlife.enabled:
+        # Same reasoning: the finder runs behind its own timer, and a missing
+        # model file would otherwise only show up in that unit's journal.
+        from marcellus.wildlife import finder as _wildlife
+
+        _wildlife.check_inputs(settings)
 
     task: asyncio.Task[None] | None = None
     scrub_lock: ScrubCacheLock | None = None
@@ -546,6 +654,20 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.encounters = EncounterService(settings, adjacency=adjacency)
         encounters_task = asyncio.create_task(_encounters_loop(app))
         encounters_worker_task = asyncio.create_task(_encounters_worker_loop(app))
+
+    # External event sources (guide_content's external-sources.md): its own
+    # switch, independent of push. A failure to start is logged and leaves
+    # the feature off -- it must never take the sidecar down with it.
+    if settings.external_sources.enabled:
+        from marcellus.external.service import ExternalSourceService
+
+        try:
+            sources_service = ExternalSourceService(settings)
+            await sources_service.start()
+        except Exception:
+            logger.exception("external_sources: failed to start; sightings unavailable")
+        else:
+            app.state.external_sources = sources_service
 
     push_task: asyncio.Task[None] | None = None
     sweep_task: asyncio.Task[None] | None = None
@@ -632,6 +754,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             "rings need registered push devices, which requires push.enabled"
         )
 
+    proxy_watchdog_task: asyncio.Task[None] | None = None
+    if settings.proxy.enabled:
+        proxy_watchdog_task = asyncio.create_task(_proxy_watchdog_loop(app))
+
     enrich_task: asyncio.Task[None] | None = None
     if settings.face_enrich.enabled:
         from marcellus.faces import enrich as _enrich
@@ -644,12 +770,26 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         else:
             enrich_task = asyncio.create_task(_face_enrich_loop(app))
 
+    recording_watch_task: asyncio.Task[None] | None = None
+    if settings.recording_watch.enabled:
+        from marcellus.recording_watch import RecordingWatcher, recording_watch_loop
+
+        app.state.recording_watcher = RecordingWatcher(
+            settings, engine_getter=lambda: getattr(app.state, "push_engine", None)
+        )
+        recording_watch_task = asyncio.create_task(recording_watch_loop(app))
+
+    # Always on: it only ever sends rows a person queued from /inbox or
+    # /event, and costs one SELECT a tick when there are none.
+    outbox_task = asyncio.create_task(_plus_outbox_loop(app))
+
     try:
         yield
     finally:
         for pending in (
             task,
             probe_task,
+            outbox_task,
             push_task,
             sweep_task,
             delivery_sweep_task,
@@ -657,6 +797,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             enrich_task,
             encounters_task,
             encounters_worker_task,
+            proxy_watchdog_task,
+            recording_watch_task,
         ):
             if pending is not None:
                 pending.cancel()
@@ -665,6 +807,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         if scrub_lock is not None:
             scrub_lock.release()
         delivery.cancel_deferred()
+        running_sources = getattr(app.state, "external_sources", None)
+        if running_sources is not None:
+            await running_sources.aclose()
         running_subscriber = getattr(app.state, "push_subscriber", None)
         if running_subscriber is not None:
             running_subscriber.stop()
@@ -680,9 +825,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         client = getattr(app.state, "http_client", None)
         if client is not None:
             await client.aclose()
-        stream_client = getattr(app.state, "stream_http_client", None)
-        if stream_client is not None:
-            await stream_client.aclose()
+        for attr in ("stream_http_client", "vod_stream_http_client"):
+            stream_client = getattr(app.state, attr, None)
+            if stream_client is not None:
+                await stream_client.aclose()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -707,6 +853,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.templates.env.globals["asset_v"] = _asset_v
     app.state.templates.env.globals.update(
         {
+            "handle_for": handle_for,
             "fmt_ts": fmt.fmt_ts,
             "fmt_score": fmt.fmt_score,
             "fmt_duration": fmt.fmt_duration,
@@ -763,12 +910,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.mount("/static", _CachedStaticFiles(directory=str(_STATIC_DIR)), name="static")
     app.include_router(health_routes.router)
     app.include_router(status_routes.router)
-    app.include_router(scrub_ui_routes.router)
     app.include_router(debug_routes.router)
     app.include_router(zone_hits_routes.router)
     app.include_router(triage_routes.router)
+    app.include_router(inbox_routes.router)
     app.include_router(encounters_routes.router)
     app.include_router(encounters_routes.v1_router)
+    app.include_router(people_routes.v1_router)
+    app.include_router(sources_routes.v1_router)
     app.include_router(observations_routes.v1_router)
     app.include_router(topology_routes.v1_router)
     app.include_router(timeline_routes.router)
@@ -776,8 +925,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(score_histogram_routes.router)
     app.include_router(fps_budget_routes.router)
     app.include_router(placement_routes.router)
+    app.include_router(tuning_page_routes.router)
     app.include_router(analysis_routes.router)
     app.include_router(face_capture_routes.router)
+    app.include_router(wildlife_routes.router)
     app.include_router(enrich_routes.router)
     app.include_router(toybox_routes.router)
     app.include_router(scrub_routes.router)

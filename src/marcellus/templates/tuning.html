@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
+{% set active_page = 'tuning' %}
+{% block title %}Tuning · Marcellus{% endblock %}
+
+{% block body %}
+<main id="main-content">
+  {{ page_head("Tuning", "Measure what the cameras and detector are doing before you change a threshold, mask or mount.") }}
+  {% include "_tuning_tabs.html" %}
+  <ul class="tuning-list">
+  {% for t in pages %}
+    <li class="tuning-item">
+      <a class="tuning-name" href="{{ t.href }}">{{ t.name }}</a>
+      <span class="tuning-desc">{{ t.desc }}</span>
+    </li>
+  {% endfor %}
+  </ul>
+</main>
+{% endblock %}

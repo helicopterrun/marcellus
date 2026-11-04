@@ -87,19 +87,19 @@
       var canApply = r.suggested_offset_ms !== null && r.suggested_offset_ms !== undefined
         && !config[cam] && r.suggested_offset_ms !== (applied[cam] || 0);
       if (canApply) {
-        var apply = SC.el("button", { class: "btn-primary", text: "Apply" });
+        var apply = SC.el("button", { class: "btn btn-primary", text: "Apply" });
         apply.addEventListener("click", function () {
           applyOffsets({ [cam]: r.suggested_offset_ms }, apply);
         });
         actions.appendChild(apply);
       } else if (!config[cam] && applied[cam]) {
-        var clear = SC.el("button", { class: "btn-neutral", text: "Clear" });
+        var clear = SC.el("button", { class: "btn btn-neutral", text: "Clear" });
         clear.addEventListener("click", function () {
           applyOffsets({ [cam]: 0 }, clear);
         });
         actions.appendChild(clear);
       }
-      var calibrate = SC.el("button", { class: "btn-neutral", text: "Calibrate…" });
+      var calibrate = SC.el("button", { class: "btn btn-neutral", text: "Calibrate…" });
       calibrate.addEventListener("click", function () { openCalibrator(cam); });
       actions.appendChild(calibrate);
       tr.appendChild(actions);
@@ -115,7 +115,7 @@
         && r.suggested_offset_ms !== (applied[cam] || 0);
     });
     if (pending.length > 1) {
-      var all = SC.el("button", { class: "btn-primary", text: "Apply all suggested" });
+      var all = SC.el("button", { class: "btn btn-primary", text: "Apply all suggested" });
       all.addEventListener("click", function () {
         var offsets = {};
         pending.forEach(function (cam) { offsets[cam] = cams[cam].suggested_offset_ms; });
@@ -132,7 +132,7 @@
   function renderRestart(state) {
     var pending = state.restart_pending || [];
     if (!restartBtn) {
-      restartBtn = SC.el("button", { class: "btn-primary", id: "align-restart" });
+      restartBtn = SC.el("button", { class: "btn btn-primary", id: "align-restart" });
       restartBtn.style.display = "none";
       restartBtn.addEventListener("click", function () {
         // One click used to fire the restart directly -- ~30s of blind

@@ -26,8 +26,18 @@ seconds, so it belongs in a oneshot behind a systemd timer
 (contrib/marcellus-face-capture.*), not in an in-process asyncio task
 competing with the scrub generator for the single uvicorn worker's threadpool.
 
-Core deps only -- Pillow and httpx. Deliberately no cv2/numpy, so this runs
-without any optional extra installed.
+FACE GATE
+---------
+Most trigger events never put a face in front of the capture camera: a
+sidewalk passer-by on gate-walkway, or a visitor who hasn't reached the gate
+yet. Ungated, those were stored as whole frames of the street and parked cars
+(469 of 638 captures on 2026-10-30). With `face_capture.face_gate` on, every
+fetched frame goes through face_enrich's SCRFD detector first: no face means
+status='no_face' and nothing is written; a face means the thumbnail is
+cropped to it. The detector is the `[enrich]` extra and is imported lazily;
+without it the gate logs an error and capture runs ungated.
+
+Core deps only otherwise -- Pillow and httpx.
 """
 
 from __future__ import annotations
@@ -42,9 +52,10 @@ import shutil
 import sqlite3
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -57,7 +68,11 @@ _SAFE_STEM = re.compile(r"[^A-Za-z0-9._-]")
 _LAST_RUN = ".last-run.json"
 
 # Statuses that mean "settled, do not reconsider this sample".
-_TERMINAL = ("captured", "no_recording", "deduped", "skipped")
+_TERMINAL = ("captured", "no_recording", "deduped", "skipped", "no_face")
+
+NormBox = tuple[float, float, float, float]
+# jpeg bytes -> [(normalized (x1, y1, x2, y2), det_score)]
+FaceDetector = Callable[[bytes], list[tuple[NormBox, float]]]
 
 
 @dataclass(frozen=True)
@@ -267,6 +282,61 @@ def render_preview(
         return None
 
 
+def pick_face(
+    faces: Sequence[tuple[NormBox, float]], *, min_score: float
+) -> tuple[NormBox, float] | None:
+    """The largest face scoring at least `min_score`, or None.
+
+    Largest, not highest-scoring: in a two-person frame the nearer face is
+    the one worth a thumbnail, and above the floor SCRFD's score says little
+    about which face is more useful.
+    """
+    best: tuple[NormBox, float] | None = None
+    best_area = -1.0
+    for box, score in faces:
+        if score < min_score:
+            continue
+        area = max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+        if area > best_area:
+            best, best_area = (box, score), area
+    return best
+
+
+def face_rank(face: tuple[NormBox, float]) -> float:
+    """Sort key across a visit's frames: face area x detector score."""
+    box, score = face
+    return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1]) * score
+
+
+def event_samples(
+    trigger_start: float,
+    span: tuple[float, float],
+    *,
+    annotation_offset_ms: int,
+    max_samples: int,
+    min_gap_s: float,
+) -> list[Sample]:
+    """Samples spread uniformly across `span` (capture-camera detection time).
+
+    `annotation_offset_ms` is the CAPTURE camera's here -- the span comes from
+    its own events. offset_ms stays relative to the trigger's start_time, so
+    it keys the row the same way the fixed ladder does.
+    """
+    from marcellus.faces.enrich import sample_times
+
+    shift = annotation_offset_ms / 1000.0
+    seen: set[int] = set()
+    out: list[Sample] = []
+    for t in sample_times(span[0], span[1], max_frames=max_samples, min_gap_s=min_gap_s):
+        frame_ts = t + shift
+        ms = int(round((frame_ts - trigger_start) * 1000.0))
+        if ms in seen:
+            continue
+        seen.add(ms)
+        out.append(Sample(offset_ms=ms, frame_ts=frame_ts))
+    return out
+
+
 def aspect_ok(detect_aspect_v: float | None, frame_w: int, frame_h: int) -> bool:
     """Is the fetched frame the same aspect as the capture camera's detect stream?
 
@@ -388,6 +458,9 @@ def find_candidates(
     if not cfg.trigger_cameras or not cfg.trigger_labels:
         return []
     max_off = max(list(cfg.offsets_s) or [0.0])
+    if cfg.face_gate:
+        # Event sampling can reach event_window_s past the trigger.
+        max_off = max(max_off, cfg.event_window_s)
     lower = now - cfg.lookback_s
     upper = now - cfg.capture_delay_s - max(0.0, max_off)
     if upper <= lower:
@@ -467,6 +540,71 @@ def crop_box_for(
     return (str(row["id"]), [float(v) for v in box[:4]])
 
 
+def face_detector(settings: Settings) -> FaceDetector | None:
+    """face_enrich's SCRFD as a FaceDetector, or None (gate off / extra missing).
+
+    A missing extra is logged as an error, not raised: ungated capture still
+    works, and the error is what tells you the page has gone back to cars.
+    """
+    if not settings.face_capture.face_gate:
+        return None
+    from marcellus.faces import enrich
+
+    try:
+        engine = enrich._detector(str(settings.face_enrich.model_dir))
+    except enrich.EnrichUnavailable:
+        logger.error(
+            "face-capture: face_gate is on but the [enrich] extra is not installed "
+            "-- capturing UNGATED"
+        )
+        return None
+    return engine.detect_in_jpeg
+
+
+def _detect(
+    detector: FaceDetector, raw: bytes, *, min_score: float
+) -> tuple[NormBox, float] | None:
+    try:
+        return pick_face(detector(raw), min_score=min_score)
+    except Exception:  # noqa: BLE001 - a frame the detector chokes on has no usable face
+        logger.warning("face-capture: face detection failed", exc_info=True)
+        return None
+
+
+def capture_event_span(
+    conn: sqlite3.Connection,
+    *,
+    camera: str,
+    labels: Sequence[str],
+    trigger_ts: float,
+    window_s: float,
+) -> tuple[float, float] | None:
+    """The part of ``[trigger_ts - window_s, trigger_ts + window_s]`` covered by
+    the capture camera's own `labels` events, as one ``(lo, hi)``, or None.
+
+    The fixed ``offsets_s`` ladder only looks within 4s of the trigger, but
+    the visitor reaches the capture camera anywhere from ~7s before to ~6s
+    after (p25..p75) and often further out: on 2026-10-30, 96 visits with no
+    face captured had a capture-camera person event within 30s, and Identities
+    found a face in 55 of them. Sampling the event itself is what reaches
+    those. An event still open (end_time NULL) runs to the window's edge.
+    """
+    if not labels or window_s <= 0:
+        return None
+    lbl_q = ",".join("?" * len(labels))
+    lo_w, hi_w = trigger_ts - window_s, trigger_ts + window_s
+    row = conn.execute(
+        f"SELECT MIN(start_time) AS lo, MAX(COALESCE(end_time, ?)) AS hi, COUNT(*) AS n "
+        f"  FROM event WHERE camera = ? AND label IN ({lbl_q}) "
+        f"   AND start_time <= ? AND (end_time IS NULL OR end_time >= ?)",
+        [hi_w, camera, *labels, hi_w, lo_w],
+    ).fetchone()
+    if not row or not row["n"]:
+        return None
+    lo, hi = max(lo_w, float(row["lo"])), min(hi_w, float(row["hi"]))
+    return (lo, hi) if hi >= lo else None
+
+
 def _write_atomic(path: Path, data: bytes) -> None:
     """Publish a file atomically (mkstemp + os.replace), as scrub does."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -481,8 +619,20 @@ def _write_atomic(path: Path, data: bytes) -> None:
         raise
 
 
-def scan(settings: Settings, *, now: float | None = None) -> dict[str, Any]:
-    """One capture pass. Idempotent; safe to run on any cadence."""
+def scan(
+    settings: Settings, *, now: float | None = None, detector: FaceDetector | None = None
+) -> dict[str, Any]:
+    """One capture pass. Idempotent; safe to run on any cadence.
+
+    `detector` overrides the face gate's detector (tests); None builds it from
+    config via face_detector().
+
+    With the gate on, a visit head is sampled across the capture camera's OWN
+    person event(s) near the trigger when there are any (capture_event_span),
+    on top of the fixed `offsets_s` ladder (the ladder alone when there are
+    none); each
+    frame is gated and the visit keeps its `keep_per_visit` best faces.
+    """
     cfg = settings.face_capture
     now = time.time() if now is None else now
     summary: dict[str, Any] = {
@@ -492,6 +642,9 @@ def scan(settings: Settings, *, now: float | None = None) -> dict[str, Any]:
         "no_recording": 0,
         "error": 0,
         "deduped": 0,
+        "no_face": 0,
+        "skipped": 0,
+        "event_sampled": 0,
         "bytes": 0,
         "pruned": 0,
     }
@@ -510,10 +663,16 @@ def scan(settings: Settings, *, now: float | None = None) -> dict[str, Any]:
         for cam in cfg.trigger_cameras:
             ann_ms[cam] = annotation_offset_ms(settings.frigate.config_path, cam)
     cap_aspect = detect_aspect(settings.frigate.config_path, cfg.capture_camera)
+    cap_ann_ms = (
+        annotation_offset_ms(settings.frigate.config_path, cfg.capture_camera)
+        if cfg.apply_annotation_offset else 0
+    )
+    # Built on the first visit head, not here: most runs have no candidates,
+    # and loading SCRFD costs ~4s of CPU every 5 minutes for nothing.
+    detector_tried = detector is not None
 
     conn = db.open_joined(settings.frigate.db_path, settings.sidecar.db_path)
     client = FrigateClient(settings.frigate.base_url, timeout=cfg.http_timeout_s)
-    aspect_warned = False
     try:
         candidates = find_candidates(conn, cfg=cfg, now=now)
         summary["candidates"] = len(candidates)
@@ -525,6 +684,79 @@ def scan(settings: Settings, *, now: float | None = None) -> dict[str, Any]:
             prior=prior,
         )
 
+        aspect_warned = False
+
+        def store(
+            cand: Candidate, visit_key: str, smp: Sample, raw: bytes, http_status: int,
+            face: tuple[NormBox, float] | None,
+        ) -> None:
+            """Write one frame + thumbnail and record it as captured."""
+            nonlocal aspect_warned
+            crop = None
+            crop_event_id = None
+            crop_box_json = None
+            if cfg.crop_to_bbox and face is None:
+                got = crop_box_for(
+                    conn, camera=cfg.capture_camera, frame_ts=smp.frame_ts,
+                    labels=cfg.trigger_labels,
+                )
+                if got:
+                    crop_event_id, box = got
+                    crop_box_json = json.dumps(box)
+                    crop = head_box(box, head_fraction=cfg.head_fraction, pad=cfg.crop_pad)
+
+            rel_full, rel_thumb = relative_paths(cand.event_id, smp.offset_ms, smp.frame_ts)
+            full_path = cfg.output_dir / rel_full
+            thumb_path = cfg.output_dir / rel_thumb
+            try:
+                _write_atomic(full_path, raw)
+            except OSError as exc:
+                logger.exception("face-capture: write failed for %s", full_path)
+                _upsert(conn, cand, visit_key, cfg.capture_camera, smp.offset_ms,
+                        smp.frame_ts, status="error", detail=str(exc)[:300],
+                        bump_attempts=True)
+                summary["error"] += 1
+                return
+
+            # Aspect guard: normalized coords only transfer between images
+            # of the same aspect. Refuse to crop rather than crop wrongly.
+            pre = render_preview(raw, crop=None, max_edge=8, quality=50)
+            fw, fh = (pre[1], pre[2]) if pre else (0, 0)
+            if crop is not None and not aspect_ok(cap_aspect, fw, fh):
+                if not aspect_warned:
+                    logger.error(
+                        "face-capture: %s detect aspect %.4f != frame aspect %sx%s -- "
+                        "not cropping (normalized boxes do not transfer across aspects)",
+                        cfg.capture_camera, cap_aspect or -1, fw, fh,
+                    )
+                    aspect_warned = True
+                crop = None
+
+            thumb_bytes = _face_thumb(raw, face, cfg) if face else None
+            if thumb_bytes is None:
+                thumb = render_preview(
+                    raw, crop=crop, max_edge=cfg.thumb_max_edge, quality=cfg.thumb_quality
+                )
+                thumb_bytes = thumb[0] if thumb else None
+            if thumb_bytes:
+                try:
+                    _write_atomic(thumb_path, thumb_bytes)
+                except OSError:
+                    logger.warning("face-capture: thumb write failed for %s", thumb_path)
+                    thumb_bytes = None
+
+            _upsert(
+                conn, cand, visit_key, cfg.capture_camera, smp.offset_ms, smp.frame_ts,
+                status="captured", http_status=http_status,
+                full_path=rel_full, thumb_path=rel_thumb if thumb_bytes else None,
+                width=fw or None, height=fh or None, nbytes=len(raw),
+                crop_event_id=crop_event_id, crop_box=crop_box_json,
+                face_box=json.dumps(face[0]) if face else None,
+                face_score=face[1] if face else None,
+            )
+            summary["captured"] += 1
+            summary["bytes"] += len(raw)
+
         taken = 0
         for cand, visit_key, is_head in grouped:
             if not is_head:
@@ -532,18 +764,50 @@ def scan(settings: Settings, *, now: float | None = None) -> dict[str, Any]:
                     conn, cand, visit_key, cfg.capture_camera, 0, cand.start_time,
                     status="deduped", detail=f"same visit as {visit_key}",
                 )
+                conn.commit()
                 summary["deduped"] += 1
                 continue
-            if taken >= cfg.max_captures_per_run:
-                break
 
-            for smp in samples_for(
+            if detector is None and cfg.face_gate and not detector_tried:
+                detector = face_detector(settings)
+                detector_tried = True
+
+            span = None
+            if detector is not None:
+                span = capture_event_span(
+                    conn, camera=cfg.capture_camera, labels=cfg.trigger_labels,
+                    trigger_ts=cand.start_time, window_s=cfg.event_window_s,
+                )
+            samples = samples_for(
                 cand.start_time,
                 offsets_s=cfg.offsets_s,
                 annotation_offset_ms=ann_ms.get(cand.camera, 0),
-            ):
-                if taken >= cfg.max_captures_per_run:
-                    break
+            )
+            if span is not None:
+                # The union, not a replacement: on short events the ladder
+                # still lands on faces the spread samples step over (3 of 45
+                # visits in the 2026-10-30 replay).
+                by_ms = {smp.offset_ms: smp for smp in samples}
+                for smp in event_samples(
+                    cand.start_time, span,
+                    annotation_offset_ms=cap_ann_ms,
+                    max_samples=cfg.event_max_samples, min_gap_s=cfg.event_min_gap_s,
+                ):
+                    by_ms.setdefault(smp.offset_ms, smp)
+                samples = sorted(by_ms.values(), key=lambda smp: smp.offset_ms)
+                summary["event_sampled"] += 1
+            # A visit is sampled whole or not at all: a half-sampled visit has
+            # settled rows, so find_candidates would never offer the rest.
+            if taken and taken + len(samples) > cfg.max_captures_per_run:
+                break
+
+            # Writes wait until the visit's fetches and face detection are done,
+            # then land in one short transaction: written as they came, the
+            # first one held the sidecar DB's write lock through every later
+            # fetch (~0.45s) and SCRFD pass, and other writers timed out.
+            writes: list[Callable[[], None]] = []
+            hits: list[tuple[Sample, bytes, int, tuple[NormBox, float]]] = []
+            for smp in samples:
                 taken += 1
                 try:
                     raw, http_status = client.recording_snapshot(
@@ -554,9 +818,11 @@ def scan(settings: Settings, *, now: float | None = None) -> dict[str, Any]:
                         "face-capture: fetch failed for %s @ %.3f: %s",
                         cand.event_id, smp.frame_ts, exc,
                     )
-                    _upsert(conn, cand, visit_key, cfg.capture_camera, smp.offset_ms,
-                            smp.frame_ts, status="error", detail=str(exc)[:300],
-                            bump_attempts=True)
+                    writes.append(partial(
+                        _upsert, conn, cand, visit_key, cfg.capture_camera, smp.offset_ms,
+                        smp.frame_ts, status="error", detail=str(exc)[:300],
+                        bump_attempts=True,
+                    ))
                     summary["error"] += 1
                     continue
 
@@ -566,69 +832,42 @@ def scan(settings: Settings, *, now: float | None = None) -> dict[str, Any]:
                     logger.debug(
                         "face-capture: no recording for %s @ %.3f", cfg.capture_camera, smp.frame_ts
                     )
-                    _upsert(conn, cand, visit_key, cfg.capture_camera, smp.offset_ms,
-                            smp.frame_ts, status="no_recording", http_status=404)
+                    writes.append(partial(
+                        _upsert, conn, cand, visit_key, cfg.capture_camera, smp.offset_ms,
+                        smp.frame_ts, status="no_recording", http_status=404,
+                    ))
                     summary["no_recording"] += 1
                     continue
 
-                crop = None
-                crop_event_id = None
-                crop_box_json = None
-                if cfg.crop_to_bbox:
-                    got = crop_box_for(
-                        conn, camera=cfg.capture_camera, frame_ts=smp.frame_ts,
-                        labels=cfg.trigger_labels,
-                    )
-                    if got:
-                        crop_event_id, box = got
-                        crop_box_json = json.dumps(box)
-                        crop = head_box(box, head_fraction=cfg.head_fraction, pad=cfg.crop_pad)
-
-                rel_full, rel_thumb = relative_paths(cand.event_id, smp.offset_ms, smp.frame_ts)
-                full_path = cfg.output_dir / rel_full
-                thumb_path = cfg.output_dir / rel_thumb
-                try:
-                    _write_atomic(full_path, raw)
-                except OSError as exc:
-                    logger.exception("face-capture: write failed for %s", full_path)
-                    _upsert(conn, cand, visit_key, cfg.capture_camera, smp.offset_ms,
-                            smp.frame_ts, status="error", detail=str(exc)[:300],
-                            bump_attempts=True)
-                    summary["error"] += 1
+                if detector is None:
+                    writes.append(partial(store, cand, visit_key, smp, raw, http_status, None))
                     continue
+                face = _detect(detector, raw, min_score=cfg.min_face_score)
+                if face is None:
+                    writes.append(partial(
+                        _upsert, conn, cand, visit_key, cfg.capture_camera, smp.offset_ms,
+                        smp.frame_ts, status="no_face", http_status=http_status,
+                        nbytes=len(raw),
+                    ))
+                    summary["no_face"] += 1
+                    continue
+                hits.append((smp, raw, http_status, face))
 
-                # Aspect guard: normalized coords only transfer between images
-                # of the same aspect. Refuse to crop rather than crop wrongly.
-                pre = render_preview(raw, crop=None, max_edge=8, quality=50)
-                fw, fh = (pre[1], pre[2]) if pre else (0, 0)
-                if crop is not None and not aspect_ok(cap_aspect, fw, fh):
-                    if not aspect_warned:
-                        logger.error(
-                            "face-capture: %s detect aspect %.4f != frame aspect %sx%s -- "
-                            "not cropping (normalized boxes do not transfer across aspects)",
-                            cfg.capture_camera, cap_aspect or -1, fw, fh,
-                        )
-                        aspect_warned = True
-                    crop = None
+            for write in writes:
+                write()
 
-                thumb = render_preview(
-                    raw, crop=crop, max_edge=cfg.thumb_max_edge, quality=cfg.thumb_quality
-                )
-                if thumb:
-                    try:
-                        _write_atomic(thumb_path, thumb[0])
-                    except OSError:
-                        logger.warning("face-capture: thumb write failed for %s", thumb_path)
-
-                _upsert(
-                    conn, cand, visit_key, cfg.capture_camera, smp.offset_ms, smp.frame_ts,
-                    status="captured", http_status=http_status,
-                    full_path=rel_full, thumb_path=rel_thumb if thumb else None,
-                    width=fw or None, height=fh or None, nbytes=len(raw),
-                    crop_event_id=crop_event_id, crop_box=crop_box_json,
-                )
-                summary["captured"] += 1
-                summary["bytes"] += len(raw)
+            # Biggest, most confident faces first; the rest of the visit's face
+            # frames are near-duplicates and settle as 'skipped'.
+            hits.sort(key=lambda h: -face_rank(h[3]))
+            keep = max(1, cfg.keep_per_visit)
+            for smp, raw, http_status, face in hits[:keep]:
+                store(cand, visit_key, smp, raw, http_status, face)
+            for smp, _raw, http_status, _face in hits[keep:]:
+                _upsert(conn, cand, visit_key, cfg.capture_camera, smp.offset_ms,
+                        smp.frame_ts, status="skipped", http_status=http_status,
+                        detail=f"face, not in the visit's top {keep}")
+                summary["skipped"] += 1
+            conn.commit()
 
         conn.commit()
     finally:
@@ -638,12 +877,95 @@ def scan(settings: Settings, *, now: float | None = None) -> dict[str, Any]:
     summary["pruned"] = prune(settings, now=now).get("rows", 0)
     _write_last_run(cfg.output_dir, summary, now)
     logger.info(
-        "face-capture: %d candidate(s), %d captured, %d no_recording, "
+        "face-capture: %d candidate(s), %d captured, %d no_face, %d no_recording, "
         "%d error, %d deduped, %.1f MB",
-        summary["candidates"], summary["captured"], summary["no_recording"],
-        summary["error"], summary["deduped"], summary["bytes"] / 1e6,
+        summary["candidates"], summary["captured"], summary["no_face"],
+        summary["no_recording"], summary["error"], summary["deduped"],
+        summary["bytes"] / 1e6,
     )
     return summary
+
+
+def _face_thumb(raw: bytes, face: tuple[NormBox, float], cfg: Any) -> bytes | None:
+    from marcellus.faces.enrich import render_face_crop
+
+    return render_face_crop(raw, face[0], pad=cfg.face_pad, max_edge=cfg.thumb_max_edge)
+
+
+def regate(
+    settings: Settings, *, detector: FaceDetector | None = None, dry_run: bool = False
+) -> dict[str, Any]:
+    """Apply the face gate to captures stored before it existed.
+
+    For each `captured` row not marked `kept`: no face -> status='no_face' and
+    both files deleted; a face -> thumbnail re-cut to the face. Rows a person
+    marked `kept` are left alone -- that is a human verdict on the frame.
+    Idempotent: a re-run re-detects and re-cuts the same thumbnails.
+    """
+    cfg = settings.face_capture
+    out: dict[str, Any] = {"checked": 0, "face": 0, "no_face": 0, "missing": 0, "dry_run": dry_run}
+    if detector is None:
+        detector = face_detector(settings)
+    if detector is None:
+        out["error"] = "face gate unavailable (face_gate off or [enrich] extra missing)"
+        return out
+
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, full_path, thumb_path FROM face_captures "
+            " WHERE status = 'captured' AND review <> 'kept' AND full_path IS NOT NULL "
+            " ORDER BY trigger_start_ts"
+        ).fetchall()
+        for r in rows:
+            full = cfg.output_dir / str(r["full_path"])
+            try:
+                raw = full.read_bytes()
+            except OSError:
+                out["missing"] += 1
+                continue
+            out["checked"] += 1
+            face = _detect(detector, raw, min_score=cfg.min_face_score)
+            if face is None:
+                out["no_face"] += 1
+                if dry_run:
+                    continue
+                conn.execute(
+                    "UPDATE face_captures SET status = 'no_face', detail = 'regate', "
+                    "       full_path = NULL, thumb_path = NULL WHERE id = ?",
+                    (r["id"],),
+                )
+                conn.commit()
+                for rel in (r["full_path"], r["thumb_path"]):
+                    if rel:
+                        with contextlib.suppress(OSError):
+                            (cfg.output_dir / str(rel)).unlink()
+                continue
+            out["face"] += 1
+            if dry_run:
+                continue
+            thumb = _face_thumb(raw, face, cfg)
+            rel_thumb = r["thumb_path"] or str(r["full_path"]).replace(".jpg", ".thumb.jpg")
+            if thumb is not None:
+                try:
+                    _write_atomic(cfg.output_dir / rel_thumb, thumb)
+                except OSError:
+                    logger.warning("face-capture: regate thumb write failed for %s", rel_thumb)
+                    thumb = None
+            conn.execute(
+                "UPDATE face_captures SET face_box = ?, face_score = ?, "
+                "       thumb_path = COALESCE(?, thumb_path) WHERE id = ?",
+                (json.dumps(face[0]), face[1], rel_thumb if thumb else None, r["id"]),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+    logger.info(
+        "face-capture regate: %d checked, %d face, %d no_face, %d missing%s",
+        out["checked"], out["face"], out["no_face"], out["missing"],
+        " (dry run)" if dry_run else "",
+    )
+    return out
 
 
 def _upsert(
@@ -664,6 +986,8 @@ def _upsert(
     nbytes: int | None = None,
     crop_event_id: str | None = None,
     crop_box: str | None = None,
+    face_box: str | None = None,
+    face_score: float | None = None,
     bump_attempts: bool = False,
 ) -> None:
     conn.execute(
@@ -672,8 +996,9 @@ def _upsert(
             trigger_event_id, trigger_camera, trigger_label, trigger_start_ts,
             trigger_score, visit_key, capture_camera, offset_ms, frame_ts,
             status, attempts, http_status, detail, full_path, thumb_path,
-            width, height, bytes, crop_event_id, crop_box, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            width, height, bytes, crop_event_id, crop_box, face_box, face_score,
+            created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(trigger_event_id, offset_ms) DO UPDATE SET
             status = excluded.status,
             attempts = face_captures.attempts + ?,
@@ -685,13 +1010,16 @@ def _upsert(
             height = COALESCE(excluded.height, face_captures.height),
             bytes = COALESCE(excluded.bytes, face_captures.bytes),
             crop_event_id = COALESCE(excluded.crop_event_id, face_captures.crop_event_id),
-            crop_box = COALESCE(excluded.crop_box, face_captures.crop_box)
+            crop_box = COALESCE(excluded.crop_box, face_captures.crop_box),
+            face_box = COALESCE(excluded.face_box, face_captures.face_box),
+            face_score = COALESCE(excluded.face_score, face_captures.face_score)
         """,
         (
             cand.event_id, cand.camera, cand.label, cand.start_time, cand.top_score,
             visit_key, capture_camera, offset_ms, frame_ts, status,
             1 if bump_attempts else 0, http_status, detail, full_path, thumb_path,
-            width, height, nbytes, crop_event_id, crop_box, _now_iso(),
+            width, height, nbytes, crop_event_id, crop_box, face_box, face_score,
+            _now_iso(),
             1 if bump_attempts else 0,
         ),
     )

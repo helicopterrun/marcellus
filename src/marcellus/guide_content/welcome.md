@@ -21,7 +21,7 @@ Right now this sidecar has been up **{{stat:uptime}}** and Frigate has logged
 | Area | Pages |
 |---|---|
 | Watch | [Status](/) with live camera views, the [camera list](/cameras), and a single-camera view at `/live/<camera>` |
-| Review | [Scrub](/scrub), [Triage](/triage) |
+| Review | [Triage](/triage) |
 | Crossings | [Encounters](/encounters) -- one row per visit across cameras -- and the per-atom [Observations](/guide/observations) API |
 | Space | [Map](/map) with camera placement and calibration |
 | People | [Face captures](/faces/captures), [Identities](/enrich/clusters) |

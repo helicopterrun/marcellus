@@ -9,6 +9,12 @@ aggregate into ONE embedding per event, and match it against identity clusters
 in the sidecar DB. A NAMED cluster match writes the event's sub_label back to
 Frigate; anything else folds into (or starts) an unnamed cluster, so recurring
 strangers accumulate an identity that a human can later promote by naming.
+The top `crop_keep` faces (best first, including ones under the quality gate)
+are also saved as padded crops under `crops_dir` — the display copies, so no
+surface has to re-detect them. Rank 0 doubles as the event's `best_crop_path`.
+Events enriched before stacks existed get theirs from the stack backfill: a
+person queues them (`stack_status='queued'`) and idle cycles work the queue,
+rewriting crops only — never embeddings, clusters, or sub_labels.
 
 Work discovery is crosscam's lookback pattern, not an MQTT hook: recordings
 commit at segment END (measured lag 5.4-9.4s), so enrichment is inherently
@@ -25,18 +31,25 @@ OpenVINO/iGPU path produced a multi-day embeddings OOM cycle on this host.
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import logging
 import math
+import os
+import re
 import sqlite3
+import tempfile
 import time
 from array import array
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from marcellus import db
 from marcellus.config import Settings
-from marcellus.frigate_api import FrigateClient
+from marcellus.frigate_api import FrigateAPIError, FrigateClient
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +151,154 @@ def quality_score(
     a = min(1.0, max(0.0, area_px) / (4.0 * max(1, min_face_area_px)))
     f = max(0.0, min(1.0, frontality))
     return float((s * a * f) ** (1.0 / 3.0))
+
+
+# ---------------------------------------------------------------------------
+# Best-face crop: pure Pillow (a core dep), so it is testable without [enrich].
+
+_CROP_JPEG_QUALITY = 90
+_SAFE_STEM = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def crop_relative_path(event_id: str, frame_ts: float, rank: int) -> str:
+    """Date-sharded path under `crops_dir`, as crosscam lays out its captures.
+
+    Event ids come from Frigate's DB, not a request, but a filesystem path
+    gets the same whitelist either way.
+    """
+    day = datetime.fromtimestamp(frame_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+    stem = re.sub(r"\.{2,}", ".", _SAFE_STEM.sub("_", event_id)).lstrip(".") or "face"
+    return f"{day}/{stem}_{rank}.jpg"
+
+
+def crop_box(
+    bbox: tuple[float, float, float, float], src_w: int, src_h: int, *, pad: float
+) -> tuple[int, int, int, int] | None:
+    """Square pixel box around a normalized face bbox, padded and kept in frame.
+
+    The square is slid back inside the frame rather than clipped, so a face
+    near an edge keeps its framing; only a square larger than the frame
+    itself gets clipped. None for a degenerate box.
+    """
+    x1, y1, x2, y2 = bbox[0] * src_w, bbox[1] * src_h, bbox[2] * src_w, bbox[3] * src_h
+    face = max(x2 - x1, y2 - y1)
+    if face <= 1.0:
+        return None
+    # Integer side and corner first, so float noise (683.9999 vs 684) can
+    # never make the two axes round differently and the crop non-square.
+    side = int(round(face * (1.0 + 2.0 * max(0.0, pad))))
+    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    left = min(max(0, int(round(cx - side / 2.0))), max(0, src_w - side))
+    top = min(max(0, int(round(cy - side / 2.0))), max(0, src_h - side))
+    return (left, top, min(src_w, left + side), min(src_h, top + side))
+
+
+def render_face_crop(
+    jpeg: bytes, bbox: tuple[float, float, float, float], *, pad: float, max_edge: int
+) -> bytes | None:
+    """JPEG bytes of the padded face crop, or None if the frame won't decode."""
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(jpeg)) as im:
+            box = crop_box(bbox, im.size[0], im.size[1], pad=pad)
+            if box is None:
+                return None
+            face = im.convert("RGB").crop(box)
+        if max(face.size) > max_edge:
+            face.thumbnail((max_edge, max_edge))
+        buf = io.BytesIO()
+        face.save(buf, format="JPEG", quality=_CROP_JPEG_QUALITY)
+        return buf.getvalue()
+    except Exception:  # noqa: BLE001 - a bad frame costs its crop, not the event
+        logger.warning("face_enrich: crop render failed", exc_info=True)
+        return None
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    """Publish a file atomically (mkstemp + os.replace), as crosscam does."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".publish-")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def keep_top(
+    kept: list[tuple[DetectedFace, bytes]], found: list[DetectedFace], jpeg: bytes, k: int
+) -> list[tuple[DetectedFace, bytes]]:
+    """Fold one frame's faces into the running top-k (face, its frame) list.
+
+    Stable sort, so ties keep frame order — the same order the usable sort in
+    process_event produces, which is what lets rank i be "used" exactly when
+    i < len(usable). Only frames still holding a top-k face stay referenced.
+    """
+    merged = kept + [(f, jpeg) for f in found]
+    merged.sort(key=lambda fj: -fj[0].quality)
+    return merged[: max(1, k)]
+
+
+def store_crops(
+    event_id: str, kept: list[tuple[DetectedFace, bytes]], *, cfg: Any
+) -> list[str | None]:
+    """Render and save each kept face's crop; their relative paths, by rank.
+
+    Never raises: the crops are for display, and losing one must not turn an
+    enriched event into an error that gets retried. A face whose frame won't
+    decode or write gets None.
+    """
+    paths: list[str | None] = []
+    for rank, (face, jpeg) in enumerate(kept):
+        data = render_face_crop(jpeg, face.bbox, pad=cfg.crop_pad, max_edge=cfg.crop_max_edge)
+        rel: str | None = None
+        if data is not None:
+            rel = crop_relative_path(event_id, face.frame_ts, rank)
+            try:
+                _write_atomic(Path(cfg.crops_dir) / rel, data)
+            except OSError:
+                logger.warning("face_enrich: could not write crop for %s", event_id, exc_info=True)
+                rel = None
+        paths.append(rel)
+    return paths
+
+
+def drop_crops(conn: sqlite3.Connection, crops_dir: Path, event_ids: list[str]) -> int:
+    """Delete these events' crop files and rows; returns files removed.
+
+    Rows first, then files: a crash between the two leaves an orphan file,
+    never a row pointing at nothing. `best_crop_path` is included for events
+    enriched before the face_crops table existed.
+    """
+    removed = 0
+    for eid in event_ids:
+        rels = {
+            str(r["crop_path"])
+            for r in conn.execute(
+                "SELECT crop_path FROM face_crops WHERE event_id = ? AND crop_path IS NOT NULL",
+                (eid,),
+            )
+        }
+        row = conn.execute(
+            "SELECT best_crop_path FROM face_enrichments WHERE event_id = ?", (eid,)
+        ).fetchone()
+        if row is not None and row["best_crop_path"]:
+            rels.add(str(row["best_crop_path"]))
+        if not rels:
+            continue
+        conn.execute("DELETE FROM face_crops WHERE event_id = ?", (eid,))
+        conn.execute(
+            "UPDATE face_enrichments SET best_crop_path = NULL WHERE event_id = ?", (eid,)
+        )
+        for rel in rels:
+            with contextlib.suppress(OSError):
+                (Path(crops_dir) / rel).unlink()
+                removed += 1
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -291,8 +452,269 @@ def rebuild_centroid(conn: sqlite3.Connection, cluster_id: int) -> None:
     )
 
 
+#: Centroid cosine distance under which two clusters get a "looks like" merge
+#: hint. Deliberately looser than face_enrich.cluster_threshold (0.55): the
+#: hint is a human-confirmed suggestion, not an automatic join. Shared by the
+#: web page's similar pairs and `/v1/people/{id}/similar`.
+SUGGEST_THRESHOLD = 0.6
+
+
+class NameConflict(Exception):
+    """Both clusters of a strict merge carry different names."""
+
+
+@dataclass(frozen=True)
+class MergeResult:
+    #: A name the survivor gained from the source. The caller commits, then
+    #: runs `retro_label` for it (network calls stay out of the write lock).
+    carried_name: str | None
+
+
+def _repoint_dismissals(conn: sqlite3.Connection, source_id: int, into_id: int) -> None:
+    """Rewrite merge dismissals naming `source_id` to name `into_id` (low id
+    first), dropping the pair that would become (into, into) and ignoring
+    duplicates. Must run before the source row is deleted: the delete trigger
+    removes dismissals naming the deleted cluster."""
+    rows = conn.execute(
+        "SELECT id_low, id_high, dismissed_at FROM face_merge_dismissals "
+        "WHERE id_low = ? OR id_high = ?",
+        (source_id, source_id),
+    ).fetchall()
+    for r in rows:
+        other = int(r["id_high"]) if int(r["id_low"]) == source_id else int(r["id_low"])
+        if other == into_id:
+            continue
+        conn.execute(
+            "INSERT OR IGNORE INTO face_merge_dismissals (id_low, id_high, dismissed_at) "
+            "VALUES (?, ?, ?)",
+            (min(other, into_id), max(other, into_id), r["dismissed_at"]),
+        )
+    conn.execute(
+        "DELETE FROM face_merge_dismissals WHERE id_low = ? OR id_high = ?",
+        (source_id, source_id),
+    )
+
+
+def merge_clusters(
+    conn: sqlite3.Connection,
+    source_id: int,
+    into_id: int,
+    *,
+    strict_names: bool = False,
+    now: float | None = None,
+) -> MergeResult:
+    """Fold cluster `source_id` into `into_id`; the source row disappears.
+
+    Repoints sightings and existing redirects, records `source -> into`, carries
+    over the name (when the survivor has none), the note (likewise),
+    `followed_at` (either), and the later `last_seen_at`, deletes the source and
+    rebuilds the survivor's centroid. When both are named the survivor's name
+    wins, unless `strict_names` and the names differ (raises `NameConflict`).
+    Caller validates existence, owns commit, and runs `retro_label` for a
+    carried name. Redirects are repointed before the source row is deleted:
+    the delete trigger removes redirects aimed at the deleted cluster.
+    """
+    src = conn.execute(
+        "SELECT name, note, followed_at, last_seen_at, observation_count "
+        "FROM face_clusters WHERE cluster_id = ?",
+        (source_id,),
+    ).fetchone()
+    dst = conn.execute(
+        "SELECT name, note, followed_at, last_seen_at, observation_count "
+        "FROM face_clusters WHERE cluster_id = ?",
+        (into_id,),
+    ).fetchone()
+    if src is None or dst is None or source_id == into_id:
+        raise ValueError("merge needs two distinct existing clusters")
+    src_name, dst_name = src["name"], dst["name"]
+    if (
+        strict_names
+        and src_name
+        and dst_name
+        and str(src_name).casefold() != str(dst_name).casefold()
+    ):
+        raise NameConflict()
+    carried = str(src_name) if src_name and not dst_name else None
+    conn.execute(
+        "UPDATE face_enrichments SET cluster_id = ? WHERE cluster_id = ?", (into_id, source_id)
+    )
+    conn.execute(
+        "UPDATE face_cluster_redirects SET new_id = ? WHERE new_id = ?", (into_id, source_id)
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO face_cluster_redirects (old_id, new_id, merged_at) "
+        "VALUES (?, ?, ?)",
+        (source_id, into_id, time.time() if now is None else now),
+    )
+    _repoint_dismissals(conn, source_id, into_id)
+    conn.execute("DELETE FROM face_clusters WHERE cluster_id = ?", (source_id,))
+    # Count falls back to the sum when no stored embedding lets the rebuild
+    # recompute it; last_seen_at is never touched by rebuild_centroid.
+    conn.execute(
+        "UPDATE face_clusters SET name = COALESCE(name, ?), note = COALESCE(note, ?), "
+        "       followed_at = COALESCE(followed_at, ?), "
+        "       last_seen_at = MAX(last_seen_at, ?), observation_count = ? "
+        " WHERE cluster_id = ?",
+        (
+            carried,
+            src["note"],
+            src["followed_at"],
+            src["last_seen_at"],
+            int(src["observation_count"]) + int(dst["observation_count"]),
+            into_id,
+        ),
+    )
+    rebuild_centroid(conn, into_id)
+    return MergeResult(carried_name=carried)
+
+
+def rename_cluster(conn: sqlite3.Connection, cluster_id: int, name: str) -> bool:
+    """Set the name and rebuild the centroid; False when no such cluster. The
+    caller commits, then runs `retro_label`."""
+    cur = conn.execute("UPDATE face_clusters SET name = ? WHERE cluster_id = ?", (name, cluster_id))
+    if not cur.rowcount:
+        return False
+    rebuild_centroid(conn, cluster_id)
+    return True
+
+
+def retro_label(conn: sqlite3.Connection, settings: Settings, cluster_id: int, name: str) -> int:
+    """Write `name` as the sub_label onto the cluster's past events.
+
+    Best-effort per event: an event that has aged out of Frigate's retention
+    404s and is skipped -- that must never fail the rename itself. Returns how
+    many events were actually labeled.
+    """
+    event_ids = [
+        str(r["event_id"])
+        for r in conn.execute(
+            "SELECT event_id FROM face_enrichments WHERE cluster_id = ? AND excluded_at IS NULL",
+            (cluster_id,),
+        )
+    ]
+    # The network loop only collects; the DB write happens once, after it, so
+    # no write transaction is held open across Frigate calls.
+    labeled: list[str] = []
+    with FrigateClient(settings.frigate.base_url) as fc:
+        for eid in event_ids:
+            try:
+                fc.set_sub_label(eid, name)
+            except FrigateAPIError as exc:
+                logger.info("enrich: retro-label skipped for %s: %s", eid, exc)
+                continue
+            labeled.append(eid)
+    conn.executemany(
+        "UPDATE face_enrichments SET sub_label_written = ? WHERE event_id = ?",
+        [(name, eid) for eid in labeled],
+    )
+    return len(labeled)
+
+
+def write_sub_labels(settings: Settings, event_ids: list[str], label: str) -> list[str]:
+    """Best-effort `set_sub_label(event, label)` for each event ("" clears).
+    Returns the events that succeeded; never raises on a Frigate failure and
+    never logs the label. Call with no write transaction open."""
+    done: list[str] = []
+    if not event_ids:
+        return done
+    try:
+        with FrigateClient(settings.frigate.base_url) as fc:
+            for eid in event_ids:
+                try:
+                    fc.set_sub_label(eid, label)
+                except FrigateAPIError as exc:
+                    logger.info("enrich: sub_label write skipped for %s: %s", eid, exc)
+                    continue
+                done.append(eid)
+    except Exception:  # noqa: BLE001 - Frigate trouble must never fail the caller
+        logger.info("enrich: sub_label writes aborted")
+    return done
+
+
+def erase_name_everywhere(conn: sqlite3.Connection, name: str) -> None:
+    """Remove `name` from encounters' `identities_json` and members'
+    `sub_labels_json`. The caller decides no other cluster still uses it."""
+    needles = {name, json.dumps(name)[1:-1]}
+    for table, col in (("encounters", "identities_json"), ("encounter_members", "sub_labels_json")):
+        key = "id" if table == "encounters" else "rowid"
+        rows = conn.execute(
+            f"SELECT {key} AS k, {col} AS v FROM {table} WHERE "
+            + " OR ".join("instr(" + col + ", ?) > 0" for _ in needles),
+            tuple(needles),
+        ).fetchall()
+        for r in rows:
+            try:
+                values = json.loads(r["v"])
+            except ValueError:
+                continue
+            if not isinstance(values, list) or name not in values:
+                continue
+            kept = [v for v in values if v != name]
+            conn.execute(
+                f"UPDATE {table} SET {col} = ? WHERE {key} = ?", (json.dumps(kept), r["k"])
+            )
+
+
+def set_sighting_excluded(
+    conn: sqlite3.Connection, event_id: str, excluded: bool
+) -> tuple[bool, int | None]:
+    """Soft-exclude/include one sighting and rebuild its cluster's centroid.
+
+    Returns (found, cluster_id); cluster_id is None for a clusterless sighting.
+    Does not touch Frigate sub_labels.
+    """
+    row = conn.execute(
+        "SELECT cluster_id FROM face_enrichments WHERE event_id = ?", (event_id,)
+    ).fetchone()
+    if row is None:
+        return (False, None)
+    excluded_at = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds") if excluded else None
+    )
+    conn.execute(
+        "UPDATE face_enrichments SET excluded_at = ? WHERE event_id = ?", (excluded_at, event_id)
+    )
+    cluster_id = row["cluster_id"]
+    if cluster_id is not None:
+        rebuild_centroid(conn, int(cluster_id))
+        return (True, int(cluster_id))
+    return (True, None)
+
+
+def _forget_pair_labels(conn: sqlite3.Connection, cluster_id: int) -> None:
+    """A forgotten identity's labelled pairs (faces/accuracy.py) go with it. Call
+    while its sightings still carry the cluster id. Merges keep them on purpose."""
+    conn.execute(
+        "DELETE FROM face_pair_labels WHERE "
+        "event_a IN (SELECT event_id FROM face_enrichments WHERE cluster_id = ?) OR "
+        "event_b IN (SELECT event_id FROM face_enrichments WHERE cluster_id = ?)",
+        (cluster_id, cluster_id),
+    )
+
+
+def delete_cluster(conn: sqlite3.Connection, crops_dir: Path, cluster_id: int) -> bool:
+    """Erase an identity: crops, embeddings and the cluster row (its redirects
+    follow via the delete trigger). False when there was no such cluster."""
+    event_ids = [
+        str(r["event_id"])
+        for r in conn.execute(
+            "SELECT event_id FROM face_enrichments WHERE cluster_id = ?", (cluster_id,)
+        )
+    ]
+    drop_crops(conn, crops_dir, event_ids)
+    _forget_pair_labels(conn, cluster_id)
+    conn.execute(
+        "UPDATE face_enrichments SET cluster_id = NULL, embedding = NULL WHERE cluster_id = ?",
+        (cluster_id,),
+    )
+    cur = conn.execute("DELETE FROM face_clusters WHERE cluster_id = ?", (cluster_id,))
+    return bool(cur.rowcount)
+
+
 def reap_stale_clusters(conn: sqlite3.Connection, *, cfg: Any, now: float) -> int:
-    """Delete UNNAMED clusters unseen for cluster_ttl_days, with their embeddings.
+    """Delete UNNAMED, unfollowed, un-noted clusters unseen for cluster_ttl_days,
+    with their embeddings. Following or noting a cluster (/v1/people) exempts it:
+    either one says a person cares about this ID.
 
     This is the retention boundary that keeps the feature from becoming an
     unbounded stranger database: the enrichment rows stay (they mirror
@@ -303,17 +725,32 @@ def reap_stale_clusters(conn: sqlite3.Connection, *, cfg: Any, now: float) -> in
         int(r["cluster_id"])
         for r in conn.execute(
             "SELECT cluster_id FROM face_clusters "
-            "WHERE name IS NULL AND last_seen_at < ?",
+            "WHERE name IS NULL AND followed_at IS NULL AND note IS NULL "
+            "AND last_seen_at < ?",
             (cutoff,),
         )
     ]
     for cid in stale:
+        _forget_pair_labels(conn, cid)
         conn.execute(
             "UPDATE face_enrichments SET cluster_id = NULL, embedding = NULL "
             "WHERE cluster_id = ?",
             (cid,),
         )
         conn.execute("DELETE FROM face_clusters WHERE cluster_id = ?", (cid,))
+    # Crops of clusterless sightings past the TTL: the reaped clusters' events
+    # (a stale cluster's last sighting is older than the cutoff, so all of its
+    # events are) plus sightings a person detached and nothing re-claimed.
+    orphaned = [
+        str(r["event_id"])
+        for r in conn.execute(
+            "SELECT event_id FROM face_enrichments fe WHERE cluster_id IS NULL "
+            "AND event_start_ts < ? AND (best_crop_path IS NOT NULL "
+            "  OR EXISTS (SELECT 1 FROM face_crops fc WHERE fc.event_id = fe.event_id))",
+            (cutoff,),
+        )
+    ]
+    drop_crops(conn, cfg.crops_dir, orphaned)
     return len(stale)
 
 
@@ -329,12 +766,16 @@ class DetectedFace:
     area_px: float
     quality: float
     embedding: list[float]
+    # Face box normalized to the frame, (x1, y1, x2, y2) in 0..1.
+    bbox: tuple[float, float, float, float]
+    # SCRFD detection confidence.
+    det_score: float = 1.0
 
 
 class _Engine:
     """Lazy insightface FaceAnalysis wrapper, CPU-only, one per process."""
 
-    def __init__(self, model_dir: str) -> None:
+    def __init__(self, model_dir: str, *, detect_only: bool = False) -> None:
         try:
             import cv2  # noqa: F401
             import numpy  # noqa: F401
@@ -348,12 +789,14 @@ class _Engine:
             name="buffalo_l",
             root=model_dir,
             providers=["CPUExecutionProvider"],
-            allowed_modules=["detection", "recognition"],
+            # detect_only skips the 174 MB ArcFace pack; faces_in_jpeg needs
+            # it, detect_in_jpeg does not.
+            allowed_modules=["detection"] if detect_only else ["detection", "recognition"],
         )
         self._app.prepare(ctx_id=-1, det_size=(640, 640))
 
     def faces_in_jpeg(
-        self, jpeg: bytes, *, frame_ts: float, min_face_area_px: int
+        self, jpeg: bytes, *, frame_ts: float, min_face_area_px: int, min_det_score: float = 0.0
     ) -> list[DetectedFace]:
         import cv2
         import numpy as np
@@ -363,6 +806,9 @@ class _Engine:
             return []
         out: list[DetectedFace] = []
         for face in self._app.get(img):
+            det_score = float(face.det_score)
+            if det_score < min_det_score:
+                continue
             x1, y1, x2, y2 = (float(v) for v in face.bbox)
             area = max(0.0, x2 - x1) * max(0.0, y2 - y1)
             if area < min_face_area_px:
@@ -391,12 +837,34 @@ class _Engine:
                     area_px=area,
                     quality=quality,
                     embedding=[float(v) for v in emb],
+                    bbox=(x1 / w, y1 / h, x2 / w, y2 / h),
+                    det_score=det_score,
                 )
             )
         return out
 
+    def detect_in_jpeg(self, jpeg: bytes) -> list[tuple[tuple[float, float, float, float], float]]:
+        """``[(normalized (x1, y1, x2, y2), det_score)]`` — SCRFD only, no embedding.
+
+        For callers that need "is there a face, and where" (crosscam's face
+        gate) without paying for ArcFace on every frame.
+        """
+        import cv2
+        import numpy as np
+
+        img = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            return []
+        h, w = img.shape[:2]
+        bboxes, _kps = self._app.det_model.detect(img, max_num=0, metric="default")
+        return [
+            ((float(b[0]) / w, float(b[1]) / h, float(b[2]) / w, float(b[3]) / h), float(b[4]))
+            for b in bboxes
+        ]
+
 
 _ENGINE: _Engine | None = None
+_DETECTOR: _Engine | None = None
 
 
 def _engine(model_dir: str) -> _Engine:
@@ -404,6 +872,18 @@ def _engine(model_dir: str) -> _Engine:
     if _ENGINE is None:
         _ENGINE = _Engine(model_dir)
     return _ENGINE
+
+
+def _detector(model_dir: str) -> _Engine:
+    """SCRFD alone, for callers that only call detect_in_jpeg (crosscam's
+    face gate runs in its own timer process, where loading ArcFace too would
+    cost ~170 MB for nothing). Reuses the full engine if one is loaded."""
+    global _DETECTOR
+    if _ENGINE is not None:
+        return _ENGINE
+    if _DETECTOR is None:
+        _DETECTOR = _Engine(model_dir, detect_only=True)
+    return _DETECTOR
 
 
 def check_available() -> None:
@@ -433,22 +913,28 @@ def _record(
     faces_found: int = 0,
     faces_used: int = 0,
     best_quality: float | None = None,
+    best: DetectedFace | None = None,
+    best_crop_path: str | None = None,
     embedding: list[float] | None = None,
     sub_label_written: str | None = None,
     detail: str | None = None,
+    rejected_best_quality: float | None = None,
 ) -> None:
     conn.execute(
         "INSERT INTO face_enrichments "
         "(event_id, camera, event_start_ts, cluster_id, distance, faces_found, faces_used, "
-        " best_quality, embedding, sub_label_written, status, attempts, detail, processed_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " best_quality, embedding, sub_label_written, status, attempts, detail, processed_at, "
+        " best_frame_ts, best_bbox, best_crop_path, rejected_best_quality) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(event_id) DO UPDATE SET "
         " cluster_id=excluded.cluster_id, distance=excluded.distance, "
         " faces_found=excluded.faces_found, faces_used=excluded.faces_used, "
         " best_quality=excluded.best_quality, embedding=excluded.embedding, "
         " sub_label_written=excluded.sub_label_written, status=excluded.status, "
         " attempts=excluded.attempts, detail=excluded.detail, "
-        " processed_at=excluded.processed_at",
+        " processed_at=excluded.processed_at, best_frame_ts=excluded.best_frame_ts, "
+        " best_bbox=excluded.best_bbox, best_crop_path=excluded.best_crop_path, "
+        " rejected_best_quality=excluded.rejected_best_quality",
         (
             cand.event_id,
             cand.camera,
@@ -464,17 +950,23 @@ def _record(
             cand.attempts + 1,
             detail,
             _now_iso(),
+            best.frame_ts if best is not None else None,
+            json.dumps([round(v, 5) for v in best.bbox]) if best is not None else None,
+            best_crop_path,
+            rejected_best_quality,
         ),
     )
 
 
-def process_event(
-    conn: sqlite3.Connection, client: FrigateClient, cand: Candidate, *, cfg: Any
-) -> str:
-    """Run the full pipeline for one event; returns the terminal status."""
+def _scan(
+    client: FrigateClient, cand: Candidate, *, cfg: Any
+) -> tuple[int, list[DetectedFace], list[tuple[DetectedFace, bytes]]]:
+    """Sample the event's frames and detect faces: (frames_ok, faces, top-k kept)."""
     engine = _engine(str(cfg.model_dir))
     faces: list[DetectedFace] = []
     frames_ok = 0
+    # Only frames holding a top-k face stay referenced, not all ~40.
+    kept: list[tuple[DetectedFace, bytes]] = []
     for ts in sample_times(
         cand.start_time, cand.end_time, max_frames=cfg.max_frames, min_gap_s=cfg.min_sample_gap_s
     ):
@@ -482,17 +974,76 @@ def process_event(
         if jpeg is None:
             continue  # routine: no committed segment covers this instant
         frames_ok += 1
-        faces.extend(engine.faces_in_jpeg(jpeg, frame_ts=ts, min_face_area_px=cfg.min_face_area_px))
+        found = engine.faces_in_jpeg(
+            jpeg, frame_ts=ts, min_face_area_px=cfg.min_face_area_px,
+            min_det_score=cfg.min_det_score,
+        )
+        if found:
+            kept = keep_top(kept, found, jpeg, cfg.crop_keep)
+        faces.extend(found)
+    return frames_ok, faces, kept
 
+
+def _usable(faces: list[DetectedFace], *, cfg: Any) -> list[DetectedFace]:
+    """The faces that feed the embedding: over the gate, best `best_n` first."""
+    return sorted(
+        (f for f in faces if f.quality >= cfg.min_quality), key=lambda f: -f.quality
+    )[: cfg.best_n]
+
+
+def _write_stack(
+    conn: sqlite3.Connection,
+    event_id: str,
+    kept: list[tuple[DetectedFace, bytes]],
+    n_used: int,
+    *,
+    cfg: Any,
+) -> str | None:
+    """Save the kept faces' crops and face_crops rows; returns rank 0's path.
+
+    Ranks under `n_used` are the ones that fed the embedding — kept and
+    usable share one stable order over the same faces.
+    """
+    crop_paths = store_crops(event_id, kept, cfg=cfg)
+    conn.execute("DELETE FROM face_crops WHERE event_id = ?", (event_id,))
+    conn.executemany(
+        "INSERT INTO face_crops "
+        "(event_id, rank, quality, frame_ts, bbox, used, crop_path, det_score) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                event_id, rank, face.quality, face.frame_ts,
+                json.dumps([round(v, 5) for v in face.bbox]),
+                1 if rank < n_used else 0, path, round(face.det_score, 3),
+            )
+            for rank, ((face, _jpeg), path) in enumerate(zip(kept, crop_paths, strict=True))
+        ],
+    )
+    return crop_paths[0] if crop_paths else None
+
+
+def process_event(
+    conn: sqlite3.Connection, client: FrigateClient, cand: Candidate, *, cfg: Any
+) -> str:
+    """Run the full pipeline for one event; returns the terminal status."""
+    frames_ok, faces, kept = _scan(client, cand, cfg=cfg)
     if frames_ok == 0:
         _record(conn, cand, status="no_frames")
         return "no_frames"
-    usable = sorted(
-        (f for f in faces if f.quality >= cfg.min_quality), key=lambda f: -f.quality
-    )[: cfg.best_n]
+    usable = _usable(faces, cfg=cfg)
     if not usable:
-        _record(conn, cand, status="no_faces", faces_found=len(faces))
+        _record(
+            conn,
+            cand,
+            status="no_faces",
+            faces_found=len(faces),
+            # Faces passed the detection/area gates but all fell under
+            # min_quality: keep the best quality seen (data only).
+            rejected_best_quality=max((f.quality for f in faces), default=None),
+        )
         return "no_faces"
+    best = usable[0]  # == kept[0][0]: same stable order over the same faces
+    best_path = _write_stack(conn, cand.event_id, kept, len(usable), cfg=cfg)
 
     event_emb = aggregate([f.embedding for f in usable], [f.quality for f in usable])
     cluster_id, name, dist = match_or_cluster(conn, event_emb, cfg=cfg, seen_ts=cand.end_time)
@@ -512,11 +1063,128 @@ def process_event(
         distance=dist,
         faces_found=len(faces),
         faces_used=len(usable),
-        best_quality=usable[0].quality,
+        best_quality=best.quality,
+        best=best,
+        best_crop_path=best_path,
         embedding=event_emb,
         sub_label_written=sub_label,
     )
     return "enriched"
+
+
+# ---------------------------------------------------------------------------
+# Stack backfill: face stacks for events enriched before stacks existed.
+#
+# `face_enrichments.stack_status` is the queue, as `status` is for enrichment:
+# NULL = never asked, 'queued' = waiting, and done | no_frames | no_faces |
+# error are terminal (queueing again retries only 'error'). Eligible = an
+# enriched event with no face_crops rows.
+
+_ELIGIBLE = (
+    "status = 'enriched' "
+    "AND NOT EXISTS (SELECT 1 FROM face_crops fc WHERE fc.event_id = face_enrichments.event_id)"
+)
+
+
+def queue_backfill(conn: sqlite3.Connection) -> int:
+    """Queue every eligible event not already settled; returns how many."""
+    cur = conn.execute(
+        "UPDATE face_enrichments SET stack_status = 'queued' WHERE " + _ELIGIBLE
+        + " AND (stack_status IS NULL OR stack_status = 'error')"
+    )
+    return cur.rowcount or 0
+
+
+def pause_backfill(conn: sqlite3.Connection) -> int:
+    """Un-queue what hasn't run yet; returns how many."""
+    cur = conn.execute(
+        "UPDATE face_enrichments SET stack_status = NULL WHERE stack_status = 'queued'"
+    )
+    return cur.rowcount or 0
+
+
+def backfill_status(conn: sqlite3.Connection) -> dict[str, int]:
+    """Counts for the page: queued, done, failed, and `ready` (eligible, unqueued)."""
+    row = conn.execute(
+        "SELECT "
+        " SUM(stack_status = 'queued') AS queued,"
+        " SUM(stack_status = 'done') AS done,"
+        " SUM(stack_status IN ('no_frames', 'no_faces', 'error')) AS failed,"
+        " SUM(" + _ELIGIBLE + " AND (stack_status IS NULL OR stack_status = 'error')) AS ready"
+        " FROM face_enrichments"
+    ).fetchone()
+    return {k: int(row[k] or 0) for k in ("queued", "done", "failed", "ready")}
+
+
+def find_backfill(conn: sqlite3.Connection, *, limit: int) -> list[Candidate | str]:
+    """Queued events, oldest first — their recordings expire first.
+
+    An event Frigate no longer has comes back as its bare id, so the caller
+    can settle it without a fetch.
+    """
+    out: list[Candidate | str] = []
+    for r in conn.execute(
+        "SELECT fe.event_id, fe.camera, e.start_time, e.end_time "
+        "  FROM sidecar.face_enrichments fe LEFT JOIN event e ON e.id = fe.event_id "
+        " WHERE fe.stack_status = 'queued' ORDER BY fe.event_start_ts LIMIT ?",
+        (limit,),
+    ):
+        if r["start_time"] is None or r["end_time"] is None:
+            out.append(str(r["event_id"]))
+            continue
+        out.append(
+            Candidate(
+                event_id=str(r["event_id"]),
+                camera=str(r["camera"]),
+                start_time=float(r["start_time"]),
+                end_time=float(r["end_time"]),
+                attempts=0,
+            )
+        )
+    return out
+
+
+def backfill_event(
+    conn: sqlite3.Connection, client: FrigateClient, cand: Candidate, *, cfg: Any
+) -> str:
+    """Build one event's face stack; returns the stack_status it settled at.
+
+    Re-runs the same deterministic sampling and scoring as process_event, so
+    the stack is what enrichment would have kept. "Used" is judged by the
+    CURRENT min_quality/best_n, which can differ from the config the event
+    was enriched under. Writes crops only: the stored embedding, cluster and
+    sub_label are left exactly as they are.
+    """
+    frames_ok, faces, kept = _scan(client, cand, cfg=cfg)
+    if frames_ok == 0:
+        status = "no_frames"  # recordings aged out
+    elif not kept:
+        status = "no_faces"
+    else:
+        old = conn.execute(
+            "SELECT best_crop_path FROM face_enrichments WHERE event_id = ?", (cand.event_id,)
+        ).fetchone()
+        best_path = _write_stack(conn, cand.event_id, kept, len(_usable(faces, cfg=cfg)), cfg=cfg)
+        if old is not None and old["best_crop_path"] and old["best_crop_path"] != best_path:
+            # A single-crop file from before stacks; the stack supersedes it.
+            with contextlib.suppress(OSError):
+                (Path(cfg.crops_dir) / str(old["best_crop_path"])).unlink()
+        best = kept[0][0]
+        conn.execute(
+            "UPDATE face_enrichments SET best_frame_ts = ?, best_bbox = ?, "
+            "best_crop_path = ?, stack_status = 'done' WHERE event_id = ?",
+            (best.frame_ts, json.dumps([round(v, 5) for v in best.bbox]), best_path,
+             cand.event_id),
+        )
+        return "done"
+    _set_stack_status(conn, cand.event_id, status)
+    return status
+
+
+def _set_stack_status(conn: sqlite3.Connection, event_id: str, status: str) -> None:
+    conn.execute(
+        "UPDATE face_enrichments SET stack_status = ? WHERE event_id = ?", (status, event_id)
+    )
 
 
 def run_cycle(settings: Settings, *, now: float | None = None) -> dict[str, Any]:
@@ -525,16 +1193,24 @@ def run_cycle(settings: Settings, *, now: float | None = None) -> dict[str, Any]
     Sync by design — server.py runs it via asyncio.to_thread so inference
     never blocks the event loop. Per-event failures are recorded as
     status='error' and retried on later cycles; they never kill the cycle.
+    The stack backfill only gets cycles with no live work, so it can never
+    delay a fresh event.
     """
     cfg = settings.face_enrich
     now = time.time() if now is None else now
     summary: dict[str, Any] = {"candidates": 0, "enriched": 0, "no_faces": 0,
-                               "no_frames": 0, "errors": 0, "reaped": 0}
+                               "no_frames": 0, "errors": 0, "reaped": 0, "backfilled": 0}
     conn = db.open_joined(settings.frigate.db_path, settings.sidecar.db_path)
     try:
         candidates = find_candidates(conn, cfg=cfg, now=now)
         summary["candidates"] = len(candidates)
-        if candidates:
+        backlog = [] if candidates else find_backfill(conn, limit=cfg.backfill_per_cycle)
+        for gone in [b for b in backlog if isinstance(b, str)]:
+            _set_stack_status(conn, gone, "no_frames")  # Frigate dropped the event
+            summary["backfilled"] += 1
+        conn.commit()
+        backlog_cands = [b for b in backlog if isinstance(b, Candidate)]
+        if candidates or backlog_cands:
             with FrigateClient(settings.frigate.base_url, timeout=cfg.http_timeout_s) as client:
                 for cand in candidates:
                     try:
@@ -547,10 +1223,135 @@ def run_cycle(settings: Settings, *, now: float | None = None) -> dict[str, Any]
                         _record(conn, cand, status="error", detail=str(exc)[:300])
                         summary["errors"] += 1
                     conn.commit()
+                for cand in backlog_cands:
+                    try:
+                        backfill_event(conn, client, cand, cfg=cfg)
+                    except EnrichUnavailable:
+                        raise
+                    except Exception:  # noqa: BLE001 - settle it; queueing again retries
+                        logger.exception("face_enrich: backfill of %s failed", cand.event_id)
+                        conn.rollback()
+                        _set_stack_status(conn, cand.event_id, "error")
+                    summary["backfilled"] += 1
+                    conn.commit()
         summary["reaped"] = reap_stale_clusters(conn, cfg=cfg, now=now)
         conn.commit()
     finally:
         conn.close()
-    if summary["candidates"]:
+    if summary["candidates"] or summary["backfilled"]:
         logger.info("face_enrich cycle: %s", summary)
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Regate: min_det_score for sightings clustered before the gate existed.
+
+
+def _iou(a: Any, b: Any) -> float:
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def regate(
+    settings: Settings,
+    *,
+    client: Any = None,
+    detector: Any = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Re-score every clustered sighting's best face against min_det_score.
+
+    Refetches the recording frame the best face came from, re-runs SCRFD and
+    takes the score of the box over the stored one. Under the floor (or no
+    face there at all) the sighting is detached as /remove does -- cluster
+    and embedding cleared, crops dropped, any sub_label it wrote cleared --
+    and settled as 'no_faces'. Touched clusters get their centroid rebuilt;
+    one left with no sightings is deleted. A frame Frigate no longer has is
+    left alone (`missing`).
+
+    Only the best face is re-scored: it is the one the event was ranked by,
+    and for a junk sighting it is the junk. Idempotent.
+    """
+    cfg = settings.face_enrich
+    out: dict[str, Any] = {"checked": 0, "kept": 0, "dropped": 0, "missing": 0, "no_box": 0,
+                           "clusters_rebuilt": 0, "clusters_deleted": 0, "dry_run": dry_run}
+    if detector is None:
+        detector = _detector(str(cfg.model_dir))
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    touched: set[int] = set()
+    try:
+        rows = conn.execute(
+            "SELECT e.event_id, e.camera, e.cluster_id, e.sub_label_written, "
+            "       COALESCE(e.best_frame_ts, c.frame_ts) AS ts, "
+            "       COALESCE(e.best_bbox, c.bbox) AS bbox "
+            "  FROM face_enrichments e "
+            "  LEFT JOIN face_crops c ON c.event_id = e.event_id AND c.rank = 0 "
+            " WHERE e.cluster_id IS NOT NULL ORDER BY e.event_start_ts"
+        ).fetchall()
+        with contextlib.ExitStack() as stack:
+            if client is None:
+                client = stack.enter_context(
+                    FrigateClient(settings.frigate.base_url, timeout=cfg.http_timeout_s)
+                )
+            for n, r in enumerate(rows, 1):
+                if n % 100 == 0:
+                    logger.info("face_enrich regate: %d / %d", n, len(rows))
+                if r["ts"] is None or not r["bbox"]:
+                    out["no_box"] += 1
+                    continue
+                jpeg, _status = client.recording_snapshot(
+                    str(r["camera"]), float(r["ts"]), timeout=cfg.http_timeout_s
+                )
+                if jpeg is None:
+                    out["missing"] += 1
+                    continue
+                out["checked"] += 1
+                box = json.loads(r["bbox"])
+                match = max(detector.detect_in_jpeg(jpeg), key=lambda d: _iou(d[0], box),
+                            default=None)
+                score = float(match[1]) if match and _iou(match[0], box) >= 0.3 else 0.0
+                eid = str(r["event_id"])
+                if score >= cfg.min_det_score:
+                    out["kept"] += 1
+                    if not dry_run:
+                        conn.execute(
+                            "UPDATE face_crops SET det_score = ? WHERE event_id = ? AND rank = 0",
+                            (round(score, 3), eid),
+                        )
+                        conn.commit()
+                    continue
+                out["dropped"] += 1
+                if dry_run:
+                    continue
+                if r["sub_label_written"]:
+                    try:
+                        client.set_sub_label(eid, "")
+                    except FrigateAPIError:
+                        logger.info("face_enrich regate: sub_label clear failed for %s", eid)
+                drop_crops(conn, Path(cfg.crops_dir), [eid])
+                conn.execute(
+                    "UPDATE face_enrichments SET cluster_id = NULL, embedding = NULL, "
+                    "       sub_label_written = NULL, status = 'no_faces', detail = ? "
+                    " WHERE event_id = ?",
+                    (f"regate: det {score:.2f}", eid),
+                )
+                touched.add(int(r["cluster_id"]))
+                conn.commit()
+        for cid in sorted(touched):
+            remaining = conn.execute(
+                "SELECT COUNT(*) AS n FROM face_enrichments WHERE cluster_id = ?", (cid,)
+            ).fetchone()
+            if int(remaining["n"]) == 0:
+                conn.execute("DELETE FROM face_clusters WHERE cluster_id = ?", (cid,))
+                out["clusters_deleted"] += 1
+            else:
+                rebuild_centroid(conn, cid)
+                out["clusters_rebuilt"] += 1
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info("face_enrich regate: %s", out)
+    return out

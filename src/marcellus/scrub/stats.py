@@ -1,0 +1,102 @@
+"""Per-cycle cost counters for the scrub generator.
+
+Held on `SourceProfile` and reset at the start of each `generate_cycle`, so the
+cycle's summary line can say where the time and CPU went (ffmpeg spawns, Pillow
+decodes/encodes, wall time per pass) without anyone having to attach a profiler
+to the prod box. Pure bookkeeping: plain int/float `+=`, which is safe from the
+`asyncio.to_thread` workers that do the Pillow work (the GIL covers it, and an
+occasional lost update on a diagnostic counter is not worth a lock).
+"""
+
+from __future__ import annotations
+
+import resource
+from dataclasses import dataclass, field
+
+
+def _cpu_s(who: int) -> float:
+    r = resource.getrusage(who)
+    return r.ru_utime + r.ru_stime
+
+
+@dataclass
+class CycleStats:
+    # Wall seconds per pass (live edge, backfill, decimation/derived/retire).
+    pass1_s: float = 0.0
+    pass2_s: float = 0.0
+    pass3_s: float = 0.0
+    # Pass 3 split: aged-tier decimation vs derived-tier work (summed over cameras).
+    pass3_aged_s: float = 0.0
+    pass3_derived_s: float = 0.0
+    # ffmpeg extraction subprocesses (one per segment decoded) and their summed
+    # wall time. Failed and timed-out spawns count: they cost CPU all the same.
+    ffmpeg_spawns: int = 0
+    ffmpeg_s: float = 0.0
+    # Wall time during which at least one extraction was running. `ffmpeg_s` is
+    # the *sum* of per-child wall, so ffmpeg_s / ffmpeg_wall_s is the parallelism
+    # actually achieved (1.0 = fully serial).
+    ffmpeg_wall_s: float = 0.0
+    # Segments retried in software after a hardware-accelerated decode failed.
+    ffmpeg_hw_fallbacks: int = 0
+    _active: int = 0
+    _active_since: float = 0.0
+    segments_decoded: int = 0
+    # ffprobe helper calls (GOP / aspect probes); each may spawn more than one
+    # process, so this counts calls, not processes.
+    ffprobe_calls: int = 0
+    # Pillow image decodes (cell JPEGs composed into a sheet, source sheets
+    # opened for decimation) and encodes (published sheets, decimated cell crops).
+    pil_decodes: int = 0
+    pil_sheet_encodes: int = 0
+    pil_cell_encodes: int = 0
+    # Sidecar-DB commits the generator issued this cycle and their summed wall
+    # time (every fsync is a stall for the event loop that runs them).
+    db_commits: int = 0
+    db_commit_s: float = 0.0
+    # Cells accepted by derived-tier writers fed from the live edge (Pass 1)
+    # rather than built by Pass 3 decimation.
+    derived_live_cells: int = 0
+    # CPU (user+sys) baselines taken at cycle start. Wall time above is not CPU
+    # time, and CPU-hours are what the box shares with Frigate. Children are
+    # reaped subprocesses -- the generator's ffmpeg/ffprobe, plus anything else
+    # this process spawned that cycle (rare). Self is the whole process,
+    # including request serving, so treat it as an upper bound for Pillow work.
+    _children0: float = field(default_factory=lambda: _cpu_s(resource.RUSAGE_CHILDREN))
+    _self0: float = field(default_factory=lambda: _cpu_s(resource.RUSAGE_SELF))
+
+    def extraction_started(self, now: float) -> None:
+        if self._active == 0:
+            self._active_since = now
+        self._active += 1
+
+    def extraction_finished(self, now: float) -> None:
+        self._active -= 1
+        if self._active == 0:
+            self.ffmpeg_wall_s += now - self._active_since
+
+    @property
+    def child_cpu_s(self) -> float:
+        return _cpu_s(resource.RUSAGE_CHILDREN) - self._children0
+
+    @property
+    def self_cpu_s(self) -> float:
+        return _cpu_s(resource.RUSAGE_SELF) - self._self0
+
+    @property
+    def ms_per_segment(self) -> float:
+        return self.ffmpeg_s * 1000.0 / self.segments_decoded if self.segments_decoded else 0.0
+
+    def summary(self) -> str:
+        return (
+            f"pass1={self.pass1_s:.2f}s pass2={self.pass2_s:.2f}s pass3={self.pass3_s:.2f}s "
+            f"pass3_aged={self.pass3_aged_s:.2f}s pass3_derived={self.pass3_derived_s:.2f}s "
+            f"ffmpeg_spawns={self.ffmpeg_spawns} ffmpeg_s={self.ffmpeg_s:.2f} "
+            f"ffmpeg_wall_s={self.ffmpeg_wall_s:.2f} "
+            f"ffmpeg_hw_fallbacks={self.ffmpeg_hw_fallbacks} "
+            f"segments_decoded={self.segments_decoded} ms_per_segment={self.ms_per_segment:.0f} "
+            f"ffprobe_calls={self.ffprobe_calls} pil_decodes={self.pil_decodes} "
+            f"pil_sheet_encodes={self.pil_sheet_encodes} pil_cell_encodes={self.pil_cell_encodes} "
+            f"db_commits={self.db_commits} db_commit_s={self.db_commit_s:.2f} "
+            f"derived_live_cells={self.derived_live_cells} "
+            f"child_cpu_s={self.child_cpu_s:.2f} self_cpu_s={self.self_cpu_s:.2f}"
+        )

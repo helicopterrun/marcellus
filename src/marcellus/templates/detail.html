@@ -28,8 +28,8 @@
   </div>
 
   <div class="detail-grid">
-    {% set snapshot_url = (frigate_base ~ '/api/events/' ~ event.id ~ '/snapshot.jpg') if event.has_snapshot else '' %}
-    {% set clip_url = (frigate_base ~ '/api/events/' ~ event.id ~ '/clip.mp4') if event.has_clip else '' %}
+    {% set snapshot_url = ('/api/events/' ~ event.id ~ '/snapshot.jpg') if event.has_snapshot else '' %}
+    {% set clip_url = ('/api/events/' ~ event.id ~ '/clip.mp4') if event.has_clip else '' %}
 
     {% if snapshot_url or clip_url %}
     <div class="detail-media">
@@ -157,7 +157,7 @@
         <div class="hotkey-list">
           {% if snapshot_url %}<a href="{{ snapshot_url }}" target="_blank">snapshot.jpg</a>{% endif %}
           {% if clip_url %}<a href="{{ clip_url }}" target="_blank">clip.mp4</a>{% endif %}
-          <a href="{{ frigate_base }}/api/events/{{ event.id }}" target="_blank">api/events/{{ event.id }}</a>
+          <a href="/api/events/{{ event.id }}" target="_blank">api/events/{{ event.id }}</a>
         </div>
       </div>
     </div>

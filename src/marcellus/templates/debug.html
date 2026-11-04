@@ -1,9 +1,10 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% set active_page = 'debug' %}
 {% block title %}debug — Marcellus{% endblock %}
-{% block page_heading %}<h1 class="sr-only">Debug</h1>{% endblock %}
 {% block body %}
 <main id="main-content">
+  {{ page_head("Debug") }}
   <div class="stat-row">
     <div class="stat-card">
       <div class="stat-label">Marcellus version</div>

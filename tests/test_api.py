@@ -290,7 +290,7 @@ def test_motion_blank_form(client: TestClient) -> None:
     # Header nav renders both pages and motion is the active link.
     assert 'class="page-link active"' in r.text
     assert "Motion" in r.text
-    assert "Triage" in r.text
+    assert "Inbox" in r.text
 
 
 def test_motion_error_on_unreachable_frigate(client: TestClient) -> None:
@@ -448,8 +448,13 @@ def test_nav_appears_on_all_pages(client: TestClient) -> None:
         r = client.get(path)
         expected = 503 if path == "/fps-budget" else 200
         assert r.status_code == expected, path
-        for label in ("Triage", "Motion", "Scores", "FPS budget"):
+        # The five tuning pages sit behind Tools > Tuning now; they are
+        # tabs on each other (_tuning_tabs.html), not header links.
+        for label in ("Inbox", "Encounters", "Tools", "Tuning"):
             assert label in r.text, f"{label} missing on {path}"
+        if path != "/":
+            for label in ("Overview", "Motion", "Scores", "FPS budget"):
+                assert label in r.text, f"tab {label} missing on {path}"
 
 
 # ----- Analysis HTTP routes -----

@@ -1,11 +1,11 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% set active_page = 'cameras' %}
 {% block title %}Cameras · Marcellus{% endblock %}
 
-{% block page_heading %}<h1 class="sr-only">Cameras</h1>{% endblock %}
 {% block body %}
 <main id="main-content">
-  <h2 class="section-h">Cameras <span class="help">— tap a camera for its live stream</span></h2>
+  {{ page_head("Cameras", "Tap a camera for its live stream") }}
   {% if cameras %}
   <div class="snap-grid">
     {% for cam in cameras %}

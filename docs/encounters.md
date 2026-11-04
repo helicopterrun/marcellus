@@ -53,6 +53,10 @@ encounters:
   min_copresence_s: 3.0          # companionship needs this much time overlap
   adjacency: []                  # extra edges, e.g. [["alley-wide","shed"]]
   not_adjacent: []               # edges to remove even if zones are shared
+  overlap: []                    # pairs that share a view (config wins)
+  not_overlap: []                # pairs that never do (beats overlap)
+  overlap_concurrent_max_s: 1.0  # gap <= this (or any overlap in time) = seen together
+  overlap_min_fraction: 0.65     # learned overlap when concurrent/total >= this
   retention_days: 30             # sealed encounters older than this are pruned hourly
 ```
 All fields must be mentioned in the guide topic (see test_guide.py rules).
@@ -531,3 +535,39 @@ camera x shared label family, it predicts a window (`predict_window`),
 looks for a real candidate member in `encounter_members`, and falls back to
 a `observation_id: null` prediction candidate carrying just the window when
 none exists. Same auth as the rest of `/v1/observations`.
+
+## Camera topology: shared views (overlap)
+
+Cameras that see the same place produce "transitions" of ~0 s that are not
+walks. `transitions.py` factors the eligibility walk into `_eligible_pairs`
+(yielding the raw, unclamped gap) and adds:
+
+* `count_concurrency(members, adjacency, cfg, *, split_atoms)` -> per
+  undirected pair `(concurrent, total)`; each eligible (m1, m2) counts once
+  (not per family); concurrent = raw gap <= `overlap_concurrent_max_s`
+  (negative gaps of any size included); total = concurrent + samples with
+  `concurrent_max < gap <= transition_max_sample_s`.
+* `overlap_verdict(pair, counts, cfg)` -> `OverlapStats(overlap, source,
+  concurrent, samples)`: config `not_overlap` -> False/'config'; config
+  `overlap` -> True/'config'; `total >= transition_min_samples` ->
+  `concurrent/total >= overlap_min_fraction`, 'learned'; else False/'default'.
+* `learn` computes verdicts first; for an overlapping pair both directions'
+  walking-time samples exclude raw gap <= `overlap_concurrent_max_s`
+  (non-overlap pairs keep sub-second hand-offs). Verdicts are written in the
+  same transaction to `camera_overlap`.
+
+```sql
+CREATE TABLE IF NOT EXISTS camera_overlap (
+    cam_a TEXT NOT NULL, cam_b TEXT NOT NULL,   -- cam_a < cam_b
+    concurrent INTEGER NOT NULL DEFAULT 0, samples INTEGER NOT NULL DEFAULT 0,
+    overlap INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'default',
+    updated_at REAL NOT NULL, PRIMARY KEY (cam_a, cam_b)
+);
+```
+
+Wire: each `/v1/topology` edge gains `overlap`, `overlap_source`,
+`overlap_stats: {concurrent, samples}`; each `/v1/cameras/{camera}/
+neighbours` entry gains `overlap`, `overlap_source`. At read time config
+wins (`not_overlap`, then `overlap`), else the stored row, else
+False/'default' with zero stats -- a config edit applies before the next
+hourly learn.

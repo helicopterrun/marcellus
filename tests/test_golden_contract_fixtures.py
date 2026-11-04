@@ -34,6 +34,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from marcellus.config import (
+    FaceEnrichSection,
     FrigateSection,
     PushSection,
     ScrubSection,
@@ -81,7 +82,29 @@ def _isolated_globals() -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-def _make_client(tmp: Path) -> TestClient:
+class _FakeSources:
+    """Stands in for ExternalSourceService so the capabilities golden carries
+    a populated, enabled `external_sources` block (the test client does not
+    run the lifespan, so no real service would start)."""
+
+    def capabilities(self) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "sources": [
+                {
+                    "id": "bernardo",
+                    "kind": "bernardo",
+                    "name": "Wildlife camera",
+                    "enabled": True,
+                    "healthy": True,
+                    "subjects": ["animal", "person", "vehicle", "none", "unknown"],
+                    "media": ["poster", "stills", "clip", "audio"],
+                }
+            ],
+        }
+
+
+def _make_client(tmp: Path, *, with_sources: bool = False) -> TestClient:
     """A fresh app over a canned Frigate config + empty DBs, fully inside
     `tmp` so two consecutive builds share nothing."""
     frigate_db = tmp / "frigate.db"
@@ -126,8 +149,20 @@ def _make_client(tmp: Path) -> TestClient:
             enabled=False,
             push_settings_path=str(tmp / "push_settings.json"),
         ),
+        # On, so the capabilities golden carries a populated `people` block.
+        face_enrich=FaceEnrichSection(enabled=True),
     )
-    return TestClient(create_app(settings))
+    if with_sources:
+        from marcellus.config import BernardoSourceConfig, ExternalSourcesSection
+
+        settings.external_sources = ExternalSourcesSection(
+            enabled=True,
+            sources=[BernardoSourceConfig(id="bernardo", base_url="http://bernardo.invalid:8000")],
+        )
+    app = create_app(settings)
+    if with_sources:
+        app.state.external_sources = _FakeSources()
+    return TestClient(app)
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +198,7 @@ def _content_state_full() -> dict[str, Any]:
 
 def _content_state_minimal() -> dict[str, Any]:
     return live_activities.build_content_state(
-        level="notify",
+        level="quiet",
         mutation=CREATE,
         glyph="figure.walk",
         primary="Person at the doorbell",
@@ -249,17 +284,20 @@ def _build_la_end() -> dict[str, Any]:
 
 
 def _canonical_put_body() -> dict[str, Any]:
-    """The canonical PUT document: the full 7-subject one-alerts-stack shape
-    with a handful of non-default cells so derivation is visible."""
+    """The canonical PUT document (ladder v3): the full 7-subject `ladder`
+    with a handful of non-default cells -- one of each level -- so the derived
+    legacy `outcomes`/`routing_table_v2` views are visible, plus a Quiet zone
+    override and `hold_urgent` quiet hours."""
     doc = policy_settings.default_settings()
     doc["zone_classes"]["front_door"] = "doors"
     doc["zone_classes"]["garage"] = "off_limits"
-    doc["zone_overrides"] = {"sidewalk": {"person": "notify"}}
-    doc["outcomes"]["package"]["doors"] = "notify"
-    doc["outcomes"]["opening"]["yard"] = "off"
-    doc["outcomes"]["thing"]["yard"] = "alarm"
+    doc["zone_overrides"] = {"sidewalk": {"person": "silent"}}
+    doc["ladder"]["package"]["doors"] = "silent"
+    doc["ladder"]["opening"]["yard"] = "ignore"
+    doc["ladder"]["thing"]["yard"] = "urgent"
+    doc["quiet_hours"] = {"start": "22:00", "end": "07:00", "mode": "hold_urgent"}
     doc["camera_neighbors"] = {"doorbell": ["street"]}
-    return doc
+    return policy_settings.normalize_settings(doc)
 
 
 def _build_push_settings_put() -> dict[str, Any]:
@@ -278,6 +316,7 @@ def _build_push_settings_get() -> dict[str, Any]:
 
 
 SECOND_EVENT_ID = "1755550002.654321-def456"
+THIRD_EVENT_ID = "1755550003.111111-ghi789"
 
 
 def _build_push_decisions() -> dict[str, Any]:
@@ -289,6 +328,8 @@ def _build_push_decisions() -> dict[str, Any]:
         conn = db_mod.open_sidecar(tmp / "marcellus.db")
         try:
             decision_trace.reset_for_tests(conn)
+            # Ladder v3 levels: a Quiet (`silent`) card -- passive, no sound,
+            # no Live Activity -- and a suppressed Ignore cell (`off`).
             decision_trace.append(
                 conn,
                 camera=CAMERA,
@@ -296,25 +337,24 @@ def _build_push_decisions() -> dict[str, Any]:
                 subject="package",
                 zones=["front_door"],
                 place="doors",
-                level="notify",
-                reasons=["outcomes[package][doors]=notify"],
+                level="silent",
+                reasons=["routing_table"],
                 event_id=EVENT_ID,
                 stage="table",
                 modifiers=("nudge_up",),
                 card_key=CARD_KEY,
                 mutation="create",
                 zone="front_door",
-                sound=True,
+                sound=False,
                 sent=1,
             )
             decision_trace.annotate(
                 conn,
                 EVENT_ID,
-                family=live_activities.PACKAGE,
-                la_started=True,
-                la_reason="family=package",
+                la_started=False,
+                la_reason="cell_below_glance",
                 sent=1,
-                sound=True,
+                sound=False,
             )
             decision_trace.append(
                 conn,
@@ -323,23 +363,43 @@ def _build_push_decisions() -> dict[str, Any]:
                 subject="vehicle",
                 zones=["nw_49th_st"],
                 place="street",
-                level="log",
-                reasons=["outcomes[vehicle][street]=log"],
+                level="off",
+                reasons=["routing_table", "suppressed"],
                 event_id=SECOND_EVENT_ID,
+                stage="off_cell",
+                modifiers=(),
+                card_key="street:vehicle:1755550002.654321-def456",
+                mutation="suppressed",
+                zone="nw_49th_st",
+                sound=False,
+                sent=0,
+            )
+            # A Glance (`quiet`) person story: the person family's Live
+            # Activity, no card push.
+            decision_trace.append(
+                conn,
+                camera=CAMERA,
+                label="person",
+                subject="person",
+                zones=["front_door"],
+                place="doors",
+                level="quiet",
+                reasons=["routing_table"],
+                event_id=THIRD_EVENT_ID,
                 stage="table",
                 modifiers=(),
-                card_key="",
-                mutation="",
-                zone="",
+                card_key=f"{CAMERA}:person:{THIRD_EVENT_ID}",
+                mutation="create",
+                zone="front_door",
                 sound=False,
                 sent=0,
             )
             decision_trace.annotate(
                 conn,
-                SECOND_EVENT_ID,
-                family=live_activities.CATCH_ALL,
-                la_started=False,
-                la_reason="level=log",
+                THIRD_EVENT_ID,
+                family=live_activities.PERSON,
+                la_started=True,
+                la_reason="started",
             )
             # A silence on the first card's zone/subject, to exercise the
             # `silenced` field surfaced by `recent()` at read time.
@@ -354,7 +414,7 @@ def _build_push_decisions() -> dict[str, Any]:
                     "package",
                     "doors",
                     None,
-                    "quiet",
+                    "silent",
                 ),
             )
             conn.commit()
@@ -366,12 +426,12 @@ def _build_push_decisions() -> dict[str, Any]:
         body: dict[str, Any] = resp.json()
         # `append` stamps wall-clock `ts`; pin to fixed values for the golden
         # file (decisions are newest-first, so [0] is the second insert).
+        pinned_ts = {
+            SECOND_EVENT_ID: "2026-08-19T20:37:41Z",
+            THIRD_EVENT_ID: "2026-08-19T20:38:05Z",
+        }
         for entry in body["decisions"]:
-            entry["ts"] = (
-                "2026-08-19T20:37:41Z"
-                if entry["event_id"] == SECOND_EVENT_ID
-                else "2026-08-19T20:37:02Z"
-            )
+            entry["ts"] = pinned_ts.get(entry["event_id"], "2026-08-19T20:37:02Z")
         return body
 
 
@@ -391,8 +451,8 @@ def _build_push_status() -> dict[str, Any]:
                 subject="package",
                 zones=["front_door"],
                 place="doors",
-                level="notify",
-                reasons=["outcomes[package][doors]=notify"],
+                level="urgent",
+                reasons=["routing_table"],
                 event_id=EVENT_ID,
                 stage="table",
                 modifiers=(),
@@ -531,6 +591,36 @@ def _build_push_device_detail() -> dict[str, Any]:
         return resp.json()
 
 
+def _build_card_push_silent() -> dict[str, Any]:
+    """A Quiet (`silent`) card create (ladder v3 §5.1): passive, never a
+    sound, `card.silent` -- also exactly what a device that can't show a Live
+    Activity receives for a Glance story (§5.3)."""
+    card = Card(
+        card_key=CARD_KEY,
+        level="silent",
+        created_at=SENT_AT,
+        updated_at=SENT_AT,
+        state_since_at=SENT_AT,
+        peak_level="silent",
+    )
+    return build_card_payload(
+        card,
+        "create",
+        sound=False,
+        subject_kind="package",
+        place_class="doors",
+        label="package",
+        camera=CAMERA,
+        zone_name="front_door",
+        glyph="shippingbox.fill",
+        primary="Package at the front door",
+        secondary="Courier left a box on the porch",
+        event_ts=SENT_AT,
+        media=HANDLE,
+        deep_link=f"elsinore://camera/{CAMERA}",
+    )
+
+
 def _build_card_push_test() -> dict[str, Any]:
     """The round-trip test push payload (alerts-slice2 §D), `card_push.json`'s
     sibling -- `mutation: "test"` rather than a real card mutation."""
@@ -566,21 +656,24 @@ def _build_push_silence() -> dict[str, Any]:
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
+        # Start from the default ladder every build: `previous` reads the
+        # live policy, which the silence itself changes.
+        policy_settings.reset_for_tests()
         client = _make_client(tmp)
         conn = db_mod.open_sidecar(tmp / "marcellus.db")
         try:
-            # No `zone_name` -- this card routed through the outcomes table,
+            # No `zone_name` -- this card routed through the ladder table,
             # not a zone override, so the silence scope is `outcome_cell`
             # (the `zone` key absent entirely from the response).
             upsert_card(
                 conn,
                 Card(
                     card_key=CARD_KEY,
-                    level="notify",
+                    level="urgent",
                     created_at=SENT_AT - 60.0,
                     updated_at=SENT_AT,
                     state_since_at=SENT_AT - 60.0,
-                    peak_level="notify",
+                    peak_level="urgent",
                 ),
                 subject_kind="package",
                 place_class="doors",
@@ -599,7 +692,7 @@ def _build_push_silence() -> dict[str, Any]:
 
 def _build_capabilities() -> dict[str, Any]:
     with tempfile.TemporaryDirectory() as td:
-        client = _make_client(Path(td))
+        client = _make_client(Path(td), with_sources=True)
         resp = client.get("/v1/capabilities")
         assert resp.status_code == 200
         body: dict[str, Any] = resp.json()
@@ -658,6 +751,7 @@ def _v1_client(tmp: Path, *, frigate_db: Path, sidecar_db: Path | None = None) -
         ),
         scrub=ScrubSection(enabled=False, retention_days=4, cache_dir=tmp / "scrub"),
         push=PushSection(enabled=False, push_settings_path=str(tmp / "push_settings.json")),
+        face_enrich=FaceEnrichSection(enabled=True),
     )
     return TestClient(create_app(settings))
 
@@ -795,6 +889,28 @@ def _build_v1_encounters() -> dict[str, Any]:
                 "UPDATE encounters SET sealed_at = ? WHERE id IN ('enc_walk', 'enc_delivery')",
                 (SENT_AT - 600.0,),
             )
+            # Faces: a named regular on the walk (r1, r3) and an unnamed new
+            # person on the yard camera (r2), so `people` is populated.
+            from marcellus.faces import enrich as enrich_mod
+
+            for cid, name, vec in ((1, "Horatio", [1.0, 0.0]), (2, None, [0.0, 1.0])):
+                sconn.execute(
+                    "INSERT INTO face_clusters (cluster_id, name, centroid, observation_count, "
+                    "created_at, last_seen_at) VALUES (?, ?, ?, 1, '', ?)",
+                    (cid, name, enrich_mod.pack_embedding(vec), base),
+                )
+            faces = [
+                (f"{base}-r1", 1, base),
+                (f"{base + 60}-r3", 1, base + 60),
+                (f"{base - 86400.0}-old", 1, base - 86400.0),
+                (f"{base + 30}-r2", 2, base + 30),
+            ]
+            for eid, cid, ts in faces:
+                sconn.execute(
+                    "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+                    "status, processed_at) VALUES (?, 'street-cam', ?, ?, 'enriched', '')",
+                    (eid, ts, cid),
+                )
             sconn.commit()
         finally:
             sconn.close()
@@ -1096,6 +1212,148 @@ def _build_v1_push_map_track() -> dict[str, Any]:
         return body
 
 
+#: Real Bernardo `/api/events` rows (animal, person, empty) captured
+#: 2026-10-15 -- the external-sources goldens are built from these through
+#: the same adapter + builders the routes use.
+_BERNARDO_ROWS = (
+    Path(__file__).resolve().parent / "fixtures" / "external" / "bernardo" / "api_events_list.json"
+)
+
+
+def _bernardo_sightings() -> list[Any]:
+    from marcellus.config import BernardoSourceConfig
+    from marcellus.external.bernardo import BernardoSource
+
+    rows = json.loads(_BERNARDO_ROWS.read_text())
+    # A clock long past every row: settled regardless of classification.
+    source = BernardoSource(
+        BernardoSourceConfig(id="bernardo", base_url="http://bernardo.invalid:8000"),
+        clock=lambda: SENT_AT,
+    )
+    return [source.parse_row(r) for r in rows]
+
+
+def _build_v1_sightings() -> dict[str, Any]:
+    from marcellus.models.wire import SightingsResponse
+    from marcellus.routes.sources import sighting_summary
+
+    sightings = _bernardo_sightings()
+    body = {
+        "sightings": [sighting_summary(s, "Wildlife camera") for s in sightings],
+        "next_before": None,
+    }
+    out: dict[str, Any] = SightingsResponse.model_validate(body).model_dump(mode="json")
+    return out
+
+
+def _build_v1_sighting_detail() -> dict[str, Any]:
+    from marcellus.models.wire import SightingDetail
+    from marcellus.routes.sources import sighting_detail
+
+    animal = _bernardo_sightings()[0]
+    body = sighting_detail(animal, "Wildlife camera")
+    out: dict[str, Any] = SightingDetail.model_validate(body).model_dump(mode="json")
+    return out
+
+
+def _build_people_client(tmp: Path) -> TestClient:
+    """A `/v1/people` app over four canned clusters (fixed times, days counted in Los Angeles):
+    a named, followed, noted regular (3 days, one sighting excluded and so
+    invisible); an unnamed regular close to a fourth cluster; a single-day
+    unnamed `new`; and a near-duplicate of the second (the merge suggestion)."""
+    from marcellus import db as db_mod
+    from marcellus.faces import enrich
+
+    frigate_db = tmp / "frigate.db"
+    sqlite3.connect(frigate_db).close()
+    sidecar_db = tmp / "marcellus.db"
+    conn = db_mod.open_sidecar(sidecar_db)
+    try:
+        day = 86400.0
+        base = 1_785_900_000.0  # 2026-08-05 03:20 UTC; local days differ from UTC ones
+        vecs = {1: [1.0, 0.0], 2: [0.0, 1.0], 3: [-1.0, 0.0], 4: [0.05, 1.0]}
+        names = {1: "Horatio"}
+        for cid, vec in vecs.items():
+            conn.execute(
+                "INSERT INTO face_clusters (cluster_id, name, centroid, observation_count, "
+                "created_at, last_seen_at, followed_at, note) VALUES (?, ?, ?, 1, '', ?, ?, ?)",
+                (
+                    cid,
+                    names.get(cid),
+                    enrich.pack_embedding(vec),
+                    base,
+                    base - 3600.0 if cid == 1 else None,
+                    "the neighbour" if cid == 1 else None,
+                ),
+            )
+        # (event, cluster, camera, start, quality, excluded, has crop)
+        plan = [
+            ("e1a", 1, "gate-face", base, 0.9, False, True),
+            ("e1b", 1, "alley-wide", base + day, 0.7, False, True),
+            ("e1c", 1, "gate-face", base + 2 * day + 7200.0, 0.8, False, True),
+            ("e1x", 1, "gate-face", base + 3 * day, 0.5, True, True),
+            ("e2a", 2, "shed", base + 3600.0, 0.6, False, True),
+            ("e2b", 2, "shed", base + day + 3600.0, 0.5, False, False),
+            ("e3a", 3, "street", base + 7200.0, 0.4, False, False),
+            ("e4a", 4, "doorbell", base + 600.0, 0.3, False, True),
+        ]
+        for eid, cid, cam, start, q, excluded, crop in plan:
+            conn.execute(
+                "INSERT INTO face_enrichments (event_id, camera, event_start_ts, cluster_id, "
+                "distance, best_quality, best_frame_ts, status, processed_at, excluded_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'enriched', '', ?)",
+                (eid, cam, start, cid, 0.31, q, start + 4.5, "x" if excluded else None),
+            )
+            if crop:
+                conn.execute(
+                    "INSERT INTO face_crops (event_id, rank, quality, frame_ts, bbox, used, "
+                    "crop_path) VALUES (?, 0, ?, ?, '[0,0,1,1]', 1, ?)",
+                    (eid, q, start + 4.5, f"{eid}/0.jpg"),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+    return _v1_client(tmp, frigate_db=frigate_db, sidecar_db=sidecar_db)
+
+
+_PEOPLE_TZ = "America/Los_Angeles"
+
+
+def _get_people(path: str, **params: Any) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory() as td:
+        client = _build_people_client(Path(td))
+        with mock.patch("time.time", return_value=SENT_AT):
+            resp = client.get(path, params={"tz": _PEOPLE_TZ, **params})
+        assert resp.status_code == 200, resp.text
+        body: dict[str, Any] = resp.json()
+        return body
+
+
+def _build_v1_people() -> dict[str, Any]:
+    return _get_people("/v1/people")
+
+
+def _build_v1_person() -> dict[str, Any]:
+    return _get_people("/v1/people/1")
+
+
+def _build_v1_person_sightings() -> dict[str, Any]:
+    return _get_people("/v1/people/1/sightings")
+
+
+def _build_v1_people_merge_suggestions() -> dict[str, Any]:
+    return _get_people("/v1/people/merge-suggestions")
+
+
+def _build_v1_people_merge_suggestions_dismiss() -> dict[str, Any]:
+    with tempfile.TemporaryDirectory() as td:
+        client = _build_people_client(Path(td))
+        resp = client.post("/v1/people/merge-suggestions/dismiss", json={"ids": [4, 2]})
+        assert resp.status_code == 200, resp.text
+        body: dict[str, Any] = resp.json()
+        return body
+
+
 #: fixture filename -> zero-arg builder. MANIFEST.json is derived, not built.
 FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "la_content_state.json": _build_la_content_state,
@@ -1111,6 +1369,7 @@ FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "push_silence.json": _build_push_silence,
     "capabilities.json": _build_capabilities,
     "card_push.json": _build_card_push,
+    "card_push_silent.json": _build_card_push_silent,
     "card_push_test.json": _build_card_push_test,
     "push_receipts.json": _build_push_receipts,
     "push_device_detail.json": _build_push_device_detail,
@@ -1123,6 +1382,13 @@ FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "v1_events_related.json": _build_v1_events_related,
     "v1_push_map_live.json": _build_v1_push_map_live,
     "v1_push_map_track.json": _build_v1_push_map_track,
+    "v1_people.json": _build_v1_people,
+    "v1_person.json": _build_v1_person,
+    "v1_person_sightings.json": _build_v1_person_sightings,
+    "v1_people_merge_suggestions.json": _build_v1_people_merge_suggestions,
+    "v1_people_merge_suggestions_dismiss.json": _build_v1_people_merge_suggestions_dismiss,
+    "v1_sightings.json": _build_v1_sightings,
+    "v1_sighting_detail.json": _build_v1_sighting_detail,
 }
 
 MANIFEST_NAME = "MANIFEST.json"

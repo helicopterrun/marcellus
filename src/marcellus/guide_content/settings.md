@@ -14,13 +14,13 @@ the sidecar's own knobs in one place.
 - **Zones** (`/settings#zones`) — the zone routing policy that decides which
   zones matter for alerts, zone neighbor relationships, and export/import of
   the whole policy as JSON.
-- **Routing** (`/settings#routing`) — the outcomes matrix (subject × place →
-  Off/Log/Glance/Notify/Alarm), recognition relaxation for known people and
+- **Routing** (`/settings#routing`) — the ladder matrix (subject × place →
+  Ignore/Quiet/Glance/Urgent, places Public/Grounds/Entrances/Restricted), recognition relaxation for known people and
   vehicles, and per-zone overrides; edits here replace the old read-only
   attention-ladder table. "What the phone will say" underneath renders live
   example notifications from the current matrix.
 - **Notifications** (`/settings#notifications`) — quiet hours (start/end and
-  whether they cap at Glance or just mute sounds), the escalation sound,
+  whether they hold Urgent at Glance or just mute sounds), the escalation sound,
   Live Activity delivery mode, and which opening-class zones get Live
   Activity picks.
 - **Push devices** (`/settings#push`) — every registered phone, with per-

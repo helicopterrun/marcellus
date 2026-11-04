@@ -1,23 +1,24 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% set active_page = 'triage' %}
 {% set summary = events|length ~ ' matching event' ~ ('s' if events|length != 1 else '') %}
 {% block title %}Triage · Marcellus{% endblock %}
 
-{% block page_heading %}<h1 class="sr-only">Triage</h1>{% endblock %}
 {% block body %}
 <main id="main-content">
+  {{ page_head("All events") }}
   {% set untriaged = events | selectattr('triage_label', 'none') | list %}
   <div class="triage-intro">
-    <p class="page-intro">Label detections as <b>real</b> or a
-      <b>false alarm</b> — labels feed Frigate+ training and
-      <a href="/guide/tuning-scores">threshold tuning</a>.</p>
+    <p class="page-intro">Every event, for when you want a particular camera,
+      label or day. For the daily review, the <a href="/inbox">inbox</a> picks
+      the ones worth labeling and uploads them to Frigate+ for you.</p>
     <div class="triage-progress">
       <span class="badge tp">{{ counts.get('tp', 0) }} real</span>
       <span class="badge fp">{{ counts.get('fp', 0) }} false alarm</span>
       <span class="badge skip">{{ counts.get('skip', 0) }} skip</span>
       <span class="help">· {{ events|length }} matching, {{ untriaged|length }} untriaged</span>
       {% if untriaged %}
-      <a class="btn-primary triage-start"
+      <a class="btn btn-primary triage-start"
          href="/event/{{ untriaged[0].id }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
         Start review ({{ untriaged|length }}) &rarr;
         <small>Review one at a time</small></a>
@@ -73,8 +74,8 @@
     {# Carries the header search box's q= through a filter-form submit so
        changing camera/label/etc. doesn't silently drop an active search. #}
     <input type="hidden" name="q" value="{{ filters.q }}">
-    <button type="submit">apply</button>
-    <button type="button" class="secondary" onclick="window.location='/triage'">reset</button>
+    <button type="submit" class="btn">apply</button>
+    <button type="button" class="btn btn-neutral" onclick="window.location='/triage'">reset</button>
   </form>
   </details>
 
@@ -83,7 +84,7 @@
     {% for ev in events %}
     <a class="card" href="/event/{{ ev.id }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
       {% if ev.has_snapshot %}
-      <img class="thumb" src="{{ frigate_base }}/api/events/{{ ev.id }}/thumbnail.jpg" alt="" loading="lazy">
+      <img class="thumb" src="/api/events/{{ ev.id }}/thumbnail.jpg" alt="" loading="lazy">
       {% else %}
       <div class="thumb thumb-missing">no snapshot</div>
       {% endif %}

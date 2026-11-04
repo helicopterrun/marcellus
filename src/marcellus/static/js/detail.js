@@ -68,9 +68,11 @@ async function applyLabel(label) {
     setPlusStatus('error', 'Plus: ' + (plus.reason || 'submission failed'));
     return;
   }
-  if (plus.status === 'sent') {
-    // Brief flash before navigating away.
-    setPlusStatus('sent', 'Plus: sent (' + (plus.plus_id || '') + ')');
+  if (plus.status === 'queued') {
+    // The outbox sends it after the undo window; Undo below cancels it.
+    setPlusStatus('sent', 'Plus: queued, sends in ' + plus.send_in_s + 's');
+  } else if (plus.status === 'skipped' && plus.message) {
+    setPlusStatus('skipped', 'Plus: ' + plus.message);
   }
   if (!nextUrl) { window.location.reload(); return; }
 

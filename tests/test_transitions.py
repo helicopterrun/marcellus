@@ -67,9 +67,7 @@ def test_non_consecutive_rejected() -> None:
     """A third member on a THIRD camera between m1 and the shed member means
     the shed member is no longer m1's next-different-camera hop."""
     adj = Adjacency(
-        edges=frozenset(
-            {frozenset({"alley-wide", "shed"}), frozenset({"alley-wide", "porch"})}
-        )
+        edges=frozenset({frozenset({"alley-wide", "shed"}), frozenset({"alley-wide", "porch"})})
     )
     members = [
         _row("a1", "alley-wide", 0.0, 10.0),
@@ -348,3 +346,194 @@ def test_transition_config_from_settings() -> None:
     cfg = transition_config_from_settings(settings)
     assert cfg.min_samples == 5
     assert cfg.default["p50"] == 15.0
+
+
+# --------------------------------------------------------------------------
+# Overlap: count_concurrency / overlap_verdict / learn
+# --------------------------------------------------------------------------
+
+from marcellus.encounters.transitions import (  # noqa: E402
+    OverlapStats,
+    count_concurrency,
+    load_overlap,
+    overlap_verdict,
+)
+
+_TRIO = Adjacency(
+    edges=frozenset(
+        {
+            frozenset({"stairway-wide", "alley-wide"}),
+            frozenset({"stairway-wide", "stairway-tight"}),
+            frozenset({"shed", "stairway-wide"}),
+        }
+    )
+)
+_OCFG = TransitionConfig(
+    min_samples=8, max_sample_s=180.0, default={"p10": 2.0, "p50": 15.0, "p90": 60.0}
+)
+
+
+def _pair_members(
+    cam1: str, cam2: str, gaps: list[float], *, prefix: str, t0: float = 1000.0
+) -> list[MemberRow]:
+    out: list[MemberRow] = []
+    for i, gap in enumerate(gaps):
+        base = t0 + i * 1000
+        enc = f"{prefix}{i}"
+        out.append(_row(f"{enc}a", cam1, base, base + 30, encounter_id=enc))
+        out.append(_row(f"{enc}b", cam2, base + 30 + gap, base + 60 + gap, encounter_id=enc))
+    return out
+
+
+def test_trio_overlap_learned_true() -> None:
+    gaps = [-23.0, 0.0, 0.3, -2.0, 0.0, 0.0, -9.0, 0.5, 0.0, 0.2, 1.0, 12.0]
+    members = _pair_members("stairway-wide", "alley-wide", gaps, prefix="t")
+    counts = count_concurrency(members, _TRIO, _OCFG)
+    pair = frozenset({"stairway-wide", "alley-wide"})
+    assert counts[pair] == (11, 12)
+    v = overlap_verdict(pair, counts, _OCFG)
+    assert v == OverlapStats(True, "learned", 11, 12)
+
+
+def test_handoff_pair_not_overlap() -> None:
+    fwd = _pair_members("shed", "stairway-wide", [1.1 + 0.02 * i for i in range(38)], prefix="f")
+    back = _pair_members(
+        "stairway-wide", "shed", [0.3 + 0.06 * i for i in range(11)], prefix="r", t0=5e6
+    )
+    counts = count_concurrency(fwd + back, _TRIO, _OCFG)
+    pair = frozenset({"shed", "stairway-wide"})
+    c, n = counts[pair]
+    assert (c, n) == (11, 49)
+    v = overlap_verdict(pair, counts, _OCFG)
+    assert not v.overlap and v.source == "learned"
+
+
+def test_below_min_samples_is_default() -> None:
+    members = _pair_members("stairway-wide", "alley-wide", [0.0, 0.0, 0.0], prefix="d")
+    counts = count_concurrency(members, _TRIO, _OCFG)
+    v = overlap_verdict(frozenset({"stairway-wide", "alley-wide"}), counts, _OCFG)
+    assert v == OverlapStats(False, "default", 3, 3)
+
+
+def test_count_concurrency_counts_once_per_pair_not_family() -> None:
+    members = [
+        _row("a", "alley-wide", 0.0, 10.0, labels=("person", "car")),
+        _row("b", "shed", 10.0, 20.0, labels=("person", "car")),
+    ]
+    counts = count_concurrency(members, _ADJ, _CFG)
+    assert counts[frozenset({"alley-wide", "shed"})] == (1, 1)
+
+
+def test_collect_samples_unchanged_for_big_overlap_drop() -> None:
+    members = [
+        _row("a", "alley-wide", 0.0, 100.0),
+        _row("b", "shed", 10.0, 120.0),
+    ]
+    assert collect_samples(members, _ADJ, _CFG) == {}
+    assert count_concurrency(members, _ADJ, _CFG)[frozenset({"alley-wide", "shed"})] == (1, 1)
+
+
+def test_config_overrides_in_verdict() -> None:
+    pair = frozenset({"alley-wide", "shed"})
+    both = TransitionConfig(
+        min_samples=3,
+        max_sample_s=180.0,
+        default={},
+        overlap=frozenset({pair}),
+        not_overlap=frozenset({pair}),
+    )
+    assert overlap_verdict(pair, {pair: (0, 10)}, both) == OverlapStats(False, "config", 0, 10)
+    only = TransitionConfig(
+        min_samples=3, max_sample_s=180.0, default={}, overlap=frozenset({pair})
+    )
+    assert overlap_verdict(pair, {}, only) == OverlapStats(True, "config", 0, 0)
+
+
+def _seed_pairs(conn: object, gaps: list[float], now: float) -> None:
+    for i, gap in enumerate(gaps):
+        base = now - 5000 + i * 100
+        enc = _seed_atom(conn, f"oa{i}", "alley-wide", base, base + 10, now)
+        _seed_atom(
+            conn, f"ob{i}", "shed", base + 10 + gap, base + 20 + gap, now, encounter_id_hint=enc
+        )
+
+
+def test_learn_overlap_excludes_concurrent_from_walking_times(sidecar_db_path: Path) -> None:
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        _seed_pairs(conn, [0.0, 0.2, 0.5, 0.0, 0.1, 0.3, 2.0, 4.0, 0.0, 0.0], now)
+        cfg = TransitionConfig(
+            min_samples=3, max_sample_s=180.0, default={"p10": 2.0, "p50": 15.0, "p90": 60.0}
+        )
+        learn(conn, adjacency=_ADJ, cfg=cfg, window_s=86400.0, now=now)
+        ov = load_overlap(conn)[frozenset({"alley-wide", "shed"})]
+        assert ov == OverlapStats(True, "learned", 8, 10)
+        row = conn.execute(
+            "SELECT * FROM camera_transitions WHERE cam_a='alley-wide' AND cam_b='shed' "
+            "AND family='person'"
+        ).fetchone()
+        assert row["samples"] == 2  # only the 2.0 s and 4.0 s samples
+        assert row["source"] == "default"  # < min_samples after exclusion
+        assert row["p50_s"] == 15.0
+        stored = conn.execute("SELECT cam_a, cam_b, overlap FROM camera_overlap").fetchall()
+        assert [(r["cam_a"], r["cam_b"], r["overlap"]) for r in stored] == [
+            ("alley-wide", "shed", 1)
+        ]
+    finally:
+        conn.close()
+
+
+def test_learn_non_overlap_keeps_subsecond_sample(sidecar_db_path: Path) -> None:
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        _seed_pairs(conn, [0.5, 3.0, 4.0, 5.0, 6.0], now)
+        cfg = TransitionConfig(
+            min_samples=3, max_sample_s=180.0, default={"p10": 2.0, "p50": 15.0, "p90": 60.0}
+        )
+        learn(conn, adjacency=_ADJ, cfg=cfg, window_s=86400.0, now=now)
+        assert load_overlap(conn)[frozenset({"alley-wide", "shed"})].overlap is False
+        row = conn.execute(
+            "SELECT samples FROM camera_transitions WHERE cam_a='alley-wide' AND "
+            "cam_b='shed' AND family='person'"
+        ).fetchone()
+        assert row["samples"] == 5
+    finally:
+        conn.close()
+
+
+def test_learn_config_not_overlap_beats_overlap(sidecar_db_path: Path) -> None:
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        now = time.time()
+        _seed_pairs(conn, [0.0] * 6, now)
+        pair = frozenset({"alley-wide", "shed"})
+        cfg = TransitionConfig(
+            min_samples=3,
+            max_sample_s=180.0,
+            default={},
+            overlap=frozenset({pair}),
+            not_overlap=frozenset({pair}),
+        )
+        learn(conn, adjacency=_ADJ, cfg=cfg, window_s=86400.0, now=now)
+        assert load_overlap(conn)[pair] == OverlapStats(False, "config", 6, 6)
+    finally:
+        conn.close()
+
+
+def test_transition_config_carries_overlap_settings() -> None:
+    s = Settings(
+        frigate=FrigateSection(base_url="http://f.test:5000"),
+        encounters=EncountersSection(
+            overlap=[["a", "b"]],
+            not_overlap=[["c", "d"]],
+            overlap_concurrent_max_s=2.0,
+            overlap_min_fraction=0.5,
+        ),
+    )
+    cfg = transition_config_from_settings(s)
+    assert cfg.overlap == frozenset({frozenset({"a", "b"})})
+    assert cfg.not_overlap == frozenset({frozenset({"c", "d"})})
+    assert cfg.overlap_concurrent_max_s == 2.0
+    assert cfg.overlap_min_fraction == 0.5

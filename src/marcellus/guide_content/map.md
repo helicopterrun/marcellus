@@ -1,7 +1,7 @@
 ---
 title: Map & calibration
 section: daily-review
-order: 4
+order: 5
 routes: ["/map"]
 ---
 

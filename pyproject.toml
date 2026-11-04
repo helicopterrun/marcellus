@@ -41,6 +41,13 @@ enrich = [
     "opencv-python-headless>=4.10",
     "numpy>=1.26",
 ]
+wildlife = [
+    # wildlife.engine: MegaDetector v6 + SpeciesNet as ONNX on onnxruntime,
+    # CPU-only. No torch: both models are exported once, offline, by
+    # tools/wildlife_export_models.py.
+    "onnxruntime>=1.17",
+    "numpy>=1.26",
+]
 unifi_protect = [
     # push.unifi_protect: websocket client for the Protect Integration API's
     # ring-event subscription. Only needed when unifi_protect.enabled=true.

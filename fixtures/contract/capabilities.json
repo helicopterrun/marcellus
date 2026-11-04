@@ -8,6 +8,47 @@
     "loops": false,
     "tags": false
   },
+  "external_sources": {
+    "enabled": true,
+    "sources": [
+      {
+        "enabled": true,
+        "healthy": true,
+        "id": "bernardo",
+        "kind": "bernardo",
+        "media": [
+          "poster",
+          "stills",
+          "clip",
+          "audio"
+        ],
+        "name": "Wildlife camera",
+        "subjects": [
+          "animal",
+          "person",
+          "vehicle",
+          "none",
+          "unknown"
+        ]
+      }
+    ]
+  },
+  "people": {
+    "enabled": true,
+    "encounter_filter": true,
+    "filters": [
+      "all",
+      "named",
+      "regular",
+      "new",
+      "followed"
+    ],
+    "merge_suggestions": true,
+    "sorts": [
+      "recent",
+      "days"
+    ]
+  },
   "proxy": {
     "enabled": true
   },
@@ -22,10 +63,12 @@
       "opening"
     ],
     "enabled": false,
+    "ladder_version": 3,
     "transport": "mock"
   },
   "scrub_cache": {
     "cameras": [],
+    "cells": false,
     "enabled": false,
     "format": "jpeg",
     "generated": false,

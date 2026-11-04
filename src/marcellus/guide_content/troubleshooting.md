@@ -27,9 +27,9 @@ ones that flip the whole response to `degraded` + HTTP 503.
 | `frigate` | `ok` | Any HTTP answer through the proxy's own path and pool, 401 included -- the proxy origin is authenticated. | Nothing. |
 | `frigate` | `error` | Frigate answered 5xx. Informational only: `watchdog.py` restarts the *Frigate* container, so a Frigate outage must not restart the sidecar. | Check Frigate itself and the watchdog. |
 | `frigate` | `unreachable` | Connect or read failure to Frigate. Informational, same reason. | Check Frigate and the network path. |
-| `frigate` | `proxy_stalled` | **Degraded.** The 2s probe along the media proxy's own path/pool timed out or got no connection: the sidecar's own proxy is wedged and no proxied request can get through. The body carries `reason: proxy_stalled`; the probe result is cached 10s. | Restart the sidecar. |
-| `upstream_pool` / `api_pool` | stats | Connections/active/idle for the media and API pools. | Nothing. |
-| `upstream_pool` / `api_pool` | saturated | **Degraded.** At max connections with nothing idle; the next proxied stream would fail on a slow pool timeout rather than a fast 503. | If the media pool stays saturated for 30s straight the sidecar recycles its own stream client and logs a warning -- no restart needed. Otherwise look for a viewer storm. |
+| `frigate` | `proxy_stalled` | **Degraded.** The 2s probe along the media proxy's own path/pool timed out or got no connection: the sidecar's own proxy is wedged and no proxied request can get through. The body carries `reason: proxy_stalled`; the probe result is cached 10s. | The sidecar recycles its own stream pool after 30 s of saturation (checked every 10 s, no `/healthz` poll needed) and closes any upstream response left open past 11 minutes, logging `proxy: reaped leaked upstream path=…`. If it persists, restart the sidecar and send that log line. |
+| `upstream_pool` / `vod_pool` / `api_pool` | stats | Connections/active/idle for the proxy's pool, its recorded-playback (`/vod`) pool (listed once playback has used it), and the API pool. | Nothing. |
+| `upstream_pool` / `vod_pool` / `api_pool` | saturated | **Degraded.** At max connections with nothing idle; the next proxied stream would fail on a slow pool timeout rather than a fast 503. | If the proxy or `/vod` pool stays saturated for 30s straight the sidecar recycles that client and logs a warning -- no restart needed. Otherwise look for a viewer storm. |
 | `mqtt` | `connected` | The push subscriber is on the broker. | Nothing. |
 | `mqtt` | `disconnected` | **Degraded.** Push is not being delivered, whether this is startup, backoff, or a dead broker. | Check the broker and `push.mqtt` settings; the reconnect loop clears it fast on its own. |
 | `db` | `ok` | The sidecar DB opened and answered `SELECT 1`. | Nothing. |
@@ -43,6 +43,7 @@ ones that flip the whole response to `degraded` + HTTP 503.
 | `encounters` | `starting` | Enabled, but the service object isn't up yet. | Wait. |
 | `encounters` | `ok` | Reconciling; `encounters_last_reconcile` carries the last cycle's counts and age. | Nothing. |
 | `encounters` | `error` | **Degraded.** The last reconcile raised; the message is in the body. | Read the error, check the Frigate DB is readable, then restart. |
+| `recording` | `ok` / `stalled` | Informational only (never degrades the response). `stalled` lists `{camera, since}` for cameras whose newest recording segment is older than `recording_watch.stall_after_s`; `last_check_age_s` is the age of the last successful check. Absent when `recording_watch.enabled` is off. | See [Status](/guide/status) ("Cameras that stop recording"); check that camera's record stream in Frigate. |
 
 The body also carries `scrub_low_disk` when scrub is enabled -- free space
 on the cache filesystem is under `scrub.min_free_bytes`, so the generator
@@ -87,7 +88,7 @@ Four independent retention knobs, each pruning its own store:
 | `scrub.retention_days` | `4` | Scrub sprite sheets and buckets, oldest first. Capped by how long continuous recording actually lasts. | `fsc scrub prune` |
 | `face_capture.retention_days` | `30` | Stored full-res face captures, matched to Frigate's own alert retention. | `fsc face-capture prune` |
 | `encounters.retention_days` | `30` | Sealed encounters plus their members and decisions; unsealed encounters never expire. | `fsc encounters prune` |
-| `face_enrich.cluster_ttl_days` | `60` | Unnamed clusters and their embeddings. Named clusters never expire. | (worker only) |
+| `face_enrich.cluster_ttl_days` | `60` | Unnamed clusters and their embeddings. Named, followed and noted clusters never expire. | (worker only) |
 
 `scrub.min_free_bytes` (default 2 GiB) is the floor below which the scrub
 generator skips a cycle rather than grinding out the same ENOSPC failure

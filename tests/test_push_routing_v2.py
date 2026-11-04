@@ -17,7 +17,7 @@ import pytest
 
 from marcellus import db
 from marcellus.config import PushSection
-from marcellus.push import card_store, ladder_policy, policy_settings
+from marcellus.push import card_store, policy_settings
 from marcellus.push.delivery_wire import (
     classify_subject,
     handle_delivery_event,
@@ -98,7 +98,7 @@ async def test_create_card_uses_person_not_known_when_sub_label_present(sidecar_
 
 
 @pytest.mark.asyncio
-async def test_recognition_deescalates_notify_to_quiet(sidecar_db_path: Path):
+async def test_recognition_deescalates_quiet_to_silent(sidecar_db_path: Path):
     conn = db.open_sidecar(sidecar_db_path)
     transport = LogTransport()
     config = PushSection(delivery_enabled=True)
@@ -107,14 +107,14 @@ async def test_recognition_deescalates_notify_to_quiet(sidecar_db_path: Path):
     settings["recognition"] = {"known_person": "relax_one", "known_vehicle": "relax_one"}
     policy_settings.apply_settings(settings)
 
-    # Create a person card at notify (person + doors)
+    # Create a person card at quiet/Glance (person + doors)
     await handle_delivery_event(
         _event("doorbell", "trk1", "person", zones=("front_door",)),
         conn=conn, devices=[_device()], transport=transport, config=config, now=0.0,
     )
     card = card_store.get_card(conn, "doorbell:person:trk1")
     assert card is not None
-    assert card.level == "notify"
+    assert card.level == "quiet"
 
     transport.sent.clear()
 
@@ -126,7 +126,7 @@ async def test_recognition_deescalates_notify_to_quiet(sidecar_db_path: Path):
     )
     assert count == 1
     card = card_store.get_card(conn, "doorbell:person:trk1")
-    assert card.level == "quiet"
+    assert card.level == "silent"  # relax_one: quiet -> silent
 
     # Card push is silent (no sound, passive interruption)
     card_pushes = [s for s in transport.sent if s.get("type") == "card"]
@@ -190,7 +190,7 @@ async def test_recognition_no_sub_label_is_noop(sidecar_db_path: Path):
     )
     assert count == 0
     card = card_store.get_card(conn, "doorbell:person:trk1")
-    assert card.level == "notify"
+    assert card.level == "quiet"
 
 
 # ── 4. Off disables the modifier ──────────────────────────────────────
@@ -218,7 +218,7 @@ async def test_recognition_off_is_noop(sidecar_db_path: Path):
     )
     assert count == 0
     card = card_store.get_card(conn, "doorbell:person:trk1")
-    assert card.level == "notify"
+    assert card.level == "quiet"
 
 
 # ── 5. Migration derivation ──────────────────────────────────────────
@@ -253,7 +253,8 @@ def test_migrate_v1_to_v2_vehicle_gets_thing_bumped_at_doors():
          "private": "log", "off_limits": "quiet"},
     }
     v2, _recognition, _msg = policy_settings.migrate_v1_to_v2(v1)
-    levels = ladder_policy.LEVELS
+    # The migration works in the legacy (pre-v3) level vocabulary.
+    levels = policy_settings.LEGACY_LEVELS
     for place in ("doors", "off_limits"):
         thing_idx = levels.index(v1["thing"][place])
         vehicle_idx = levels.index(v2["vehicle"][place])
@@ -315,16 +316,16 @@ def _apply_v2_defaults():
     policy_settings.apply_settings(settings)
 
 
-def test_v2_table_person_at_doors_is_notify():
+def test_v2_table_person_at_doors_is_quiet():
     _apply_v2_defaults()
     level = evaluate_ladder(Snapshot(subject="person", place="doors"))
-    assert level == "notify"
+    assert level == "quiet"  # Glance
 
 
 def test_v2_table_vehicle_at_yard_is_quiet():
     _apply_v2_defaults()
     level = evaluate_ladder(Snapshot(subject="vehicle", place="yard"))
-    assert level == "quiet"
+    assert level == "silent"  # Balanced: Quiet (passive card), not Glance
 
 
 def test_v2_table_animal_at_off_limits_is_quiet():
@@ -336,12 +337,17 @@ def test_v2_table_animal_at_off_limits_is_quiet():
 def test_v2_table_thing_at_off_limits_is_quiet():
     _apply_v2_defaults()
     level = evaluate_ladder(Snapshot(subject="thing", place="off_limits"))
-    assert level == "quiet"
+    assert level == "silent"  # Balanced: Quiet
 
 
-def test_relaxed_level_relax_one_from_notify():
+def test_relaxed_level_relax_one_from_quiet():
     from marcellus.push.delivery_wire import _relaxed_level
-    assert _relaxed_level("notify", "relax_one") == "quiet"
+    assert _relaxed_level("quiet", "relax_one") == "silent"
+
+
+def test_relaxed_level_relax_one_from_silent():
+    from marcellus.push.delivery_wire import _relaxed_level
+    assert _relaxed_level("silent", "relax_one") == "log"
 
 
 def test_relaxed_level_relax_one_from_log_is_none():
@@ -356,4 +362,4 @@ def test_relaxed_level_relax_to_quiet_from_urgent():
 
 def test_relaxed_level_off_returns_none():
     from marcellus.push.delivery_wire import _relaxed_level
-    assert _relaxed_level("notify", "off") is None
+    assert _relaxed_level("quiet", "off") is None

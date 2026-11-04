@@ -42,18 +42,19 @@ def test_openings_family_matches_door_gate_garage():
 
 def test_person_family_follows_routing_not_place_class():
     # The routing table is the authority: a person whose card routes
-    # notify/urgent gets an LA wherever they are — the old doors gate meant
-    # entry zones classified Private could never start one (2026-08-14).
+    # Glance (quiet) or urgent gets an LA wherever they are -- the old doors
+    # gate meant entry zones classified Private could never start one
+    # (2026-08-14).
     for place in ("doors", "yard", "private", "street"):
         assert la.should_start_activity(
-            subject_kind="stranger", label="person", place_class=place, level="notify",
+            subject_kind="stranger", label="person", place_class=place, level="quiet",
         ) == la.PERSON
     assert la.should_start_activity(
         subject_kind="known", label="person", place_class="private", level="urgent",
     ) == la.PERSON
-    # Logged/quiet people don't mint activities.
+    # Logged and Quiet (silent) people don't mint activities.
     assert la.should_start_activity(
-        subject_kind="stranger", label="person", place_class="doors", level="quiet",
+        subject_kind="stranger", label="person", place_class="doors", level="silent",
     ) is None
     assert la.should_start_activity(
         subject_kind="stranger", label="person", place_class="yard", level="log",
@@ -259,13 +260,13 @@ def test_build_la_update_payload_shape():
 
 
 def test_build_la_end_payload_dismissal_is_timestamp_plus_thirty():
-    state = _content_state(mutation="resolve", thumbnail_handle=None)
+    state = _content_state(mutation="resolve", thumbnail_handle=None, level="quiet")
     payload = la.build_la_end_payload(content_state=state, now=1786235329)
     aps = payload["aps"]
     assert aps["event"] == "end"
     assert aps["timestamp"] == 1786235329
     assert aps["dismissal-date"] == 1786235359
-    assert aps["relevance-score"] == 0.75  # default level is "notify"
+    assert aps["relevance-score"] == 0.5  # Glance (quiet)
     assert "thumbnail_handle" not in aps["content-state"]
 
 

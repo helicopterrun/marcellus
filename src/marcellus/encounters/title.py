@@ -24,10 +24,10 @@ keep the first two, an ellipsis and the last.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass
 
-from marcellus.encounters.linker import LABEL_FAMILIES, normalise_labels
+from marcellus.encounters.linker import KNOWN_LABELS, LABEL_FAMILIES, normalise_labels
 from marcellus.encounters.visits import (
     MemberStop,
     humanise,
@@ -72,6 +72,9 @@ _FAMILY_RANK = {
 _LABEL_RANK: dict[str, int] = {
     label: _FAMILY_RANK[family] for family, labels in LABEL_FAMILIES.items() for label in labels
 }
+#: Source adapters (sightings) classify with the family words themselves.
+_LABEL_RANK.setdefault("animal", _RANK_ANIMAL)
+_LABEL_RANK.setdefault("vehicle", _RANK_VEHICLE)
 for _label in BIN_LABELS | OPENING_LABELS:
     _LABEL_RANK.setdefault(_label, _RANK_OTHER)
 
@@ -130,10 +133,14 @@ def _identity_words(
     return names, brands
 
 
-def who(labels: Iterable[str], identities: Iterable[str]) -> str:
+def who(
+    labels: Iterable[str],
+    identities: Iterable[str],
+    known_labels: Collection[str] = KNOWN_LABELS,
+) -> str:
     """"Chris and dog", "Person and dog", "Amazon and package", ... or
     "Activity" when nothing is recognisable. See the module docstring."""
-    base, qualifiers = normalise_labels(list(labels))
+    base, qualifiers = normalise_labels(list(labels), known_labels)
     own = frozenset(x.lower() for x in (*base, *qualifiers))
     names, brands = _identity_words([*identities, *qualifiers], own)
 

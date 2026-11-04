@@ -2,7 +2,7 @@
   "id": "card-notify-resolve",
   "camera": "doorbell",
   "label": "person",
-  "description": "Notify-level card lifecycle: person detected at a doors zone (stranger+doors=notify), enriched with the same data, then resolved via frigate/events end. Exercises create -> enrich (silent, passive) -> resolve chain.",
+  "description": "Card lifecycle for a person at a doors zone (Glance under the v3 default ladder; the id predates ladder v3), enriched with the same data, then resolved via frigate/events end. Exercises create -> enrich (passive) -> resolve chain.",
   "steps": [
     {"type": "new",    "severity": "alert", "delay_s": 0,  "topic": "frigate/reviews", "zones": ["front_door"]},
     {"type": "update", "severity": "alert", "delay_s": 5,  "topic": "frigate/reviews", "zones": ["front_door"]},

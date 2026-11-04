@@ -108,7 +108,7 @@ def upsert_device(
     app_version: str = "",
     cameras: list[str] | None = None,
     labels: list[str] | None = None,
-    min_severity: str = "alert",
+    min_severity: str = "detection",
     schema_version: int = 1,
     timezone_name: str = "",
     location: dict[str, float] | None = None,
@@ -460,6 +460,17 @@ def prune_old_sends(
 
 
 # -- Card-mutation sends / device stats (alerts-slice2 §A/§B) ---------------
+
+
+def has_delivered_card(conn: sqlite3.Connection, *, apns_token: str, card_key: str) -> bool:
+    """Whether this device was ever sent this story's card successfully, meaning
+    it has a Notification Center row a resolve could update."""
+    row = conn.execute(
+        "SELECT 1 FROM push_card_sends "
+        "WHERE apns_token = ? AND card_key = ? AND ok = 1 AND mutation != ? LIMIT 1",
+        (apns_token, card_key, "resolve"),
+    ).fetchone()
+    return row is not None
 
 
 def record_card_send(

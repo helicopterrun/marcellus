@@ -8,24 +8,29 @@
     person: "Person", vehicle: "Vehicle", animal: "Animal", thing: "Thing",
     package: "Package", bin: "Bin", opening: "Opening",
   };
-  var PLACES = ["street", "yard", "doors", "private", "off_limits"];
+  // Ladder v3: four places, four words. `ladder` values are
+  // ignore | silent | glance | urgent.
+  var PLACES = ["street", "yard", "doors", "off_limits"];
   var PLACE_LABELS = {
-    street: "Street", yard: "Yard", doors: "Doors", private: "Private", off_limits: "Off-limits",
+    street: "Public", yard: "Grounds", doors: "Entrances", off_limits: "Restricted",
   };
-  var OUTCOMES = ["off", "log", "glance", "notify", "alarm"];
-  var OUTCOME_LABELS = { off: "Off", log: "Log", glance: "Glance", notify: "Notify", alarm: "Alarm" };
+  var LEVELS = ["ignore", "silent", "glance", "urgent"];
+  var LEVEL_LABELS = { ignore: "Ignore", silent: "Quiet", glance: "Glance", urgent: "Urgent" };
+  // Rollout fallback: a server that has no `ladder` yet serves legacy
+  // `outcomes`; derive the ladder from them (ladder v3 §2.3).
+  var LEGACY_TO_LADDER = { off: "ignore", log: "ignore", notify: "silent", glance: "glance", alarm: "urgent" };
 
   var RECOGNITION_MODES = ["off", "relax_one", "relax_to_quiet"];
   var RECOGNITION_LABELS = { off: "Off", relax_one: "Relax one step", relax_to_quiet: "Relax to Glance" };
 
-  // Zone-override levels use the older log/quiet/notify/urgent vocabulary
-  // (policy_settings.LEVELS) but display the same outcome labels/colors.
-  var ZONE_LEVELS = ["log", "quiet", "notify", "urgent"];
-  var ZONE_LEVEL_LABELS = { log: "Log", quiet: "Glance", notify: "Notify", alarm: "Alarm", urgent: "Alarm" };
+  // Zone-override levels are engine levels: log | silent | quiet | urgent
+  // (quiet = Glance). Legacy `notify` reads as silent.
+  var ZONE_LEVELS = ["log", "silent", "quiet", "urgent"];
+  var ZONE_LEVEL_LABELS = { log: "Ignore", silent: "Quiet", quiet: "Glance", urgent: "Urgent", notify: "Quiet" };
   // Map a value in either vocabulary to the data-level token the CSS keys on.
   var TO_DATA_LEVEL = {
-    off: "off", log: "log", glance: "glance", notify: "notify", alarm: "alarm",
-    quiet: "glance", urgent: "alarm",
+    ignore: "ignore", silent: "silent", glance: "glance", urgent: "urgent",
+    log: "ignore", quiet: "glance", notify: "silent", off: "ignore", alarm: "urgent",
   };
 
   var el = SC.el;
@@ -37,6 +42,28 @@
 
   // ---- Routing: outcomes matrix ----
 
+  // Make sure doc.ladder exists (derive from legacy outcomes if the server
+  // predates v3). Louder wins when `private` merges into `yard`.
+  function ensureLadder(doc) {
+    if (doc.ladder && typeof doc.ladder === "object") return doc.ladder;
+    var ladder = {};
+    var outcomes = doc.outcomes || {};
+    Object.keys(outcomes).forEach(function (subject) {
+      var row = outcomes[subject] || {};
+      var cells = {};
+      Object.keys(row).forEach(function (place) {
+        var v = LEGACY_TO_LADDER[row[place]] || row[place];
+        var target = place === "private" ? "yard" : place;
+        var prev = cells[target];
+        if (prev && LEVELS.indexOf(prev) > LEVELS.indexOf(v)) v = prev;
+        cells[target] = v;
+      });
+      ladder[subject] = cells;
+    });
+    doc.ladder = ladder;
+    return ladder;
+  }
+
   function renderOutcomes(container, doc, markDirty) {
     container.textContent = "";
     var wrap = el("div", { class: "table-scroll" });
@@ -47,28 +74,29 @@
     thead.appendChild(headRow);
     table.appendChild(thead);
     var tbody = el("tbody", {});
-    if (!doc.outcomes) doc.outcomes = {};
+    var ladder = ensureLadder(doc);
     SUBJECTS_V3.forEach(function (subject) {
       var row = el("tr", {}, [el("td", { text: SUBJECT_LABELS[subject] })]);
       PLACES.forEach(function (place) {
         var td = el("td", {});
         var sel = el("select", {});
-        var current = (doc.outcomes[subject] || {})[place];
-        if (!current) {
-          var blank = el("option", { value: "", text: "—" });
+        var current = (ladder[subject] || {})[place];
+        if (!current || LEVELS.indexOf(current) === -1) {
+          // Blank, or an unknown value: show it raw rather than hide it.
+          var blank = el("option", { value: "", text: current || "—" });
           blank.selected = true;
           sel.appendChild(blank);
         }
-        OUTCOMES.forEach(function (o) {
-          var opt = el("option", { value: o, text: OUTCOME_LABELS[o] });
+        LEVELS.forEach(function (o) {
+          var opt = el("option", { value: o, text: LEVEL_LABELS[o] });
           if (o === current) opt.selected = true;
           sel.appendChild(opt);
         });
         setLevel(sel, current || "");
         sel.addEventListener("change", function () {
           if (!sel.value) return;
-          if (!doc.outcomes[subject]) doc.outcomes[subject] = {};
-          doc.outcomes[subject][place] = sel.value;
+          if (!ladder[subject]) ladder[subject] = {};
+          ladder[subject][place] = sel.value;
           setLevel(sel, sel.value);
           markDirty();
         });
@@ -137,6 +165,10 @@
           sel.appendChild(el("option", { value: lvl, text: ZONE_LEVEL_LABELS[lvl] }));
         });
         var current = ((doc.zone_overrides[zone] || {})[subject]) || "";
+        if (current === "notify") current = "silent";
+        if (current && ZONE_LEVELS.indexOf(current) === -1) {
+          sel.appendChild(el("option", { value: current, text: current }));
+        }
         sel.value = current;
         setLevel(sel, current);
         sel.addEventListener("change", function () {
@@ -176,9 +208,11 @@
     var endInput = el("input", { type: "time" });
     endInput.value = (qh && qh.end) || "07:00";
     var modeSel = el("select", {});
-    [["cap_quiet", "Cap at Glance"], ["mute_sounds", "Mute sounds"]].forEach(function (pair) {
+    [["hold_urgent", "Hold Urgent at Glance"], ["mute_sounds", "Mute sounds"]].forEach(function (pair) {
       var opt = el("option", { value: pair[0], text: pair[1] });
-      if (pair[0] === ((qh && qh.mode) || "cap_quiet")) opt.selected = true;
+      var curMode = (qh && qh.mode) || "hold_urgent";
+      if (curMode === "cap_quiet") curMode = "hold_urgent";
+      if (pair[0] === curMode) opt.selected = true;
       modeSel.appendChild(opt);
     });
     fieldsRow.appendChild(el("span", { class: "help", text: "start " }));

@@ -44,6 +44,8 @@ class ScrubCacheCapabilities(_Wire):
     cameras: list[str]
     generated: bool
     intervals: list[float]
+    #: `GET /v1/scrub/{camera}/sheet/{spec}/cell/{index}` is served. Additive.
+    cells: bool = False
 
 
 class ProxyCapabilities(_Wire):
@@ -54,6 +56,8 @@ class PushCapabilities(_Wire):
     enabled: bool
     transport: str
     attention_subjects: list[str]
+    #: Attention ladder version (v3: settings carry `ladder`). Additive.
+    ladder_version: int
 
 
 class DecisionsCapabilities(_Wire):
@@ -79,6 +83,35 @@ class EncountersCapabilities(_Wire):
     filters: list[str]
 
 
+class PeopleCapabilities(_Wire):
+    #: Mirrors `face_enrich.enabled`; `filters`/`sorts` are empty while disabled.
+    enabled: bool
+    filters: list[str]
+    sorts: list[str]
+    #: `GET /v1/people/merge-suggestions` and its `.../dismiss` exist (additive;
+    #: absent on older sidecars, false while `enabled` is false).
+    merge_suggestions: bool
+    #: `GET /v1/encounters` accepts `person=<id>` (additive; same gate).
+    encounter_filter: bool
+
+
+class ExternalSourceCapability(_Wire):
+    id: str
+    kind: str
+    name: str
+    enabled: bool
+    # A hint only (cached service state); `/healthz` is authoritative.
+    healthy: bool
+    subjects: list[str]
+    # Any of "poster", "stills", "clip", "audio".
+    media: list[str]
+
+
+class ExternalSourcesCapabilities(_Wire):
+    enabled: bool
+    sources: list[ExternalSourceCapability]
+
+
 class CapabilitiesResponse(_Wire):
     version: str
     scrub_cache: ScrubCacheCapabilities
@@ -88,6 +121,8 @@ class CapabilitiesResponse(_Wire):
     search: SearchCapabilities
     unifi_protect: UnifiProtectCapabilities
     encounters: EncountersCapabilities
+    people: PeopleCapabilities
+    external_sources: ExternalSourcesCapabilities
 
 
 # --------------------------------------------------------------------------
@@ -421,12 +456,20 @@ class TransitionStatsOut(_Wire):
     source: str
 
 
+class OverlapStatsOut(_Wire):
+    concurrent: int
+    samples: int
+
+
 class TopologyEdge(_Wire):
     a: str
     b: str
     zones: list[str]
     source: str
     transitions: dict[str, dict[str, TransitionStatsOut]]
+    overlap: bool
+    overlap_source: str
+    overlap_stats: OverlapStatsOut
 
 
 class TopologyResponse(_Wire):
@@ -438,6 +481,8 @@ class NeighbourCamera(_Wire):
     camera: str
     zones: list[str]
     transitions: dict[str, TransitionStatsOut]
+    overlap: bool
+    overlap_source: str
 
 
 class CameraNeighboursResponse(_Wire):
@@ -513,3 +558,171 @@ class ContinuationsResponse(_Wire):
 
     from_: ContinuationFrom = Field(alias="from")
     suggestions: list[ContinuationSuggestion]
+
+
+# --------------------------------------------------------------------------
+# /v1/sightings, /v1/sources/{id}/sightings/{key}  (external event sources,
+# guide_content's external-sources.md) -- plain `response_model=`.
+#
+# Every *_url is a Marcellus-relative path; upstream device URLs never
+# appear on the wire.
+# --------------------------------------------------------------------------
+
+
+class SightingSummary(_Wire):
+    id: str  # "<source_id>:<key>"
+    source: str
+    source_name: str
+    # "<who> · <source_name>", e.g. "Animal · Wildlife camera".
+    title: str
+    tag: str  # notable | background
+    has_audio: bool  # any stream has audio
+    key: str
+    start: float
+    end: float | None
+    status: str  # pending | complete | failed
+    final: bool
+    subject: str  # animal | person | vehicle | none | unknown
+    subject_conf: float | None
+    labels: list[str]
+    trigger: str
+    is_dark: bool | None
+    poster_url: str | None
+    clip_url: str | None
+    detail_url: str
+
+
+class SightingsResponse(_Wire):
+    sightings: list[SightingSummary]
+    # Pass as `before=` for the next (older) page; null = no more rows.
+    next_before: float | None
+
+
+class SightingStreamWire(_Wire):
+    name: str
+    role: str  # ir | color | unknown
+    stills: list[str]
+    clip_url: str | None
+    has_audio: bool
+
+
+class SightingBoxWire(_Wire):
+    label: str
+    conf: float
+    box: list[float]  # normalised [x0, y0, x1, y1]
+    still_url: str | None
+
+
+class SightingDetail(SightingSummary):
+    model: str | None
+    streams: list[SightingStreamWire]
+    boxes: list[SightingBoxWire]
+
+
+# --------------------------------------------------------------------------
+# /v1/people (handoff/sidecar-people-api.md): face clusters as "people".
+# --------------------------------------------------------------------------
+
+
+class Person(_Wire):
+    id: int
+    #: Generated label for the id ("Alder Wren"): not a name, never sent to Frigate.
+    handle: str
+    name: str | None
+    note: str | None
+    followed: bool
+    #: `named` | `regular` | `new`.
+    familiarity: str
+    sightings: int
+    #: Distinct local days (caller's `tz`) with a live sighting.
+    days: int
+    first_seen: float | None
+    last_seen: float | None
+    last_camera: str | None
+    avatar_path: str | None
+
+
+class PersonDetail(Person):
+    #: Sightings by local weekday (Monday first) x hour: 7 rows of 24.
+    rhythm: list[list[int]]
+
+
+class SimilarPerson(Person):
+    distance: float
+
+
+class PeopleResponse(_Wire):
+    t: float
+    total: int
+    people: list[Person]
+
+
+class SimilarPeopleResponse(_Wire):
+    t: float
+    people: list[SimilarPerson]
+
+
+class PersonSighting(_Wire):
+    event_id: str
+    camera: str
+    start: float
+    #: The moment of the best face (`best_frame_ts`); may be null.
+    face_time: float | None
+    distance: float | None
+    crop_paths: list[str]
+
+
+class PersonSightingsResponse(_Wire):
+    t: float
+    sightings: list[PersonSighting]
+
+
+class PersonSightingPatchResponse(_Wire):
+    #: Null when no live sightings remain.
+    person: Person | None
+
+
+class PeopleOkResponse(_Wire):
+    ok: bool
+
+
+class MergeSuggestion(_Wire):
+    #: Full Person wires (2+). Merge every member except `survivor` into it.
+    members: list[Person]
+    #: The member to keep: for a named match, the named one; else most sightings.
+    survivor: int
+    #: Two members were seen on one camera within minutes of each other.
+    same_visit: bool
+    #: Widest centroid cosine distance in the suggestion.
+    max_distance: float
+
+
+class MergeSuggestionsResponse(_Wire):
+    threshold: float
+    suggestions: list[MergeSuggestion]
+
+
+class MergeDismissResponse(_Wire):
+    ok: bool
+    #: Pairs recorded (all pairs among the ids, including already-known ones).
+    dismissed: int
+
+
+class EncounterWithPeople(EncounterSummary):
+    #: Live persons recognized on the encounter's member events (named first,
+    #: then most days, then id); [] when none or face_enrich is off.
+    people: list[Person]
+
+
+class EncountersPeopleResponse(_Wire):
+    t: float
+    encounters: list[EncounterWithPeople]
+
+
+class EncounterPeopleResponse(_Wire):
+    encounter: EncounterWithPeople
+    members: list[EncounterMember]
+
+
+class PersonForEventResponse(_Wire):
+    person: Person | None

@@ -95,7 +95,9 @@ class DeviceRegistration(BaseModel):
     app_version: str = ""
     cameras: list[str] = Field(default_factory=list)  # [] = all cameras
     labels: list[str] = Field(default_factory=list)  # [] = all labels
-    min_severity: Literal["alert", "detection"] = "alert"
+    # Ladder v3 §5.4: `detection` (was `alert`, which silently dropped every
+    # Glance for a client that omitted the field -- the 2026-09-22 app bug).
+    min_severity: Literal["alert", "detection"] = "detection"
 
     # -- v2 --
     schema_version: int = 1
@@ -415,10 +417,13 @@ async def test_push(
 
     from marcellus.push.cards import Card
     from marcellus.push.delivery import build_card_payload
+    from marcellus.push.ladder_policy import SYSTEM_CARD_LEVEL
 
     card_key = f"test:{apns_token[:8]}:{int(now)}"
+    # A system card (v3 §6): its own delivery outside the ladder -- an active
+    # push with sound, exactly as before ladder v3.
     card = Card(
-        card_key=card_key, level="notify", peak_level="notify",
+        card_key=card_key, level=SYSTEM_CARD_LEVEL, peak_level=SYSTEM_CARD_LEVEL,
         created_at=now, updated_at=now, state_since_at=now,
     )
     payload = build_card_payload(
@@ -938,15 +943,17 @@ async def get_push_status(request: Request) -> dict[str, Any]:
             subscriber.last_review_at, tz=_datetime.timezone.utc
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    def _query(conn: Any) -> tuple[dict[str, Any], int]:
-        return decision_trace.status(conn), len(store.list_devices(conn))
+    def _query(conn: Any) -> tuple[dict[str, Any], list[Any]]:
+        return decision_trace.status(conn), store.list_devices(conn)
 
     trace_status, devices = await db.with_sidecar(settings.sidecar.db_path, _query)
 
     policy = policy_settings.get_active()
-    local_now = _datetime.datetime.now()
-    now_minutes = local_now.hour * 60 + local_now.minute
-    quiet_hours_active, _qh_mode = policy_settings.is_quiet_hours(policy, now_minutes)
+    quiet_hours_active, _qh_mode = policy_settings.quiet_hours_at(
+        policy,
+        _datetime.datetime.now(_datetime.timezone.utc).timestamp(),
+        policy_settings.household_zone(devices),
+    )
 
     return {
         "now": _datetime.datetime.now(_datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -958,7 +965,7 @@ async def get_push_status(request: Request) -> dict[str, Any]:
         # No global timed-mute concept exists (spec is scoped to per-cell/
         # per-zone silence, `push_silences`) -- resolved as always null.
         "paused_until": None,
-        "devices": devices,
+        "devices": len(devices),
         # Alerts-slice2 §C: in-memory, process-lifetime relay health, updated
         # by `push/transport.py`'s `RelayTransport` on every relay response.
         "relay": RELAY_HEALTH.as_dict(),
@@ -991,4 +998,25 @@ async def post_feedback(request: Request) -> dict[str, Any]:
         body.get("event_id", ""),
         body["verdict"],
     )
+    # Kept for /inbox ("you tapped Not this: was the detection wrong?").
+    # Best-effort: the app fires and forgets, so a write failure is logged,
+    # never surfaced.
+    try:
+        conn = db.open_sidecar(request.app.state.settings.sidecar.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO push_feedback(card_key, event_id, verdict, received_at) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    str(body["card_key"])[:200],
+                    str(body.get("event_id") or "")[:100],
+                    str(body["verdict"])[:50],
+                    _datetime.datetime.now(_datetime.timezone.utc).timestamp(),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("push-feedback: could not store verdict")
     return {"ok": True}

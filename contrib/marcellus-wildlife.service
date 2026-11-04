@@ -1,0 +1,26 @@
+[Unit]
+Description=Marcellus — wildlife finder over motion-only segments (oneshot)
+Documentation=https://github.com/helicopterrun/marcellus
+After=network.target
+
+[Service]
+Type=oneshot
+# Same dedicated user as marcellus.service: this job shares that service's
+# SQLite DB and writes JPEGs into its data dir.
+User=marcellus
+WorkingDirectory=/opt/marcellus
+Environment="MARCELLUS_CONFIG=/opt/marcellus/config/sidecar.yml"
+ExecStart=/usr/bin/python3 -m marcellus wildlife scan
+# Background work on a 4-thread host shared with Frigate's decoders: yield to
+# everything. wildlife.threads caps onnxruntime at 2 threads; these make sure
+# those threads only get otherwise idle CPU and disk.
+Nice=19
+CPUWeight=10
+IOSchedulingClass=idle
+# The classifier holds ~0.5 GB while loaded. A hard cap keeps a model or
+# runtime bug from pushing Frigate into swap.
+MemoryMax=2G
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/marcellus

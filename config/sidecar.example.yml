@@ -120,7 +120,7 @@ face_enrich:
   min_quality: 0.15
   match_threshold: 0.45       # cosine distance to a NAMED cluster -> sub_label
   cluster_threshold: 0.55     # cosine distance to join an unnamed cluster
-  cluster_ttl_days: 60        # unnamed clusters expire; named ones never do
+  cluster_ttl_days: 60        # unnamed clusters expire; named, followed and noted ones never do
   model_dir: /opt/marcellus/data/models   # buffalo_l cache, ~300 MB
   max_events_per_cycle: 10
   max_attempts: 3
@@ -130,6 +130,19 @@ face_enrich:
 # ~60s in-process generator (server.py lifespan, §5.4a) in addition to
 # advertising the capability -- requires ffmpeg/ffprobe on PATH and a
 # frigate.recordings_path mount/host-path that resolves.
+# "Camera stopped recording" watcher. Frigate can keep detecting while a camera's
+# record stream delivers no video, and /api/stats still looks healthy; the age of
+# each camera's newest row in Frigate's `recordings` table does not lie (5-15 s
+# when healthy). One notification per incident across all cameras; cameras you
+# switch off in Frigate are not watched. Shown on the Status page and /healthz
+# (checks.recording, informational only).
+recording_watch:
+  enabled: true
+  notify: true                  # send the push card; false keeps healthz/Status only
+  interval_s: 30.0
+  stall_after_s: 300.0          # newest segment older than this = stalled
+  recover_within_s: 60.0        # newest segment fresher than this = recovered
+
 scrub:
   enabled: false
   cameras: []              # [] = all cameras; else an opt-in list
@@ -168,10 +181,15 @@ scrub:
   preserve_source_aspect: true
   sheet_cols: 12
   sheet_rows: 8
-  # "jpeg" | "webp". JPEG measured smaller than WebP on real camera content
-  # (604 KB vs 827 KB for a 96-cell sheet, §5.3 M4) -- WebP is opt-in only,
-  # and requires -lossless 0 explicitly or ffmpeg silently ships near-lossless
-  # (~1 MB) sheets.
+  # "jpeg" | "webp". JPEG wins at EQUAL SSIM -- not just at an equal quality
+  # setting, which is what §5.3 M4's 604 KB vs 827 KB actually compared.
+  # Re-measured 2026-10-19 through tiling.py on the ffmpeg-produced cells the
+  # tiler composes: jpeg q85 = 9.92 KB/cell at SSIM 0.9903, webp q85 = 7.75 at
+  # 0.9847. WebP is cheaper only by being worse. The cells are already JPEG at
+  # `-q:v 8`, so JPEG-on-JPEG re-encoding is efficient in a way WebP is not;
+  # measuring from pristine frames instead inverts the result. WebP stays
+  # opt-in, and requires -lossless 0 explicitly or ffmpeg silently ships
+  # near-lossless (~1 MB) sheets.
   format: jpeg               # validated at load; a typo is a startup error
   generate_interval_s: 60.0  # continuous edge -- NEVER hourly (§5.4)
   # Retention sweep, run by the same in-process loop. Pruning used to be
@@ -246,5 +264,34 @@ push:
   # How long a minted handle (opaque camera/event-id reference for the NSE's
   # handle-redemption fetch) stays valid.
   handle_ttl_s: 3600.0
+
+# External event sources (guide topic "External event sources"): non-Frigate
+# devices whose events Marcellus ingests, journals and serves. The first kind
+# is `bernardo`, a Raspberry Pi wildlife camera. MQTT (same broker as Frigate)
+# is the live trigger; HTTP polling is the record and safety net. Off by
+# default and independent of push. Broker settings left unset inherit
+# push.mqtt_*; mqtt_client_id must differ from push.mqtt_client_id.
+# external_sources:
+#   enabled: true
+#   # mqtt_enabled: true
+#   # mqtt_host: 192.168.1.10
+#   # mqtt_port: 1883
+#   # mqtt_username: bernardo-sources
+#   # mqtt_password: set via MARCELLUS_EXTERNAL_SOURCES__MQTT_PASSWORD
+#   # mqtt_client_id: marcellus-sources
+#   # poll_interval_s: 60.0
+#   # backfill_limit: 200
+#   # retention_days: 30      # device media may be gone sooner (~14 days)
+#   # state_stale_s: 180.0
+#   sources:
+#     - id: bernardo          # never rename once set
+#       base_url: "http://192.168.1.37:8000"
+#       # name: Wildlife camera
+#       # enabled: true
+#       # mqtt_base_topic: bernardo
+#       # poll_limit: 50
+#       # max_connections: 4
+#       # request_timeout_s: 10.0
+#       # settle_after_s: 900.0
 
 log_level: INFO

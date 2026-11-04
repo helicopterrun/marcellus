@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import threading
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -27,9 +28,52 @@ CREATE TABLE IF NOT EXISTS triage_labels (
     label      TEXT NOT NULL CHECK(label IN ('fp','tp','skip')),
     note       TEXT,
     labeled_at TEXT NOT NULL,
-    session    TEXT
+    session    TEXT,
+    -- Set when the verdict was "wrong label": label stays 'fp' (it IS a
+    -- false positive for the detected label, and Frigate+ takes it as one),
+    -- and this names what it really was, if the reviewer said.
+    correct_label TEXT,
+    -- Where the verdict came from: 'inbox' for /inbox, NULL for /triage.
+    source     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_triage_label ON triage_labels(label);
+
+-- Frigate+ uploads waiting out their undo window, in flight, or done
+-- (config `triage`). kind: tp (POST /api/events/{id}/plus with the box) |
+-- fp (PUT /api/events/{id}/false_positive) | frame (POST
+-- /api/{camera}/plus/{frame_ts}, a wildlife hit, `box_id` its row).
+-- status: queued -> sent | error, or cancelled by an undo. `not_before` is
+-- both the undo deadline and the retry backoff.
+CREATE TABLE IF NOT EXISTS plus_outbox (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,
+    event_id    TEXT,
+    box_id      INTEGER,
+    camera      TEXT NOT NULL,
+    label       TEXT NOT NULL DEFAULT '',
+    item_ts     REAL,
+    status      TEXT NOT NULL DEFAULT 'queued',
+    not_before  REAL NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    plus_id     TEXT,
+    detail      TEXT,
+    created_at  REAL NOT NULL,
+    sent_at     REAL
+);
+CREATE INDEX IF NOT EXISTS idx_plus_outbox_due   ON plus_outbox(status, not_before);
+CREATE INDEX IF NOT EXISTS idx_plus_outbox_event ON plus_outbox(event_id);
+CREATE INDEX IF NOT EXISTS idx_plus_outbox_box   ON plus_outbox(box_id);
+
+-- POST /v1/push/feedback verdicts (the app's "Not this"). Used to be
+-- log-only; kept now so /inbox can ask whether the detection was wrong.
+CREATE TABLE IF NOT EXISTS push_feedback (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_key    TEXT NOT NULL,
+    event_id    TEXT NOT NULL DEFAULT '',
+    verdict     TEXT NOT NULL,
+    received_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_push_feedback_ts ON push_feedback(received_at);
 
 -- Toybox: arcade-style high scores for the in-house games (50-states quiz, etc).
 -- Not Frigate-related; it's a for-fun page. `game` namespaces the leaderboard so
@@ -322,7 +366,15 @@ CREATE TABLE IF NOT EXISTS push_cards (
     -- Ordered, distinct cameras this card's story has been seen on, in
     -- first-seen order, as a JSON list. Two or more entries turn the push
     -- body into the crossing path ("Alley Wide -> Stairway Wide").
-    cameras_path_json TEXT NOT NULL DEFAULT '[]'
+    cameras_path_json TEXT NOT NULL DEFAULT '[]',
+    -- Ladder v3 §5.2, sticky for the story's lifetime: a Quiet (`silent`) or
+    -- Urgent card push was delivered for it (`kept_row`), or a Glance card
+    -- reached a device without Live Activities as its silent fallback
+    -- (`fallback_row`). Either left a Notification Center row the owner
+    -- keeps until opened/cleared, so the resolve must not be ephemeral
+    -- (for `fallback_row`: on those devices only).
+    kept_row      INTEGER NOT NULL DEFAULT 0,
+    fallback_row  INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_push_cards_open
     ON push_cards(closed, level, last_sound_at);
@@ -365,6 +417,9 @@ CREATE TABLE IF NOT EXISTS push_card_track_aliases (
 -- asks once face_capture.capture_delay_s has elapsed, which is what makes a 404
 -- at that point genuinely terminal.
 --
+-- `no_face` is terminal too: the face gate (face_capture.face_gate) found no
+-- face in the frame, so no file was kept and the row only stops a refetch.
+--
 -- NOTE for future edits: these columns arrive via CREATE TABLE IF NOT EXISTS,
 -- which is enough for a brand-new table. Any column ADDED later must go in BOTH
 -- this literal and `_ADDED_COLUMNS` below, or it is a production bug on every
@@ -391,6 +446,8 @@ CREATE TABLE IF NOT EXISTS face_captures (
     bytes             INTEGER,
     crop_event_id     TEXT,
     crop_box          TEXT,
+    face_box          TEXT,
+    face_score        REAL,
     review            TEXT NOT NULL DEFAULT 'pending',
     reviewed_at       TEXT,
     created_at        TEXT NOT NULL
@@ -414,9 +471,73 @@ CREATE TABLE IF NOT EXISTS face_clusters (
     centroid          BLOB NOT NULL,
     observation_count INTEGER NOT NULL DEFAULT 0,
     created_at        TEXT NOT NULL,
-    last_seen_at      REAL NOT NULL
+    last_seen_at      REAL NOT NULL,
+    -- People API (/v1/people): when a person chose to follow this identity
+    -- (NULL = not followed; followed ones skip the cluster_ttl_days reap) and
+    -- their free-text note. Also in _ADDED_COLUMNS.
+    followed_at       REAL,
+    note              TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_face_cluster_seen ON face_clusters(last_seen_at);
+
+-- Merge redirects: a cluster merged away keeps resolving to its survivor, so a
+-- client holding the old id lands on the right person. Chains stay one hop
+-- long (a merge repoints existing redirects at the new survivor). IDs are
+-- AUTOINCREMENT and never reused, so an old_id can never alias a new cluster.
+CREATE TABLE IF NOT EXISTS face_cluster_redirects (
+    old_id    INTEGER PRIMARY KEY,
+    new_id    INTEGER NOT NULL,
+    merged_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_face_redirect_new ON face_cluster_redirects(new_id);
+-- A deleted cluster takes the redirects pointing at it with it, whichever code
+-- path deleted it (web delete, remove, reap, regate, ...), so a deleted
+-- person's old ids 404 instead of dangling. A merge repoints redirects BEFORE
+-- deleting its source row, so this never eats the redirect it just wrote.
+CREATE TRIGGER IF NOT EXISTS trg_face_cluster_redirect_cleanup
+AFTER DELETE ON face_clusters
+BEGIN
+    DELETE FROM face_cluster_redirects WHERE new_id = OLD.cluster_id;
+END;
+
+-- Merge dismissals: a person said these two identities are NOT the same, so
+-- merge suggestions never offer the pair again. Stored low id first. A merge
+-- repoints rows naming its source at the survivor BEFORE deleting the source
+-- (the identity stays ruled out against whoever it was ruled out from); the
+-- trigger drops rows naming a deleted cluster, whichever code path deleted it.
+CREATE TABLE IF NOT EXISTS face_merge_dismissals (
+    id_low       INTEGER NOT NULL,
+    id_high      INTEGER NOT NULL,
+    dismissed_at REAL NOT NULL,
+    PRIMARY KEY (id_low, id_high)
+);
+CREATE INDEX IF NOT EXISTS idx_face_dismissal_high ON face_merge_dismissals(id_high);
+CREATE TRIGGER IF NOT EXISTS trg_face_merge_dismissal_cleanup
+AFTER DELETE ON face_clusters
+BEGIN
+    DELETE FROM face_merge_dismissals
+     WHERE id_low = OLD.cluster_id OR id_high = OLD.cluster_id;
+END;
+
+-- Blind face-pair labelling (faces/accuracy.py): pairs of EVENTS a person marks
+-- same / different without seeing what the model thinks. kind: split ("is this
+-- ID a duplicate of another?") | join ("is this sighting really this ID?").
+-- cluster_a/b and distance are as drawn; rows are about event pairs and are
+-- never rewritten by merges (results resolve clusters via the redirects).
+-- label: NULL (pending) | same | different | unsure | gone (a crop vanished).
+CREATE TABLE IF NOT EXISTS face_pair_labels (
+    pair_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL,
+    event_a    TEXT NOT NULL,
+    event_b    TEXT NOT NULL,
+    cluster_a  INTEGER NOT NULL,
+    cluster_b  INTEGER NOT NULL,
+    distance   REAL NOT NULL,
+    same_visit INTEGER NOT NULL,
+    drawn_at   REAL NOT NULL,
+    label      TEXT,
+    labeled_at REAL
+);
 
 -- One row per Frigate person event the enrichment worker has settled or is
 -- retrying — this table IS the queue state: enrich.find_candidates LEFT JOINs
@@ -445,10 +566,114 @@ CREATE TABLE IF NOT EXISTS face_enrichments (
     -- without hard-detaching it (POST .../remove still does that). NULL =
     -- included. Excluded rows must not feed centroids, sub_label decisions,
     -- or cluster/stats aggregates unless explicitly asked for.
-    excluded_at       TEXT
+    excluded_at       TEXT,
+    -- Best face (status 'enriched' only): the recording instant and
+    -- normalized [x1, y1, x2, y2] box of the highest-quality face, and its
+    -- saved crop relative to face_enrich.crops_dir. NULL path = no crop
+    -- (render failed, or reaped with its cluster).
+    best_frame_ts     REAL,
+    best_bbox         TEXT,
+    best_crop_path    TEXT,
+    -- Face-stack backfill queue (faces/enrich.py): NULL | queued | done |
+    -- no_frames | no_faces | error. Only events enriched before face_crops
+    -- existed ever get a value.
+    stack_status      TEXT,
+    -- Data only (no behaviour reads it): for a no_faces event whose faces
+    -- passed the detection/area gates but all fell under min_quality, the best
+    -- quality seen. NULL otherwise. Also in _ADDED_COLUMNS.
+    rejected_best_quality REAL
 );
 CREATE INDEX IF NOT EXISTS idx_face_enrich_cluster ON face_enrichments(cluster_id);
+
+-- Per-event face stack (faces/enrich.py): the top face_enrich.crop_keep faces,
+-- rank 0 = best, including faces under min_quality so the scorer's choices
+-- can be judged. `used` = the face fed the event's embedding. crop_path is
+-- relative to face_enrich.crops_dir; NULL = that crop failed to render.
+CREATE TABLE IF NOT EXISTS face_crops (
+    event_id   TEXT NOT NULL,
+    rank       INTEGER NOT NULL,
+    quality    REAL NOT NULL,
+    frame_ts   REAL NOT NULL,
+    bbox       TEXT NOT NULL,
+    used       INTEGER NOT NULL,
+    crop_path  TEXT,
+    -- SCRFD detection confidence. NULL for crops saved before it was kept.
+    det_score  REAL,
+    PRIMARY KEY (event_id, rank)
+);
 CREATE INDEX IF NOT EXISTS idx_face_enrich_age     ON face_enrichments(event_start_ts);
+
+-- Wildlife finder (config `wildlife`). One row per Frigate recording segment
+-- the finder has settled or is retrying -- this table IS the queue state, as
+-- face_enrichments is for enrichment: wildlife.find_segments LEFT JOINs it
+-- against Frigate's `recordings` over a lookback window, so an absent row means
+-- "pending", `status='error'` retries up to wildlife.max_attempts, and
+-- anything else is terminal. Statuses: scanned | no_file | error.
+CREATE TABLE IF NOT EXISTS wildlife_segments (
+    camera      TEXT NOT NULL,
+    start_ts    REAL NOT NULL,
+    status      TEXT NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    frames      INTEGER NOT NULL DEFAULT 0,
+    boxes       INTEGER NOT NULL DEFAULT 0,
+    classified  INTEGER NOT NULL DEFAULT 0,
+    animals     INTEGER NOT NULL DEFAULT 0,
+    elapsed_ms  INTEGER,
+    detail      TEXT,
+    scanned_at  TEXT NOT NULL,
+    PRIMARY KEY (camera, start_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_wildlife_seg_age ON wildlife_segments(start_ts);
+
+-- Every detector box at or above wildlife.min_detector_score, with its verdict:
+-- animal | blank | human | vehicle | scenery. Rejected boxes are kept (without
+-- images) because they ARE the learned-scenery memory: a new box overlapping
+-- enough recent `blank` boxes is skipped unclassified. Box coordinates are
+-- normalized [0,1] x1,y1,x2,y2 on the frame. `frame_ts` is wall-clock, exactly
+-- what Frigate's POST /api/{camera}/plus/{frame_time} expects.
+CREATE TABLE IF NOT EXISTS wildlife_boxes (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    camera           TEXT NOT NULL,
+    segment_ts       REAL NOT NULL,
+    frame_ts         REAL NOT NULL,
+    x1               REAL NOT NULL,
+    y1               REAL NOT NULL,
+    x2               REAL NOT NULL,
+    y2               REAL NOT NULL,
+    det_score        REAL NOT NULL,
+    verdict          TEXT NOT NULL,
+    reject_score     REAL,
+    suggestion       TEXT,
+    suggestion_score REAL,
+    top_class        TEXT,
+    top_score        REAL,
+    visit_id         INTEGER,
+    crop_path        TEXT,
+    frame_path       TEXT,
+    plus_status      TEXT,
+    plus_detail      TEXT,
+    plus_at          TEXT,
+    created_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wildlife_box_scenery
+    ON wildlife_boxes(camera, verdict, frame_ts);
+CREATE INDEX IF NOT EXISTS idx_wildlife_box_visit ON wildlife_boxes(visit_id);
+CREATE INDEX IF NOT EXISTS idx_wildlife_box_age   ON wildlife_boxes(frame_ts);
+
+-- Animal hits on one camera grouped by time gap (wildlife.visit_gap_s) --
+-- the unit of review at /wildlife. review: pending | kept | discarded.
+CREATE TABLE IF NOT EXISTS wildlife_visits (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    camera       TEXT NOT NULL,
+    start_ts     REAL NOT NULL,
+    end_ts       REAL NOT NULL,
+    hits         INTEGER NOT NULL DEFAULT 0,
+    review       TEXT NOT NULL DEFAULT 'pending',
+    reviewed_at  TEXT,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wildlife_visit_cam ON wildlife_visits(camera, end_ts);
+CREATE INDEX IF NOT EXISTS idx_wildlife_visit_review ON wildlife_visits(review, start_ts);
 
 -- Durable routing decision log (alerts-slice1 §A). Replaces the old
 -- in-memory ring buffer -- one row per event decision (pre-fanout), plus
@@ -618,6 +843,21 @@ CREATE TABLE IF NOT EXISTS camera_transitions (
     PRIMARY KEY (cam_a, cam_b, family)
 );
 
+-- Camera overlap: per undirected camera pair (cam_a < cam_b), whether the two
+-- cameras share a view -- learned from the share of topology samples seen
+-- together (encounters/transitions.py). Read-mostly derived state like
+-- `camera_transitions`; rebuildable by re-running the learner.
+CREATE TABLE IF NOT EXISTS camera_overlap (
+    cam_a      TEXT NOT NULL,
+    cam_b      TEXT NOT NULL,
+    concurrent INTEGER NOT NULL DEFAULT 0,
+    samples    INTEGER NOT NULL DEFAULT 0,
+    overlap    INTEGER NOT NULL DEFAULT 0,
+    source     TEXT NOT NULL DEFAULT 'default',
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (cam_a, cam_b)
+);
+
 -- M-2: one row per doorbell-LCD action attempt (preset/image/custom-text),
 -- success or failure -- the audit trail for "what did we tell the console
 -- to show" independent of push delivery.
@@ -634,6 +874,48 @@ CREATE TABLE IF NOT EXISTS doorbell_actions (
     error       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_doorbell_actions_camera_ts ON doorbell_actions(camera, ts);
+
+-- External event sources (external/, guide_content's external-sources.md):
+-- the sighting journal. One row per (source, device event key), upserted by
+-- both ingest paths -- MQTT hints (origin 'mqtt', partial) and HTTP polls
+-- (origin 'poll', authoritative). `sighting_json` is the normalised
+-- external.types.Sighting incl. UPSTREAM media paths, which never leave
+-- the server. Upsert rules live in external/store.py: a poll beats a hint,
+-- `final` never goes 1 -> 0, non-empty media never becomes empty.
+CREATE TABLE IF NOT EXISTS external_sightings (
+    source_id     TEXT NOT NULL,
+    native_key    TEXT NOT NULL,
+    native_id     TEXT,
+    start_time    REAL NOT NULL,
+    end_time      REAL,
+    trigger       TEXT NOT NULL DEFAULT '',
+    subject       TEXT NOT NULL DEFAULT 'unknown',
+    subject_conf  REAL,
+    labels_json   TEXT NOT NULL DEFAULT '[]',
+    status        TEXT NOT NULL DEFAULT 'pending',
+    final         INTEGER NOT NULL DEFAULT 0,
+    sighting_json TEXT NOT NULL,
+    raw_json      TEXT NOT NULL DEFAULT '{}',
+    origin        TEXT NOT NULL,                 -- 'mqtt' | 'poll'
+    content_hash  TEXT NOT NULL,
+    first_seen    REAL NOT NULL,
+    updated_at    REAL NOT NULL,
+    PRIMARY KEY (source_id, native_key)
+);
+CREATE INDEX IF NOT EXISTS idx_external_sightings_start ON external_sightings(start_time);
+CREATE INDEX IF NOT EXISTS idx_external_sightings_source_start
+    ON external_sightings(source_id, start_time);
+CREATE INDEX IF NOT EXISTS idx_external_sightings_open
+    ON external_sightings(source_id, start_time) WHERE final = 0;
+-- Per-source device state: key 'state' = last StateReport payload,
+-- 'alert:<code>' = an active device alert, 'availability' = online/offline.
+CREATE TABLE IF NOT EXISTS external_source_state (
+    source_id  TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value_json TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (source_id, key)
+);
 """
 
 # Columns added to `push_devices` / `push_handles` after those tables first
@@ -642,6 +924,12 @@ CREATE INDEX IF NOT EXISTS idx_doorbell_actions_camera_ts ON doorbell_actions(ca
 # whole migration story the sidecar needs (nothing is ever dropped or
 # retyped, and SQLite's ALTER ... ADD COLUMN is O(1) metadata only).
 _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "triage_labels": [
+        # Review inbox (2026-10-21): "wrong label" verdicts and provenance.
+        # Also in the CREATE TABLE literal above for fresh installs.
+        ("correct_label", "TEXT"),
+        ("source", "TEXT"),
+    ],
     # ONE entry per table: a duplicate key in this literal silently clobbers
     # the earlier one (Python dict semantics) — exactly how the zones_csv
     # migration vanished on 2026-08-14 and broke every card upsert until
@@ -669,6 +957,13 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # cameras the story has crossed, as JSON.
         ("encounter_id", "TEXT NOT NULL DEFAULT ''"),
         ("cameras_path_json", "TEXT NOT NULL DEFAULT '[]'"),
+        # Ladder v3 (2026-10-16): sticky "this story left a kept Notification
+        # Center row" flags, read at resolve time for `ephemeral`. Existing
+        # rows default to 0: an open story from before the upgrade resolves
+        # ephemeral unless it reached urgent or a zone override fired, which
+        # is how the pre-v3 rule judged it too.
+        ("kept_row", "INTEGER NOT NULL DEFAULT 0"),
+        ("fallback_row", "INTEGER NOT NULL DEFAULT 0"),
     ],
     "push_devices": [
         # v2 registration shape (notification-experience plan §8). Everything
@@ -705,9 +1000,33 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # after the APNs send had already gone out.
         ("dwell_seconds", "INTEGER NOT NULL DEFAULT 0"),
     ],
+    "face_captures": [
+        # Face gate (2026-10-30): the SCRFD box ([x1, y1, x2, y2], normalized)
+        # and det score of the face the thumbnail is cropped to. Also in the
+        # CREATE TABLE literal above for fresh installs.
+        ("face_box", "TEXT"),
+        ("face_score", "REAL"),
+    ],
     "face_enrichments": [
         # Soft-exclude (Wave 6B-2): added after face_enrichments first shipped.
         ("excluded_at", "TEXT"),
+        # Best-face crop (faces/enrich.py). Also in the CREATE TABLE literal.
+        ("best_frame_ts", "REAL"),
+        ("best_bbox", "TEXT"),
+        ("best_crop_path", "TEXT"),
+        # Face-stack backfill queue. Also in the CREATE TABLE literal.
+        ("stack_status", "TEXT"),
+        # Best quality among faces rejected by min_quality. Also in the CREATE TABLE literal.
+        ("rejected_best_quality", "REAL"),
+    ],
+    "face_clusters": [
+        # People API (followed/note). Also in the CREATE TABLE literal.
+        ("followed_at", "REAL"),
+        ("note", "TEXT"),
+    ],
+    "face_crops": [
+        # Detection confidence (min_det_score gate). Also in the CREATE TABLE literal.
+        ("det_score", "REAL"),
     ],
     "encounters": [
         # Notability stamp (encounters/notability.py). Also in the CREATE
@@ -776,6 +1095,39 @@ def open_frigate_ro(path: str | Path) -> sqlite3.Connection:
 # each one is pure overhead once the file exists.
 _SCHEMA_APPLIED: set[str] = set()
 
+# Serializes schema application within this process. Threads replaying the
+# DDL against a brand-new file at once can trip SQLITE_SCHEMA ("database
+# schema has changed") when one's CREATE lands mid-way through another's
+# statement; only the first open of a file ever takes it.
+_SCHEMA_LOCK = threading.Lock()
+
+
+#: How long `_enable_wal` keeps retrying a fresh DB's switch into WAL.
+_WAL_SWITCH_DEADLINE_S = 5.0
+
+
+def _enable_wal(conn: sqlite3.Connection) -> None:
+    """`PRAGMA journal_mode = WAL`, retried while another connection holds
+    the lock.
+
+    Switching a database INTO WAL needs an exclusive lock, and SQLite answers
+    a contended switch with an immediate SQLITE_BUSY -- the busy_timeout
+    handler is not consulted. Two threads opening a brand-new sidecar DB at
+    once (the encounters worker and the push link path, every test's
+    tmp_path DB, a first boot) could therefore fail one open outright with
+    "database is locked". Once a DB is in WAL the mode is persistent and
+    re-asserting it takes no lock, so this only ever spins on first open.
+    """
+    deadline = time.monotonic() + _WAL_SWITCH_DEADLINE_S
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
+
 
 def open_sidecar(path: str | Path) -> sqlite3.Connection:
     """Open the sidecar DB read/write, creating directory + schema if needed."""
@@ -786,12 +1138,14 @@ def open_sidecar(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(p, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 3000")
-    conn.execute("PRAGMA journal_mode = WAL")
+    _enable_wal(conn)
     if needs_schema:
-        conn.executescript(SIDECAR_SCHEMA)
-        _apply_added_columns(conn)
-        conn.commit()
-        _SCHEMA_APPLIED.add(key)
+        with _SCHEMA_LOCK:
+            if key not in _SCHEMA_APPLIED or not p.exists():
+                conn.executescript(SIDECAR_SCHEMA)
+                _apply_added_columns(conn)
+                conn.commit()
+                _SCHEMA_APPLIED.add(key)
     return conn
 
 
@@ -951,6 +1305,25 @@ def recording_coverage(
         "latest_segment_end": latest_segment_end,
         "authoritative_through": now - publish_lag_s,
     }
+
+
+def newest_recording_end(conn: sqlite3.Connection, camera: str) -> float | None:
+    """End time of `camera`'s newest recording segment, or None if it has none.
+
+    Ordered by `start_time` so the `(camera, start_time DESC, end_time DESC)`
+    index answers it from its first entry (measured under 1 ms on a 731k-row
+    production table); `MAX(end_time)` would walk every row of the camera.
+    """
+    row = conn.execute(
+        "SELECT end_time FROM recordings WHERE camera = ? ORDER BY start_time DESC LIMIT 1",
+        (camera,),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    try:
+        return float(row[0])
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_event_data(row: sqlite3.Row) -> dict[str, Any]:

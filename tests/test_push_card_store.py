@@ -22,7 +22,7 @@ def test_get_missing_card_is_none(sidecar_db_path: Path):
 def test_upsert_then_get_round_trips(sidecar_db_path: Path):
     conn = open_conn(sidecar_db_path)
     card = Card(
-        card_key="front:stranger:1", level="notify",
+        card_key="front:stranger:1", level="silent",
         created_at=100.0, updated_at=100.0, state_since_at=100.0, sound_count=1,
     )
     card_store.upsert_card(
@@ -31,7 +31,7 @@ def test_upsert_then_get_round_trips(sidecar_db_path: Path):
     )
     fetched = card_store.get_card(conn, "front:stranger:1")
     assert fetched is not None
-    assert fetched.level == "notify"
+    assert fetched.level == "silent"
     assert fetched.sound_count == 1
 
 

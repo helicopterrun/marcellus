@@ -2,37 +2,39 @@
 
 Pure routing logic -- no APNs, no delivery, no Live Activity, no HTTP. One
 function, `evaluate_ladder`, answers a single question: which of four
-attention levels (`log` < `quiet` < `notify` < `urgent`, `ladder_policy.LEVELS`)
-a snapshot earns, or whether it's suppressed outright. All policy (the base
-table, which reasons nudge which way, dangerous-animal labels, the system-card
-level) lives in `ladder_policy.py` as data; this module is just the fixed
-evaluation order that data plugs into, so a policy change is a data edit, not
-a code change.
+attention levels (`log` < `silent` < `quiet` < `urgent`, `ladder_policy.LEVELS`;
+user-facing Ignore / Quiet / Glance / Urgent, `docs/ladder-v3.md`) a snapshot
+earns, or whether it's suppressed outright. All policy (the base table, which
+reasons nudge which way, dangerous-animal labels, the system-card level) lives
+in `ladder_policy.py` as data; this module is just the fixed evaluation order
+that data plugs into, so a policy change is a data edit, not a code change.
 
-Evaluation order:
+Evaluation order (v3 §4.1):
 
 1. Muted -> suppressed, unconditionally -- beats even a system card or a
    safety exception.
 2. `source == "system"` (no subject/place, e.g. "camera offline") ->
-   `ladder_policy.SYSTEM_CARD_LEVEL`, bypassing everything below.
+   `ladder_policy.SYSTEM_CARD_LEVEL`, outside the ladder entirely.
 3. Safety exceptions (`audio_safety`, `ai_flagged`) -> `urgent`, bypassing the
-   table, nudge, floor, and the caps in step 8 -- including for `known`
+   table, nudge, floor, caps and quiet hours -- including for `known`
    subjects.
-4. Reclassify: a dangerous-animal `label` makes `subject` a `stranger` from
-   here on.
-5. Zone override (Elsinore Phase 4 addendum, `ladder_policy.ZONE_OVERRIDES`):
-   a user-configured `(zone, subject)` override returns directly, bypassing
-   the base table *and* the nudge/floor/caps below -- "always banner this
-   subject in this zone" means always, not "usually, modulated by the same
-   general-purpose exceptions everything else goes through." Checked after
-   safety exceptions/mute (those are hard invariants, not policy) but before
-   everything the base table drives.
-6. Base table lookup (`subject` x `place`).
-7. One nudge: net worry vs. calm reasons moves the result at most one step.
-   `animal` subjects never nudge; `known` subjects never nudge up (down is
-   fine).
-8. Floor: a person subject in a `child_hazard_zone` is at least `notify`.
-9. Caps: `street` caps at `quiet`; an unconfirmed detector caps at `quiet`.
+4. Reclassify: a dangerous-animal `label` makes `subject` a person from here
+   on.
+5. Zone override (`ladder_policy.ZONE_OVERRIDES`): a user-configured
+   `(zone, subject)` override returns directly, bypassing the base table *and*
+   the nudge/floor/caps below. Quiet hours (step 11) still apply -- they are a
+   time-of-day preference, not a per-cell policy, and §2.5 names only
+   off-limits and safety as exempt.
+6. Ignore for a non-person subject (`ladder_policy.OFF_CELLS`) -> suppressed,
+   never escalates. Ignore for a person is `log` and stays nudgeable.
+7. Base table lookup (`subject` x `place`; `private` reads as `yard`).
+8. One nudge: net worry vs. calm reasons moves the result at most one step.
+   `animal` subjects never nudge; `known` subjects never nudge up. A worry
+   nudge never produces `urgent`: behaviour alone stops at Glance (`quiet`).
+9. Floor: a person subject in a `child_hazard_zone` is at least `quiet`.
+10. Caps: `street` caps at `quiet`; an unconfirmed detector caps at `quiet`.
+11. Quiet hours `hold_urgent` (`Snapshot.quiet_hours_hold`): `urgent` is held
+    at `quiet` except at `off_limits` (safety returned at step 3).
 """
 
 from __future__ import annotations
@@ -66,7 +68,7 @@ class Snapshot:
 
     source: str = "detection"  # "detection" | "system"
     subject: str = ""  # "stranger" | "known" | "animal" | "thing"
-    place: str = ""  # "street" | "yard" | "doors" | "private" | "off_limits"
+    place: str = ""  # "street" | "yard" | "doors" | "off_limits" ("private" reads as yard)
     #: The raw Frigate zone name (not the place class `place` above) --
     #: looked up against `ladder_policy.ZONE_OVERRIDES` before the base
     #: table (Phase 4 addendum). "" for a detection with no zone, or a
@@ -91,6 +93,9 @@ class Snapshot:
     ai_flagged: bool = False
     child_hazard_zone: bool = False
     detector_confirmed: bool = True
+    #: Quiet hours in `hold_urgent` mode are active right now (v3 §2.5):
+    #: urgent is held at Glance (`quiet`) except at `off_limits`.
+    quiet_hours_hold: bool = False
 
 
 def base_level(subject: str, place: str, zone: str) -> tuple[str, bool]:
@@ -104,16 +109,26 @@ def base_level(subject: str, place: str, zone: str) -> tuple[str, bool]:
     differently, because a quiet zone's explicit override outranks a loud
     zone's table cell.
     """
+    place = policy.canonical_place(place)
     override = policy.ZONE_OVERRIDES.get(zone, {}).get(subject)
     if override is not None:
-        return override, True
+        return policy.canonical_level(override), True
     if (subject, place) in policy.OFF_CELLS:
         return SUPPRESSED, False
+    return _table_level(subject, place), False
+
+
+def _table_level(subject: str, place: str) -> str:
     if subject in policy.TABLE:
         table_subject = subject
     else:
         table_subject = _V2_TO_V1.get(subject) or _V1_TO_V2.get(subject) or subject
-    return policy.TABLE[table_subject][place], False
+    row = policy.TABLE[table_subject]
+    level = row.get(place)
+    if level is None and place == "yard":
+        # A hand-built pre-v3 table may still be keyed `private`.
+        level = row.get("private", "log")
+    return policy.canonical_level(level or "log")
 
 
 @dataclass(frozen=True)
@@ -131,6 +146,25 @@ class LadderResult:
 def evaluate_ladder_explained(snapshot: Snapshot) -> LadderResult:
     """Same evaluation order as `evaluate_ladder`, recording which stage fixed
     the base outcome and which modifiers moved it afterward."""
+    result = _evaluate(snapshot)
+    return _apply_quiet_hours_hold(result, snapshot)
+
+
+def _apply_quiet_hours_hold(result: LadderResult, snapshot: Snapshot) -> LadderResult:
+    """Step 11 (v3 §2.5), after caps: while quiet hours are in `hold_urgent`
+    mode, Urgent is held at Glance -- except at `off_limits`. Safety triggers
+    (stage `safety`), system cards and suppression never reach it."""
+    if (
+        not snapshot.quiet_hours_hold
+        or result.level != "urgent"
+        or result.stage in ("safety", "system", "muted")
+        or policy.canonical_place(snapshot.place) == "off_limits"
+    ):
+        return result
+    return LadderResult("quiet", result.stage, (*result.modifiers, "quiet_hours_hold"))
+
+
+def _evaluate(snapshot: Snapshot) -> LadderResult:
     if snapshot.muted:
         return LadderResult(SUPPRESSED, "muted", ())
     if snapshot.source == "system":
@@ -139,6 +173,7 @@ def evaluate_ladder_explained(snapshot: Snapshot) -> LadderResult:
         return LadderResult("urgent", "safety", ())
 
     subject = snapshot.subject
+    place = policy.canonical_place(snapshot.place)
     modifiers: list[str] = []
     if snapshot.label in policy.DANGEROUS_ANIMAL_LABELS:
         subject = "person" if "person" in policy.TABLE else "stranger"
@@ -146,26 +181,30 @@ def evaluate_ladder_explained(snapshot: Snapshot) -> LadderResult:
 
     override = policy.ZONE_OVERRIDES.get(snapshot.zone, {}).get(subject)
     if override is not None:
-        return LadderResult(override, "zone_override", tuple(modifiers))
+        return LadderResult(
+            policy.canonical_level(override), "zone_override", tuple(modifiers),
+        )
 
-    if (subject, snapshot.place) in policy.OFF_CELLS:
+    if (subject, place) in policy.OFF_CELLS:
         return LadderResult(SUPPRESSED, "off_cell", tuple(modifiers))
 
-    if subject in policy.TABLE:
-        table_subject = subject
-    else:
-        table_subject = _V2_TO_V1.get(subject) or _V1_TO_V2.get(subject) or subject
-    level = policy.TABLE[table_subject][snapshot.place]
+    level = _table_level(subject, place)
     stage = "table"
 
     levels = policy.LEVELS
     idx = levels.index(level)
+    quiet_idx = levels.index("quiet")
 
     if subject != "animal":
         worry = sum(1 for r in policy.WORRY_REASONS if getattr(snapshot, r))
         calm = sum(1 for r in policy.CALM_REASONS if getattr(snapshot, r))
         step = 1 if worry > calm else -1 if calm > worry else 0
         if step == 1 and subject == "known":
+            step = 0
+        # Behaviour stops at Glance (v3 §4.2): a worry nudge never produces
+        # urgent. Up from `quiet` stays `quiet`; an `urgent` cell stays
+        # urgent (only calm can lower it).
+        if step == 1 and idx + 1 > quiet_idx:
             step = 0
         if step == 1:
             modifiers.append("nudge_up")
@@ -174,18 +213,15 @@ def evaluate_ladder_explained(snapshot: Snapshot) -> LadderResult:
         idx = max(0, min(len(levels) - 1, idx + step))
 
     if subject in ("stranger", "known", "person") and snapshot.child_hazard_zone:
-        notify_idx = levels.index("notify")
-        if idx < notify_idx:
+        if idx < quiet_idx:
             modifiers.append("child_hazard_floor")
-        idx = max(idx, notify_idx)
+        idx = max(idx, quiet_idx)
 
-    if snapshot.place == "street":
-        quiet_idx = levels.index("quiet")
+    if place == "street":
         if idx > quiet_idx:
             modifiers.append("street_cap")
         idx = min(idx, quiet_idx)
     if not snapshot.detector_confirmed:
-        quiet_idx = levels.index("quiet")
         if idx > quiet_idx:
             modifiers.append("unconfirmed_cap")
         idx = min(idx, quiet_idx)

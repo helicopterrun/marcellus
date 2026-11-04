@@ -15,12 +15,14 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from marcellus import __version__, db
 from marcellus.auth import _cache
 from marcellus.errors import error_detail
 from marcellus.push.stats import STATS
+from marcellus.routes.health import compute_health
+from marcellus.verdict import build_verdict
 
 router = APIRouter(tags=["status"])
 
@@ -204,6 +206,15 @@ def _push_status(app_state: Any, settings: Any) -> dict[str, Any]:
     return push
 
 
+def _recording_status(app_state: Any, settings: Any, now: float) -> dict[str, Any]:
+    """The recording watcher's snapshot, same shape as `/healthz`
+    `checks["recording"]` plus `enabled`."""
+    watcher = getattr(app_state, "recording_watcher", None)
+    if not settings.recording_watch.enabled or watcher is None:
+        return {"enabled": False, "status": "off", "stalled": [], "last_check_age_s": None}
+    return {"enabled": True, **watcher.health(now)}
+
+
 def _counts(request: Request, settings: Any) -> dict[str, Any]:
     """Additive status-page counters (Wave 6B-2): one query/attribute each,
     degrading to zeros rather than a 500 on an empty or predating-column DB.
@@ -294,6 +305,26 @@ def _camera_names(settings: Any) -> list[str]:
     return []
 
 
+async def _verdict(request: Request) -> dict[str, Any]:
+    """The status page's verdict, from the very same probes `/healthz` runs
+    (one `compute_health` call per poll; the Frigate probe inside is cached)."""
+    try:
+        health = await compute_health(request.app)
+    except Exception:  # noqa: BLE001 -- the status page must never 500 over this
+        return {
+            "level": "warn",
+            "problems": [
+                {
+                    "check": "health",
+                    "message": "Couldn't evaluate the health checks.",
+                    "level": "warn",
+                }
+            ],
+            "notes": [],
+        }
+    return build_verdict(health["checks"], health["ok"], health["failing"])
+
+
 async def _gather_status(request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     now = time.time()
@@ -305,14 +336,17 @@ async def _gather_status(request: Request) -> dict[str, Any]:
     hardware = await asyncio.to_thread(_frigate_hardware, settings)
     hardware["host"] = await asyncio.to_thread(_host_stats, settings)
     counts = await asyncio.to_thread(_counts, request, settings)
+    verdict = await _verdict(request)
     return {
         "version": __version__,
+        "verdict": verdict,
         "time": now,
         "cameras": _camera_names(settings),
         "frigate": await frigate_task,
         "proxy_enabled": settings.proxy.enabled,
         "scrub": scrub,
         "push": push,
+        "recording": _recording_status(request.app.state, settings, now),
         # Wave 2A: relay retry/breaker + MQTT queue counters, same snapshot
         # GET /v1/stats returns -- one source of truth for the status page.
         "push_stats": STATS.snapshot(),
@@ -350,6 +384,16 @@ async def v1_stats(request: Request) -> dict[str, Any]:
             "max": settings.push.mqtt_queue_max,
         },
     }
+
+
+@router.get("/scrub")
+async def scrub_page_redirect() -> RedirectResponse:
+    """The browser scrub page was removed (the /v1 scrub API remains).
+
+    Redirect rather than fall through to `proxy_routes`'s catch-all, which would
+    answer old bookmarks and installed PWAs with Frigate's SPA at HTTP 200.
+    """
+    return RedirectResponse(url="/", status_code=307)
 
 
 @router.get("/cameras", response_class=HTMLResponse)

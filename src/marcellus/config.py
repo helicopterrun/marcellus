@@ -223,6 +223,40 @@ class FaceCaptureSection(BaseModel):
     head_fraction: float = 0.4
     crop_pad: float = 0.25  # expand the head box by this fraction of its own w/h
 
+    # Face gate: run SCRFD (face_enrich's detector, the `[enrich]` extra) on
+    # every fetched frame and keep only frames with a face. A frame without
+    # one is recorded as status='no_face' and its JPEG is never written. A
+    # frame with one gets its thumbnail cropped to the largest such face,
+    # which replaces the person-box head crop above (that box is the event's
+    # single best-snapshot box, so it drifts off the person at the -4s/+4s
+    # samples).
+    # Measured 2026-10-30 over all 638 stored captures: 469 were uncropped
+    # whole frames (street and parked cars, nobody in view) of which 26 held a
+    # face; overall 97 frames held one at SCRFD's default 0.5. Every false
+    # positive (a car grille, gravel, a bush, a scalp) scored < 0.6, which
+    # keeps 85 frames / 46 visits of 52.
+    # Without the extra installed the gate logs an error and capture runs
+    # ungated, as before.
+    face_gate: bool = True
+    min_face_score: float = 0.6
+    face_pad: float = 0.4  # square face crop, padded by this fraction per side
+
+    # Event sampling (face gate on only): when the capture camera has its own
+    # person event within event_window_s of the trigger, sample up to
+    # event_max_samples frames spread across that event (at least
+    # event_min_gap_s apart) in addition to the offsets_s ladder, and keep the
+    # visit's keep_per_visit best faces (area x score); the other face frames
+    # settle as status='skipped'. No such event -> the ladder alone.
+    # Replayed 2026-10-30 against recordings for all 213 visits of the prior
+    # 30 days: 141 had a capture-camera event within 30s; event samples found
+    # a face in 89 visits vs 45 for the gated ladder (47 new, 3 the ladder
+    # caught on short events and the spread samples stepped over -- hence the
+    # union). ~7 samples per event visit; 98 of 141 hit the cap of 8.
+    event_window_s: float = 30.0
+    event_max_samples: int = 8
+    event_min_gap_s: float = 1.0
+    keep_per_visit: int = 3
+
     # Preview longest edge / quality. ~480px keeps a 60-card grid under ~2 MB
     # while staying big enough to recognise a face without opening the full frame.
     thumb_max_edge: int = 480
@@ -296,6 +330,13 @@ class FaceEnrichSection(BaseModel):
     # passers-by mostly fall below it.
     min_face_area_px: int = 4000
     min_quality: float = 0.15
+    # SCRFD detection confidence a face needs to count at all. quality alone
+    # can't keep junk out: it rewards sharpness, and leaves, wheel spokes and
+    # pine needles are sharp (they scored quality 0.8-0.98). Re-scoring the
+    # 232 sightings of the most polluted cluster on their original frames
+    # (2026-10-31): the junk sat at 0.50-0.58, nearly everything at 0.60+ was
+    # a real face. Same floor as face_capture.min_face_score.
+    min_det_score: float = 0.6
 
     # Cosine DISTANCE thresholds (1 - cosine similarity) on L2-normalized
     # ArcFace embeddings. Named clusters get the tighter bar: a wrong
@@ -303,13 +344,42 @@ class FaceEnrichSection(BaseModel):
     match_threshold: float = 0.45
     cluster_threshold: float = 0.55
 
+    # Distance under which `faces/consolidate.py` PROPOSES merging two unnamed
+    # clusters (read-only; a person confirms each group). Tighter than
+    # cluster_threshold on purpose: that one decides where a single new
+    # embedding lands against a running mean, and a wrong join there is
+    # repairable one sighting at a time. This one proposes folding two whole
+    # identities (hundreds of sightings) into one, which is harder to unpick,
+    # and it is applied to centroids that have already absorbed their
+    # neighbours, so a looser bar chains unrelated people together.
+    consolidate_threshold: float = 0.45
+
     # Unnamed clusters not seen for this long are reaped (with their stored
-    # embeddings). Named clusters never expire.
+    # embeddings). Named, followed and noted clusters never expire.
     cluster_ttl_days: int = 60
 
     # insightface model-pack cache (buffalo_l, ~300 MB on first download).
     # Must be writable by the service user under ProtectSystem=strict.
     model_dir: Path = Path("/opt/marcellus/data/models")
+
+    # Face crops: the top `crop_keep` faces of each enriched event, best
+    # first, saved as small JPEGs for display (inbox cards, push thumbnails,
+    # the identities page's per-event stacks). Faces under min_quality are
+    # kept too, so what the scorer rejected stays visible.
+    # Crops follow their cluster's retention: reaped with a stale unnamed
+    # cluster, dropped when a cluster is deleted, kept while a name holds.
+    crops_dir: Path = Path("/opt/marcellus/data/face-crops")
+    # Margin added on EACH side of the face box, as a fraction of its larger
+    # side. A tight detector box clips hair and chin and reads as a mugshot.
+    crop_pad: float = 0.4
+    # Longest edge of the stored crop. Never upscaled: a gate-face face is
+    # ~90px across, so most crops land well under this.
+    crop_max_edge: int = 384
+    # Faces saved per event. Five 1s-apart samples already span a walk-up.
+    crop_keep: int = 5
+    # Queued backfill events worked per cycle, and only in cycles with no live
+    # events. One ~14s event per 15s cycle is about half a core.
+    backfill_per_cycle: int = 1
 
     # Bounds one cycle so a first run against a long lookback can't hog the
     # shared 4-core host; the lookback picks up the rest next cycle.
@@ -320,6 +390,130 @@ class FaceEnrichSection(BaseModel):
     max_attempts: int = 3
 
     http_timeout_s: float = 15.0
+
+
+class WildlifeCamera(BaseModel):
+    """One camera the wildlife finder scans."""
+
+    # Local-time hours `[start, end)` to scan, e.g. `[7, 19]`; wraps across
+    # midnight when start > end. None = around the clock. Daytime-only cameras
+    # (no useful IR view) save most of their night segments this way:
+    # crows-nest produces ~180 motion-only segments a night for ~1 animal in
+    # 90 days.
+    hours: tuple[int, int] | None = None
+
+
+class WildlifeSection(BaseModel):
+    """Wildlife finder: animals Frigate's own model scored too low to track.
+
+    Scans recording segments that had motion but NO tracked object
+    (`recordings.motion > 0 AND objects = 0`) with MegaDetector v6
+    (YOLOv10-compact, ONNX), then classifies each candidate box with
+    SpeciesNet's crop classifier (ONNX). SpeciesNet's "blank" class is the
+    false-positive filter: in the 2026-10-20 benchmark it called every
+    sun-stripe and wind-blown-pine box blank at >= 0.9, while the overhead
+    squirrel Frigate missed on gate-walkway scored 0.99 squirrel. Found
+    animals are grouped into visits at /wildlife for keep/discard review, and a
+    kept frame can be sent to Frigate+ (POST /api/{camera}/plus/{frame_time}),
+    which is how the missed views get into the next model build.
+
+    Needs the `[wildlife]` extra (onnxruntime + numpy) and the two exported
+    model files -- see tools/wildlife_export_models.py. Runs as a systemd
+    oneshot (contrib/marcellus-wildlife.*), never in the web process: one run
+    can hold two cores for minutes.
+    """
+
+    enabled: bool = False
+
+    # Cameras to scan, with optional daytime-only hours. Empty = nothing is
+    # scanned even when enabled. Cost scales with each camera's motion-only
+    # segment count, which varies 80x across this fleet (shed ~40/day,
+    # gate-face ~3000/day) -- pick cameras where animals actually go.
+    cameras: dict[str, WildlifeCamera] = Field(default_factory=dict)
+
+    # IANA zone the `hours` windows are read in, e.g. "America/Los_Angeles".
+    # Empty = the host clock, which on the NVR LXC is UTC.
+    timezone: str = ""
+
+    detector_path: Path = Path("/opt/marcellus/data/models/wildlife/MDV6-yolov10-c.onnx")
+    classifier_path: Path = Path(
+        "/opt/marcellus/data/models/wildlife/speciesnet-v4.0.3a-crop.onnx"
+    )
+    classifier_labels_path: Path = Path(
+        "/opt/marcellus/data/models/wildlife/speciesnet-v4.0.3a-crop.labels.txt"
+    )
+
+    # Frames are scaled to this width before detection (and the detector input
+    # is letterboxed to it). 1280 is what MegaDetector v6 was benchmarked at
+    # here; 640 lost the small overhead squirrel.
+    frame_width: int = 1280
+
+    # Keyframes sampled per 10s segment, spread evenly across it. Every camera
+    # here has a keyframe each second except package and crows-nest (every
+    # 5s), so 3 frames come from a keyframe-only decode with no full decode.
+    # One frame per segment misses an animal that crosses in under ~10s.
+    frames_per_segment: int = 3
+
+    # MegaDetector "animal" score floor. Deliberately low: SpeciesNet does the
+    # rejecting. 0.2 kept every true positive in the benchmark.
+    min_detector_score: float = 0.2
+
+    # A box whose SpeciesNet "blank" (or human, or vehicle) probability is at or
+    # above this is not an animal. Recall-first: a box SpeciesNet is unsure
+    # about stays in the review queue.
+    reject_score: float = 0.8
+
+    # Rolled-up suggestions that are recorded (verdict "excluded") but never
+    # queued for review. Birds by default: Frigate already tracks `bird`, and
+    # the review zones here deliberately leave birds out.
+    exclude_suggestions: list[str] = Field(default_factory=lambda: ["bird"])
+
+    # Learned scenery: a box overlapping (IoU >= scenery_iou) at least
+    # `scenery_min_blanks` boxes SpeciesNet called blank on the same camera
+    # within `scenery_memory_h` is skipped without classifying. The pumpkin and
+    # the pine trunk on gate-walkway produced ~94% of all detector boxes in the
+    # benchmark day; this is what keeps classification cost bounded. Geometry
+    # alone is not enough -- a cat asleep on the same mat every night is
+    # "static" too, but SpeciesNet never calls it blank, so it is never learned.
+    scenery_iou: float = 0.6
+    scenery_min_blanks: int = 2
+    scenery_memory_h: float = 48.0
+
+    # Animal hits on one camera within this gap form one visit, capped at
+    # `max_visit_s` so a long stay is split into reviewable pieces.
+    visit_gap_s: float = 60.0
+    max_visit_s: float = 900.0
+
+    # Segments commit at their END (measured lag 5.4-9.4s); give them margin.
+    process_delay_s: float = 120.0
+
+    # How far back each run looks for unscanned segments. A long lookback
+    # lets a run that fell behind (busy host, restart) catch up; idempotency
+    # comes from the wildlife_segments table, not from this window.
+    lookback_s: float = 86400.0
+
+    # Wall-clock budget per run; the rest waits for the next timer tick. Keep it
+    # under the timer interval (10 min) so runs never queue up.
+    max_runtime_s: float = 540.0
+
+    # onnxruntime intra-op threads. The host has 4 threads shared with
+    # Frigate's ffmpeg decoders; the unit also runs at Nice=19.
+    threads: int = 2
+
+    # Crops and frame previews of animal hits only (never of rejected boxes).
+    # Must be under ReadWritePaths=/opt/marcellus (ProtectSystem=strict).
+    output_dir: Path = Path("/opt/marcellus/data/wildlife")
+
+    # Rows and images older than this are pruned. Continuous recordings are kept
+    # 7 days here, so a frame older than that can no longer be sent to
+    # Frigate+ anyway; the rest is history for the scoreboard.
+    retention_days: int = 30
+
+    # Segment failures (unreadable file, ffmpeg error) retry up to this many runs.
+    max_attempts: int = 3
+
+    # Frigate+ upload: Frigate re-extracts the frame and posts it upstream.
+    http_timeout_s: float = 60.0
 
 
 class WatchdogSection(BaseModel):
@@ -352,6 +546,30 @@ class WatchdogSection(BaseModel):
     # Safety cap: if Frigate is fundamentally broken, stop hammering it and log
     # loudly for manual intervention instead of restart-looping forever.
     max_restarts_per_hour: int = 3
+
+
+class RecordingWatchSection(BaseModel):
+    """The camera-stopped-recording watcher (`recording_watch.py`).
+
+    Frigate can keep detecting while its record stream delivers no video
+    (2026-10-30: five cameras lost recording for up to 18 hours while
+    `/api/stats` looked healthy), so the only reliable signal is the age of a
+    camera's newest row in Frigate's `recordings` table: 5 to 15 s when healthy.
+    Detection (healthz, the Status page) runs whenever `enabled`; the push card
+    additionally needs `notify` and push delivery on.
+    """
+
+    enabled: bool = True
+    # Send the single "Cameras not recording" system card. Independent of
+    # `enabled`: false keeps detection, /healthz and the Status page.
+    notify: bool = True
+    # Seconds between checks.
+    interval_s: float = 30.0
+    # A watched camera is stalled once its newest segment ended this long ago.
+    stall_after_s: float = 300.0
+    # A stalled camera counts as recovered only when its newest segment is
+    # this fresh. Between the two thresholds nothing changes: no flapping.
+    recover_within_s: float = 60.0
 
 
 class ScrubSection(BaseModel):
@@ -400,6 +618,13 @@ class ScrubSection(BaseModel):
     aged_after_h: float = 24.0
     retention_days: int = 4
     cell_w: int = 320
+    # Hardware decode of recorded segments for scrub sheets (VAAPI on an Intel
+    # iGPU; scaling stays in software -- scale_vaapi is not usable on the iHD
+    # driver). Default "none" so boxes without a GPU are unaffected. If a
+    # hardware-decoded segment fails, it is retried once in software; after 3
+    # consecutive such failures hwaccel is disabled until the process restarts.
+    hwaccel: Literal["none", "vaapi"] = "none"
+    hwaccel_device: str = "/dev/dri/renderD128"
     # Fallback height, used only when the source's shape can't be measured or
     # `preserve_source_aspect` is off. Otherwise the height is derived per
     # camera from the source's display aspect ratio.
@@ -413,8 +638,16 @@ class ScrubSection(BaseModel):
     preserve_source_aspect: bool = True
     sheet_cols: int = 12
     sheet_rows: int = 8
-    format: str = "jpeg"  # "jpeg" | "webp" -- JPEG measured smaller on real
-    # camera content (see docs spec §5.3 M4); WebP requires -lossless 0.
+    format: str = "jpeg"  # "jpeg" | "webp" -- JPEG wins at EQUAL SSIM on the
+    # real pipeline, not merely at equal quality setting (spec §5.3 M4 and its
+    # 2026-10-19 re-measurement). Measured daytime, through tiling.py, on the
+    # ffmpeg-produced cells the tiler actually composes: jpeg q85 = 9.92
+    # KB/cell at SSIM 0.9903, webp q85 = 7.75 at 0.9847 -- cheaper only by
+    # being worse, and matching q85's SSIM needs ~q90+, which erases it.
+    # Re-testing this is a trap: the cells are ALREADY JPEG at `-q:v 8`
+    # (ffmpeg_io.extract_fps), so re-encoding them as JPEG is efficient in a
+    # way WebP is not. Measure from those cell files, never from pristine
+    # frames -- doing the latter inverts the result. WebP requires -lossless 0.
     generate_interval_s: float = 60.0  # continuous edge, NOT hourly (§5.4)
     # How often the trailing-window pass runs, and therefore the generation
     # loop's tick. This is the floor on how stale the newest sprite cell can be,
@@ -452,9 +685,17 @@ class ScrubSection(BaseModel):
     # Retention sweep cadence for the in-process generator. Pruning used to be
     # CLI-only, so an unattended deployment grew past retention_days forever.
     prune_interval_s: float = 3600.0
-    # Bounds concurrent ffmpeg/ffprobe children. Segments within a camera are
-    # sampled serially (cell assignment is order-dependent), so today this only
-    # matters if a CLI backfill runs alongside the in-process generator.
+    # Bounds concurrent ffmpeg/ffprobe children, and is the size of the window of
+    # segments one camera decodes in parallel: each window's children run side by
+    # side, then their frames are fed in segment order (cell assignment is
+    # order-dependent, so only the decode overlaps). Cameras themselves are still
+    # processed one after another.
+    #
+    # On a host shared with Frigate, use 2: the box's cores are already spoken
+    # for by detection and recording, and a third concurrent decode mostly takes
+    # CPU from them rather than shortening the pass. 1 restores strictly serial
+    # decoding. Watch `ffmpeg_s / ffmpeg_wall_s` in the cycle line for the
+    # parallelism actually achieved.
     ffmpeg_concurrency: int = 3
     # Backfill allowance for a whole cycle, split across cameras. Without any
     # cap the first cycle on a cold cache tries to sample the whole retention
@@ -474,12 +715,18 @@ class ScrubSection(BaseModel):
     # 20s in disguise: one decode now feeds every tier, so the same wall clock
     # buys several times the coverage it used to.
     backfill_time_budget_s: float = 22.0
-    # Cap on the live-edge pass, per camera per cycle. Sized to cover the whole
-    # lookback in one pass (900s / 10s segments), so a camera reaches `now` in a
-    # single cycle rather than converging over several: a fixed small cap loses
-    # ground whenever the cycle takes longer than the footage it generated, which
-    # is exactly what happens once backfill shares the cycle.
-    live_edge_segments: int = 90
+    # Cap on the live-edge pass, per camera per cycle. The edge takes a camera's
+    # *newest* N segments (`newest_first`) and leaves any older gap to
+    # `_backfill_tier`, which fills newest-first, so a small cap keeps every
+    # camera fresh instead of "losing ground": whatever it skips is not lost.
+    #
+    # The old default of 90 (the whole 900 s lookback in one pass) dates from the
+    # oldest-first design, where a camera had to crawl up to `now` and a small cap
+    # never got there. Combined with the per-segment deadline, it lets one
+    # backlogged camera spend the entire pass on its 90 segments while the rest
+    # of the rotation waits: measured on a loaded host, per-camera lag ranged from
+    # 39 s to 822 s. 3 is two 10 s segments per 20 s tick, plus one of slack.
+    live_edge_segments: int = 3
     # How far back the live-edge pass will resume from. A cache that is further
     # behind than this jumps forward to the edge and leaves the gap for
     # backfill: crawling up from a day ago meant nothing recent was ever
@@ -510,6 +757,54 @@ class ScrubSection(BaseModel):
     # every camera each tick as before #85. Use it on a box with no decode
     # headroom, where any backfill slice only starves the edge.
     backfill_min_share_s: float = 6.0
+    # Minimum wall-clock seconds per cycle that Pass 3 (aged-tier and derived-tier
+    # decimation, stale-bucket retirement) is guaranteed, even when the live edge
+    # and backfill have already run past the tick. Pass 3 normally shares
+    # backfill's deadline, so a cycle that was already late -- the box contended
+    # with Frigate, one slow decode -- found that deadline passed before Pass 3
+    # began and skipped it entirely, every cycle: measured on prod, pass3=0.00s for
+    # as long as the box stayed contended, the aged and derived tiers stalled
+    # completely. Pass 3 has no ffmpeg (Pillow crops of sheets already on disk), so
+    # the floor costs a little Python CPU and no decode slot. It also bounds the
+    # live-edge pass when `backfill_min_share_s` is 0, so the edge can no longer
+    # run unboundedly past the tick. 0 (or less) restores "Pass 3 gets only what
+    # the deadline leaves" and, with `backfill_min_share_s` also 0, an unbounded
+    # live edge.
+    decimation_min_share_s: float = 3.0
+    # How many in-progress sheet canvases the generator keeps in memory between
+    # flushes. Without them every flush of a growing sheet re-decoded every cell
+    # JPEG in it and re-encoded the whole canvas -- ~1100 Pillow decodes per prod
+    # cycle for ~23 sheet encodes. With them a flush pastes only the cells that
+    # are new or changed and encodes once; the output is pixel-identical. Each
+    # canvas is cols*cell_w x rows*cell_h x 3 bytes (~37 MB at 12x8 of 480x270),
+    # so the ceiling is this count times that: 24 -> ~0.9 GB. A canvas is dropped
+    # as soon as its sheet is full or its bucket seals; the rest are evicted
+    # least-recently-used. Only the recent and aged tiers use it (derived tiers
+    # flush rarely and compose from files). Sizing rule: at least 2 x the number
+    # of cameras (one growing recent and one growing aged sheet each) -- below
+    # that the cycle touches them round-robin and evicts each before its next
+    # flush, saving nothing, and startup logs a line saying so. ~37 MB per sheet
+    # at 480x270 cells. 0 disables the cache.
+    canvas_cache_sheets: int = 24
+    # Feed the derived tiers (`derived_intervals_s`) from the live edge: the
+    # frames Pass 1 has just decoded for the recent tier are also handed to a
+    # derived writer for every interval that is a whole multiple of the recent
+    # interval, instead of Pass 3 decoding a full recent-tier sheet for every
+    # new derived cell just to crop that one cell back out. Only a derived tier that is
+    # already caught up to the live edge is fed; Pass 3 still builds everything
+    # else (cold start, catch-up, the aged window). False is the kill switch:
+    # derived tiers are then built only by Pass 3 decimation.
+    derived_from_live_edge: bool = True
+    # How long `/v1/reel` waits for Frigate's motion API before answering
+    # without it. Motion is the reel's only Frigate-HTTP dependency, and the
+    # reel is what a client needs before it can show its first still; a
+    # Frigate slow under detection load (measured 2026-10-25: ~2 s per answer
+    # during an arrival burst) held whole reel responses back. On a miss the
+    # reel answers with coverage/frames/events and `motion_unavailable: true`,
+    # and the fetch finishes in the background into a small cache so the next
+    # request for that window is complete. 0 (or less) waits unbounded, as
+    # before. Not applied to `/v1/motion`, whose whole answer is motion.
+    reel_motion_deadline_s: float = 0.9
 
     @field_validator("format")
     @classmethod
@@ -534,10 +829,10 @@ class ScrubSection(BaseModel):
             raise ValueError(f"must be > 0, got {v!r}")
         return v
 
-    @field_validator("derive_time_reserve_s")
+    @field_validator("derive_time_reserve_s", "decimation_min_share_s", "canvas_cache_sheets")
     @classmethod
     def _non_negative(cls, v: float) -> float:
-        """0 is a valid, explicit "no floor" setting -- unlike the tick
+        """0 is a valid, explicit "no floor" (or "off") setting -- unlike the tick
         constants above, there's nothing broken about turning this off."""
         if v < 0:
             raise ValueError(f"must be >= 0, got {v!r}")
@@ -589,6 +884,60 @@ class ProxySection(BaseModel):
     pass_request_headers: list[str] = Field(
         default_factory=lambda: ["range", "authorization", "cookie"]
     )
+
+
+class TriageSection(BaseModel):
+    """The review inbox (/inbox) and its Frigate+ outbox.
+
+    The inbox is a short daily queue of the detections most worth a human
+    look *for training*: animals the wildlife finder says Frigate missed,
+    "Not this" taps from the phone, scores just over the camera's threshold,
+    labels rare on that camera, and anything on a camera the current
+    Frigate+ model has few verified images of. Confident detections on
+    well-covered cameras never appear -- in the May 2026 labeling pass 95% of
+    newest-first events were simply "real", which teaches the model nothing.
+
+    A verdict queues the Frigate+ upload in `plus_outbox`; the web process
+    sends it after `plus_delay_s` (the undo window) and retries failures.
+    """
+
+    # Items per day. The page shows this many minus what was already
+    # reviewed today, then offers "keep going" for another batch.
+    daily_budget: int = Field(default=15, ge=1, le=200)
+
+    # Candidates come from this many days back.
+    lookback_days: int = Field(default=7, ge=1, le=30)
+
+    # "Borderline": top_score below the camera/label threshold plus this.
+    # Frigate censors events at the threshold (nothing scores below it), so
+    # the band just above it is where its true/false calls are closest.
+    borderline_margin: float = Field(default=0.08, ge=0.01, le=0.5)
+
+    # A label seen at most this many times on a camera in the lookback is
+    # "rare there" and worth confirming (an animal on a stairway camera).
+    rare_label_max: int = Field(default=5, ge=0, le=100)
+
+    # Frigate+ recommends at least 100 verified images per camera; cameras
+    # below this get a coverage boost proportional to the gap.
+    camera_target_images: int = Field(default=100, ge=1, le=10000)
+
+    # Undo window: a verdict's upload waits this long in the outbox.
+    plus_delay_s: float = Field(default=60.0, ge=0.0, le=3600.0)
+
+    # Outbox worker cadence and retry ceiling (backoff doubles per attempt).
+    outbox_interval_s: float = Field(default=15.0, ge=1.0, le=3600.0)
+    outbox_max_attempts: int = Field(default=5, ge=1, le=20)
+
+    # Frames sent per kept wildlife visit (its strongest hits).
+    wildlife_frames_per_visit: int = Field(default=2, ge=1, le=12)
+
+    # Current camera -> older names its images were uploaded under, for the
+    # coverage count (Frigate+ keys verifiedCounts by the camera name at
+    # upload time, so a rename starts a camera back at zero).
+    plus_camera_aliases: dict[str, list[str]] = Field(default_factory=dict)
+
+    # IANA zone "today" is counted in. Empty = wildlife.timezone, then UTC.
+    timezone: str = ""
 
 
 class EncountersSection(BaseModel):
@@ -653,6 +1002,28 @@ class EncountersSection(BaseModel):
     # name -- for a coincidental name collision that isn't really the same
     # ground. Config always wins over the zone-derived graph.
     not_adjacent: list[list[str]] = Field(default_factory=list)
+
+    # Camera pairs that SHARE A VIEW (see the same place, not a hand-off),
+    # same `[camera_a, camera_b]` pair format as `adjacency`. Learned from
+    # topology samples when unset; config wins over the learned verdict. An
+    # overlapping pair's concurrent samples are excluded from walking times.
+    overlap: list[list[str]] = Field(default_factory=list)
+
+    # Pairs that never share a view, even if the learner would say so.
+    # Wins over `overlap`.
+    not_overlap: list[list[str]] = Field(default_factory=list)
+
+    # A topology sample whose gap is at most this many seconds (including any
+    # negative gap -- the two atoms overlapping in time by any amount) counts
+    # as "seen together" when judging whether a pair shares a view.
+    overlap_concurrent_max_s: float = 1.0
+
+    # A pair is learned as overlapping when at least this fraction of its
+    # eligible samples were seen together (needs `transition_min_samples`).
+    # 0.65, not 0.6: on the NVR's 14 days (2026-10-17) the same-place pairs
+    # sat at 0.69-0.98 and shed + stairway-wide (whose view only catches the
+    # stairway's edge) at 0.60.
+    overlap_min_fraction: float = 0.65
 
     # How long a sealed encounter (and its members/decisions) survives
     # before the reconciler's hourly prune drops it -- mirrors
@@ -1100,6 +1471,82 @@ class UnifiProtectSection(BaseModel):
         return v
 
 
+class BernardoSourceConfig(BaseModel):
+    """One Bernardo wildlife camera (github.com/helicopterrun/wildlife-cam) as
+    an external event source (`external/bernardo.py`). Read-only against the
+    device: Marcellus never needs its write token."""
+
+    kind: Literal["bernardo"] = "bernardo"
+    # Stable id: the journal key, the URL segment in `/v1/sources/{id}/...`
+    # and the `/healthz` check name (`source:<id>`). Never rename once set.
+    id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    name: str = "Wildlife camera"
+    enabled: bool = True
+    # Device API origin, e.g. "http://192.168.1.37:8000".
+    base_url: str
+    # The device's MQTT base topic (its own Settings -> MQTT page).
+    mqtt_base_topic: str = "bernardo"
+    # Rows fetched per poll (newest first).
+    poll_limit: int = Field(default=50, ge=1, le=500)
+    # Concurrent upstream connections (polling + media relay). The Pi is
+    # small; keep this low.
+    max_connections: int = Field(default=4, ge=1, le=16)
+    request_timeout_s: float = Field(default=10.0, gt=0)
+    # A sighting still unclassified this long after it started is settled
+    # as-is (Bernardo classifies ~45 s after an event finalises and gives up
+    # silently on events that never reach a terminal state).
+    settle_after_s: float = Field(default=900.0, ge=60)
+
+
+class ExternalSourcesSection(BaseModel):
+    """Non-Frigate event sources (guide_content's `external-sources.md`).
+
+    MQTT is the live trigger, HTTP polling is the record (and the safety net
+    for missed messages). Its own switch, independent of `push.enabled`; its
+    MQTT client is separate from push's so a source can never take the push
+    pipeline down. Broker settings left unset inherit `push.mqtt_*`.
+    """
+
+    enabled: bool = False
+    mqtt_enabled: bool = True
+    mqtt_host: str | None = None
+    mqtt_port: int | None = None
+    mqtt_username: str | None = None
+    # Env-overridable (MARCELLUS_EXTERNAL_SOURCES__MQTT_PASSWORD); unset
+    # inherits push.mqtt_password. Never logged.
+    mqtt_password: str | None = None
+    # Must differ from push.mqtt_client_id: two clients sharing an id kick
+    # each other off the broker in a loop.
+    mqtt_client_id: str = "marcellus-sources"
+    poll_interval_s: float = Field(default=60.0, ge=10)
+    # Rows fetched per source on startup to backfill the journal.
+    backfill_limit: int = Field(default=200, ge=0, le=2000)
+    # Journal rows older than this are pruned. Upstream media may be gone
+    # sooner (Bernardo keeps ~14 days); those rows answer `media_gone`.
+    retention_days: int = Field(default=30, ge=1)
+    # No retained `state` message for this long => health `stale`.
+    state_stale_s: float = Field(default=180.0, ge=30)
+    sources: list[BernardoSourceConfig] = Field(default_factory=list)
+
+    @field_validator("sources")
+    @classmethod
+    def _unique_source_ids(cls, v: list[BernardoSourceConfig]) -> list[BernardoSourceConfig]:
+        ids = [s.id for s in v]
+        dupes = sorted({i for i in ids if ids.count(i) > 1})
+        if dupes:
+            raise ValueError(f"external_sources.sources: duplicate id(s) {dupes}")
+        return v
+
+    def broker(self, push: PushSection) -> tuple[str, int, str | None, str | None]:
+        """(host, port, username, password), falling back to `push.mqtt_*`."""
+        return (
+            self.mqtt_host or push.mqtt_host,
+            self.mqtt_port or push.mqtt_port,
+            self.mqtt_username if self.mqtt_username is not None else push.mqtt_username,
+            self.mqtt_password if self.mqtt_password is not None else push.mqtt_password,
+        )
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix=_ENV_PREFIX,
@@ -1111,13 +1558,26 @@ class Settings(BaseSettings):
     sidecar: SidecarSection = Field(default_factory=SidecarSection)
     face_capture: FaceCaptureSection = Field(default_factory=FaceCaptureSection)
     face_enrich: FaceEnrichSection = Field(default_factory=FaceEnrichSection)
+    wildlife: WildlifeSection = Field(default_factory=WildlifeSection)
+    triage: TriageSection = Field(default_factory=TriageSection)
     watchdog: WatchdogSection = Field(default_factory=WatchdogSection)
     scrub: ScrubSection = Field(default_factory=ScrubSection)
+    recording_watch: RecordingWatchSection = Field(default_factory=RecordingWatchSection)
     proxy: ProxySection = Field(default_factory=ProxySection)
     push: PushSection = Field(default_factory=PushSection)
     encounters: EncountersSection = Field(default_factory=EncountersSection)
     unifi_protect: UnifiProtectSection = Field(default_factory=UnifiProtectSection)
+    external_sources: ExternalSourcesSection = Field(default_factory=ExternalSourcesSection)
     log_level: str = "INFO"
+
+    @model_validator(mode="after")
+    def _check_source_client_id(self) -> Settings:
+        if self.external_sources.mqtt_client_id == self.push.mqtt_client_id:
+            raise ValueError(
+                "external_sources.mqtt_client_id must differ from push.mqtt_client_id "
+                f"({self.push.mqtt_client_id!r}) -- two clients sharing an id disconnect each other"
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_origins(self) -> Settings:

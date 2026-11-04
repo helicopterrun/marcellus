@@ -106,7 +106,8 @@ broken by id, so pages are stable).
 | `severity` | `alert` or `detection`: exact match on the encounter's peak severity. Anything else is a 422. |
 | `tag` | `notable` or `background` (see below). `notable` also returns encounters that were never stamped. Anything else is a 422. |
 | `label` | Comma-separated; matches encounters whose labels or recognised identities include any of them (case-insensitive). |
-| `place` | Comma-separated place keys (`street` Public, `yard` Semi-private, `doors` Entry / exit, `private` Private, `off_limits` Restricted): encounters whose most private place is any of them. An unknown key is a 422. |
+| `place` | Comma-separated place keys (`street` Public, `yard` Grounds, `doors` Entrances, `off_limits` Restricted; `private` is still accepted and means `yard`): encounters whose most private place is any of them. An unknown key is a 422. |
+| `person` | A person id from [Identities](/enrich/clusters) (merged-away ids follow to their survivor; unknown is a 404). Only encounters with a live, not-excluded face sighting of that person on any member event. A 400 while `face_enrich` is off. |
 
 All filters combine with AND.
 
@@ -142,9 +143,11 @@ for now, `tags` says encounters carry the background/notable tag, and
 
 Marcellus tags every encounter as **background** (a passer-by you rarely
 need to look at) or **notable**, and records the most private place it
-reached (Public, Semi-private, Entry / exit, Private or Restricted) and the
+reached (Public, Grounds, Entrances or Restricted) and the
 loudest answer the alert settings would give it (off, log, glance, notify or
-alarm). The feed carries these as `tag`, `place` and `outcome`.
+alarm). The `outcome` field still uses these older words: `notify` now means
+Quiet and `alarm` means Urgent. The feed carries these as `tag`, `place` and
+`outcome`.
 
 The first rule that matches decides, in this order:
 
@@ -200,6 +203,10 @@ cycle, with no restart; the others need a restart.
 | `min_copresence_s` | `3.0` | yes | Minimum span overlap for two atoms to count as companions with no shared label family. |
 | `adjacency` | `[]` | yes | Extra camera-pair edges (`[[a, b], ...]`) beyond what shared zone names already imply. |
 | `not_adjacent` | `[]` | yes | Camera-pair edges to remove despite a shared zone name; config always beats the zone-derived graph. |
+| `overlap` | `[]` | no | Camera pairs (`[[a, b], ...]`) that share a view; config wins over the learned verdict. Their "seen together" samples are kept out of walking times. |
+| `not_overlap` | `[]` | no | Pairs that never share a view; beats `overlap` and the learner. |
+| `overlap_concurrent_max_s` | `1.0` | no | A topology sample with gap at or under this (negative gaps included) counts as seen together. |
+| `overlap_min_fraction` | `0.65` | no | Share of a pair's samples seen together at which the learner calls it overlapping (needs `transition_min_samples`). |
 | `linger_s` | `60.0` | no | Seconds an encounter must last to be tagged notable ("lingered") rather than a passer-by. |
 | `latitude` | unset | no | Property latitude (-90 to 90), used with `longitude` to decide when it is night. Unset: night is 22:00-06:00 server time. |
 | `longitude` | unset | no | Property longitude (-180 to 180); see `latitude`. |

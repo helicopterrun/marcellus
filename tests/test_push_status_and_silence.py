@@ -103,6 +103,14 @@ def _make_outcome_cell_card(conn: Any) -> None:
     )
 
 
+def _ladder_body(subject: str, place: str, value: str) -> dict[str, Any]:
+    """A complete settings body with one ladder cell changed (the core four
+    subjects must be sent whole; a partial ladder is a 400)."""
+    body = policy_settings.default_settings()
+    body["ladder"][subject][place] = value
+    return body
+
+
 class TestStatus:
     def test_status_with_no_data(self, client: TestClient):
         resp = client.get("/v1/push/status")
@@ -176,11 +184,16 @@ class TestSilence:
         assert body["scope"]["kind"] == "zone_override"
         assert body["scope"]["zone"] == "front_door"
         assert body["scope"]["subject"] == "person"
-        assert body["applied"] == "quiet"
+        # v3 §5.7: silence applies Quiet = engine level `silent`.
+        assert body["applied"] == "silent"
+        assert body["previous"] is None  # no override existed before
         active = policy_settings.get_active()
-        assert active["zone_overrides"]["front_door"]["person"] == "quiet"
+        assert active["zone_overrides"]["front_door"]["person"] == "silent"
 
     def test_silence_outcome_cell_card_no_zone(self, client: TestClient, sidecar_conn):
+        _glance = policy_settings.default_settings()
+        _glance["ladder"]["animal"]["yard"] = "glance"  # explicit; default is Quiet
+        policy_settings.apply_settings(_glance)
         _make_outcome_cell_card(sidecar_conn)
         resp = client.post("/v1/push/silence", json={"card_key": CARD_KEY_CELL})
         assert resp.status_code == 200
@@ -189,22 +202,26 @@ class TestSilence:
         assert "zone" not in body["scope"]
         assert body["scope"]["subject"] == "animal"
         assert body["scope"]["place"] == "yard"
-        assert body["applied"] == "quiet"
+        assert body["applied"] == "silent"
+        assert body["previous"] == "quiet"  # default animal/yard = Glance
         active = policy_settings.get_active()
-        assert active["outcomes"]["animal"]["yard"] == "glance"
+        # The ladder is authoritative; the legacy outcomes view is derived
+        # (silent -> notify).
+        assert active["ladder"]["animal"]["yard"] == "silent"
+        assert active["outcomes"]["animal"]["yard"] == "notify"
 
     def test_silence_preserves_other_outcome_cells(self, client: TestClient, sidecar_conn):
         """Regression: silencing one outcome cell must not reset every other
         tuned cell to defaults (normalize_settings merges a partial
-        `outcomes` doc over `default_settings()`, so a body that only
+        `ladder` doc over `default_settings()`, so a body that only
         contains the one silenced cell would wipe the rest)."""
         # Tune cell A (person/street) to a non-default level first.
         put = client.put(
             "/v1/push/settings",
-            json={"outcomes": {"person": {"street": "alarm"}}},
+            json=_ladder_body("person", "street", "urgent"),
         )
         assert put.status_code == 200
-        assert policy_settings.get_active()["outcomes"]["person"]["street"] == "alarm"
+        assert policy_settings.get_active()["ladder"]["person"]["street"] == "urgent"
 
         # Silence a different, no-zone card landing on cell B.
         _make_outcome_cell_card(sidecar_conn)
@@ -212,11 +229,13 @@ class TestSilence:
         assert resp.status_code == 200
 
         active = policy_settings.get_active()
-        assert active["outcomes"]["animal"]["yard"] == "glance"  # cell B silenced
-        assert active["outcomes"]["person"]["street"] == "alarm"  # cell A untouched
-        # normalize_settings derives routing_table_v2 from outcomes -- confirm
-        # it stayed in sync with both cells rather than reflecting only B.
-        assert active["routing_table_v2"]["animal"]["yard"] == "quiet"
+        assert active["ladder"]["animal"]["yard"] == "silent"  # cell B silenced
+        assert active["ladder"]["person"]["street"] == "urgent"  # cell A untouched
+        # normalize_settings derives outcomes / routing_table_v2 from the
+        # ladder -- confirm they stayed in sync with both cells.
+        assert active["outcomes"]["animal"]["yard"] == "notify"
+        assert active["routing_table_v2"]["animal"]["yard"] == "notify"
+        assert active["outcomes"]["person"]["street"] == "alarm"
         assert active["routing_table_v2"]["person"]["street"] == "urgent"
 
 
@@ -268,7 +287,7 @@ class TestOverrides:
         hazard as /silence)."""
         put = client.put(
             "/v1/push/settings",
-            json={"outcomes": {"person": {"street": "alarm"}}},
+            json=_ladder_body("person", "street", "urgent"),
         )
         assert put.status_code == 200
 
@@ -279,7 +298,8 @@ class TestOverrides:
         assert resp.status_code == 200
 
         active = policy_settings.get_active()
-        assert active["outcomes"]["animal"]["yard"] == "glance"
+        assert active["ladder"]["animal"]["yard"] == "glance"
+        assert active["ladder"]["person"]["street"] == "urgent"
         assert active["outcomes"]["person"]["street"] == "alarm"
         assert active["routing_table_v2"]["person"]["street"] == "urgent"
 
@@ -297,7 +317,7 @@ class TestOverrides:
 
 
 def test_full_round_trip_silence_then_restore(client: TestClient, sidecar_conn):
-    """Silence a card, confirm the ladder now routes it `quiet`, then
+    """Silence a card, confirm the ladder now routes it `silent`, then
     `PUT /overrides` back to the previous level and confirm normal routing
     resumes."""
     _make_zone_card(sidecar_conn)
@@ -308,8 +328,8 @@ def test_full_round_trip_silence_then_restore(client: TestClient, sidecar_conn):
 
     resp = client.post("/v1/push/silence", json={"card_key": CARD_KEY_ZONE})
     assert resp.status_code == 200
-    assert ladder_policy.ZONE_OVERRIDES.get("front_door", {}).get("person") == "quiet"
-    assert evaluate_ladder(Snapshot(subject="person", place="doors", zone="front_door")) == "quiet"
+    assert ladder_policy.ZONE_OVERRIDES.get("front_door", {}).get("person") == "silent"
+    assert evaluate_ladder(Snapshot(subject="person", place="doors", zone="front_door")) == "silent"
 
     restore = client.put(
         "/v1/push/overrides",
@@ -325,3 +345,107 @@ def test_full_round_trip_silence_then_restore(client: TestClient, sidecar_conn):
         evaluate_ladder(Snapshot(subject="person", place="doors", zone="front_door"))
         == previous_level
     )
+
+
+class TestV3Silence:
+    """Ladder v3 §5.7: silence applies `silent`; overrides edit the ladder."""
+
+    def test_zone_override_card_applies_silent(self, client: TestClient, sidecar_conn):
+        _make_zone_card(sidecar_conn)
+        resp = client.post("/v1/push/silence", json={"card_key": CARD_KEY_ZONE})
+        assert resp.status_code == 200
+        assert resp.json()["applied"] == "silent"
+        active = policy_settings.get_active()
+        assert active["zone_overrides"]["front_door"]["person"] == "silent"
+        # The ladder cell itself is untouched by a zone-scoped silence.
+        assert active["ladder"]["person"]["doors"] == "glance"
+
+    def test_outcome_cell_card_sets_ladder_silent_and_derives_notify(
+        self, client: TestClient, sidecar_conn,
+    ):
+        _make_outcome_cell_card(sidecar_conn)
+        resp = client.post("/v1/push/silence", json={"card_key": CARD_KEY_CELL})
+        assert resp.status_code == 200
+        assert resp.json()["applied"] == "silent"
+        active = policy_settings.get_active()
+        assert active["ladder"]["animal"]["yard"] == "silent"
+        assert active["outcomes"]["animal"]["yard"] == "notify"
+
+    def test_put_override_notify_is_stored_and_returned_as_silent(self, client: TestClient):
+        resp = client.put(
+            "/v1/push/overrides",
+            json={
+                "kind": "zone_override",
+                "zone": "front_door",
+                "subject": "person",
+                "level": "notify",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["applied"] == "silent"
+        active = policy_settings.get_active()
+        assert active["zone_overrides"]["front_door"]["person"] == "silent"
+
+    def test_outcome_cell_off_sets_ladder_ignore(self, client: TestClient):
+        resp = client.put(
+            "/v1/push/overrides",
+            json={"kind": "outcome_cell", "subject": "animal", "place": "yard", "level": "off"},
+        )
+        assert resp.status_code == 200
+        # Non-person Ignore reads back as `off` (suppressed).
+        assert resp.json()["applied"] == "off"
+        active = policy_settings.get_active()
+        assert active["ladder"]["animal"]["yard"] == "ignore"
+        assert active["outcomes"]["animal"]["yard"] == "off"
+
+    def test_outcome_cell_off_for_person_reports_log(self, client: TestClient):
+        resp = client.put(
+            "/v1/push/overrides",
+            json={"kind": "outcome_cell", "subject": "person", "place": "yard", "level": "off"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["applied"] == "log"
+        assert policy_settings.get_active()["ladder"]["person"]["yard"] == "ignore"
+
+    @pytest.mark.parametrize("level", ["glance", "alarm"])
+    def test_outcome_cell_rejects_outcome_words(self, client: TestClient, level: str):
+        _glance = policy_settings.default_settings()
+        _glance["ladder"]["animal"]["yard"] = "glance"  # explicit; default is Quiet
+        policy_settings.apply_settings(_glance)
+        resp = client.put(
+            "/v1/push/overrides",
+            json={"kind": "outcome_cell", "subject": "animal", "place": "yard", "level": level},
+        )
+        assert resp.status_code == 422
+        # Nothing was written.
+        assert policy_settings.get_active()["ladder"]["animal"]["yard"] == "glance"
+
+    def test_silence_previous_restores_ladder_cell_via_overrides(
+        self, client: TestClient, sidecar_conn,
+    ):
+        # Start from an Ignore cell: a non-person `previous` is "off".
+        put = client.put(
+            "/v1/push/settings",
+            json=_ladder_body("animal", "yard", "ignore"),
+        )
+        assert put.status_code == 200
+        assert policy_settings.get_active()["ladder"]["animal"]["yard"] == "ignore"
+
+        _make_outcome_cell_card(sidecar_conn)
+        silenced = client.post("/v1/push/silence", json={"card_key": CARD_KEY_CELL})
+        assert silenced.status_code == 200
+        body = silenced.json()
+        assert body["previous"] == "off"
+        assert policy_settings.get_active()["ladder"]["animal"]["yard"] == "silent"
+
+        restore = client.put(
+            "/v1/push/overrides",
+            json={
+                "kind": "outcome_cell",
+                "subject": "animal",
+                "place": "yard",
+                "level": body["previous"],
+            },
+        )
+        assert restore.status_code == 200
+        assert policy_settings.get_active()["ladder"]["animal"]["yard"] == "ignore"

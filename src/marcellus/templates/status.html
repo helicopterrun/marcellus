@@ -1,14 +1,39 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% set active_page = 'status' %}
 {% block title %}Status · Marcellus{% endblock %}
 
-{% block page_heading %}<h1 class="sr-only">Status</h1>{% endblock %}
 {% block body %}
-<main id="main-content">
-  <div class="stat-row">
+<main id="main-content" class="status-page">
+  {{ page_head("Status") }}
+
+  {# Verdict: server-rendered once, then re-rendered by status.js from the
+     `verdict` key of /status.json on every poll. #}
+  {% set vd = status.verdict %}
+  <section id="verdict" class="verdict verdict-{{ vd.level }}" role="status" aria-live="polite">
+    <div class="verdict-head" data-verdict="head">
+      {%- if vd.level == 'ok' %}All systems OK{% else %}{{ vd.problems | length }} problem{{ 's' if vd.problems | length != 1 }}{% endif -%}
+    </div>
+    <ul class="verdict-problems" data-verdict="problems">
+      {% for p in vd.problems %}
+      <li class="{{ p.level }}">{% if p.href %}<a href="{{ p.href }}">{{ p.message }}</a>{% else %}{{ p.message }}{% endif %}</li>
+      {% endfor %}
+    </ul>
+    <ul class="verdict-notes" data-verdict="notes">
+      {% for n in vd.notes %}<li>{{ n }}</li>{% endfor %}
+    </ul>
+  </section>
+
+  {# Key tiles: always visible. #}
+  {% set hw = status.hardware %}
+  <div class="stat-row key-tiles">
+    {% set rec = status.recording %}
     <div class="stat-card">
-      <div class="stat-label">Marcellus</div>
-      <div class="stat-value">v{{ status.version }}</div>
+      <div class="stat-label">Recording</div>
+      <div class="stat-value cell-class {{ 'muted' if not rec.enabled else 'noise' if rec.stalled else 'ok' }}" data-k="recording">
+        {{ 'off' if not rec.enabled else (rec.stalled | length ~ ' stalled') if rec.stalled else 'ok' }}
+      </div>
+      <div class="help" data-k="recording-detail">{% for c in rec.stalled %}{{ c.camera }}{{ ', ' if not loop.last }}{% endfor %}</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Frigate</div>
@@ -23,16 +48,6 @@
         {{ 'live' if status.push.mqtt_connected else 'stale' }}
       </div>
     </div>
-    <div class="stat-card">
-      <div class="stat-label">Frigate (via MQTT)</div>
-      <div class="stat-value cell-class {{ 'ok' if status.push.frigate_online else 'noise' }}" data-k="frigate-online">
-        {{ 'online' if status.push.frigate_online else 'offline' }}
-      </div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Broker traffic</div>
-      <div class="stat-value" data-k="last-traffic">{{ (status.push.last_event_s_ago ~ 's ago') if status.push.last_event_s_ago is not none else '—' }}</div>
-    </div>
     {% else %}
     <div class="stat-card">
       <div class="stat-label">Push</div>
@@ -44,6 +59,30 @@
       <div class="stat-value" data-k="devices">{{ status.push.device_count }}</div>
     </div>
     {% if status.scrub.enabled %}
+    <div class="stat-card">
+      <div class="stat-label">Worst lag</div>
+      <div class="stat-value" data-k="worst-lag">—</div>
+    </div>
+    {% else %}
+    <div class="stat-card">
+      <div class="stat-label">Scrub cache</div>
+      <div class="stat-value cell-class muted" data-k="scrub">off</div>
+    </div>
+    {% endif %}
+    {% if hw.host.disk_pct is defined %}
+    <div class="stat-card">
+      <div class="stat-label">Host disk</div>
+      <div class="stat-value"><span class="cell-class {{ 'noise' if hw.host.disk_pct > 90 else 'warn' if hw.host.disk_pct > 75 else 'ok' }}" data-hw="disk">{{ hw.host.disk_pct }}%</span></div>
+    </div>
+    {% endif %}
+  </div>
+
+  {# Groups: closed by default; status.js opens one automatically while any
+     tile inside is warning/bad, and remembers what the viewer opened. #}
+  <details class="stat-group" data-group="scrub">
+    <summary><span class="grp-name">Scrub cache and databases</span> <span class="grp-flag" hidden>&#9888;</span> <span class="grp-digest" data-digest="scrub">{% if status.scrub.enabled %}cycle {{ (status.scrub.last_cycle_s_ago ~ 's ago') if status.scrub.last_cycle_s_ago is not none else '—' }}, cache {{ '≥ ' if status.sizes.scrub_cache_capped }}{{ fmt_bytes(status.sizes.scrub_cache) }}{% else %}scrub off, Marcellus DB {{ fmt_bytes(status.sizes.sidecar_db) }}{% endif %}</span></summary>
+    <div class="stat-row">
+      {% if status.scrub.enabled %}
     <div class="stat-card">
       <div class="stat-label">Scrub cycle</div>
       <div class="stat-value" data-k="last-cycle">
@@ -58,16 +97,23 @@
       <div class="stat-label">Scrub cache</div>
       <div class="stat-value" data-k="scrub-cache">{{ '≥ ' if status.sizes.scrub_cache_capped }}{{ fmt_bytes(status.sizes.scrub_cache) }}</div>
     </div>
+      {% endif %}
+      <div class="stat-card">
+        <div class="stat-label">Marcellus version</div>
+        <div class="stat-value">v{{ status.version }}</div>
+      </div>
+      {% if status.push.enabled %}
     <div class="stat-card">
-      <div class="stat-label">Worst lag</div>
-      <div class="stat-value" data-k="worst-lag">—</div>
+      <div class="stat-label">Frigate (via MQTT)</div>
+      <div class="stat-value cell-class {{ 'ok' if status.push.frigate_online else 'noise' }}" data-k="frigate-online">
+        {{ 'online' if status.push.frigate_online else 'offline' }}
+      </div>
     </div>
-    {% else %}
     <div class="stat-card">
-      <div class="stat-label">Scrub cache</div>
-      <div class="stat-value cell-class muted" data-k="scrub">off</div>
+      <div class="stat-label">Broker traffic</div>
+      <div class="stat-value" data-k="last-traffic">{{ (status.push.last_event_s_ago ~ 's ago') if status.push.last_event_s_ago is not none else '—' }}</div>
     </div>
-    {% endif %}
+      {% endif %}
     <div class="stat-card">
       <div class="stat-label">Marcellus DB</div>
       <div class="stat-value" data-k="sidecar-db">{{ fmt_bytes(status.sizes.sidecar_db) }}</div>
@@ -76,11 +122,12 @@
       <div class="stat-label">Frigate DB</div>
       <div class="stat-value" data-k="frigate-db">{{ fmt_bytes(status.sizes.frigate_db) }}</div>
     </div>
-  </div>
+    </div>
+  </details>
 
-  {% set hw = status.hardware %}
   {% if hw.available or hw.host %}
-  <h2 class="section-h">Hardware</h2>
+  <details class="stat-group" data-group="hardware">
+    <summary><span class="grp-name">Hardware</span> <span class="grp-flag" hidden>&#9888;</span> <span class="grp-digest" data-digest="hardware">{% if hw.detectors %}{% for name, ms in hw.detectors.items() %}{% if loop.first %}inference {{ ms }} ms{% endif %}{% endfor %}{% endif %}{% if hw.frigate_cpu is defined %}{{ ', ' if hw.detectors }}CPU {{ hw.frigate_cpu }}%{% endif %}</span></summary>
   <div class="stat-row">
     {% for name, ms in (hw.detectors or {}).items() %}
     <div class="stat-card">
@@ -120,12 +167,6 @@
       <div class="stat-value" data-hw="mem">{{ hw.host.mem_pct }}%</div>
     </div>
     {% endif %}
-    {% if hw.host.disk_pct is defined %}
-    <div class="stat-card">
-      <div class="stat-label">Host disk</div>
-      <div class="stat-value" data-hw="disk">{{ hw.host.disk_pct }}%</div>
-    </div>
-    {% endif %}
     {% if hw.host.rss_bytes is defined %}
     <div class="stat-card">
       <div class="stat-label">Marcellus RSS</div>
@@ -144,12 +185,14 @@
     {% endfor %}
   </div>
   {% endif %}
+  </details>
   {% endif %}
 
   {% if status.push.enabled %}
   {% set pc = status.push_stats.counters %}
   {% set pg = status.push_stats.gauges %}
-  <h2 class="section-h">Push pipeline</h2>
+  <details class="stat-group" data-group="push">
+    <summary><span class="grp-name">Push pipeline</span> <span class="grp-flag" hidden>&#9888;</span> <span class="grp-digest" data-digest="push">{{ pc['relay.send.ok'] | default(0) }} sent, {{ pc['relay.send.failed'] | default(0) }} failed, breaker {{ 'open' if pg['relay.breaker.state'] | default(0) else 'closed' }}</span></summary>
   <div class="stat-row">
     <div class="stat-card">
       <div class="stat-label">Sends ok</div>
@@ -194,10 +237,12 @@
       <div class="stat-value" data-k="push-db-locked">{{ pc['db.locked.retry'] | default(0) }}</div>
     </div>
   </div>
+  </details>
   {% endif %}
 
   {% set c = status.counts %}
-  <h2 class="section-h">Counters</h2>
+  <details class="stat-group" data-group="counters">
+    <summary><span class="grp-name">Counters</span> <span class="grp-flag" hidden>&#9888;</span> <span class="grp-digest" data-digest="counters">{{ c.push_24h.get('sent_total', 0) }} pushes (24h), {{ c.live_activities_open }} Live Activities open</span></summary>
   <div class="stat-row">
     <div class="stat-card">
       <div class="stat-label">Marcellus uptime</div>
@@ -240,6 +285,7 @@
       <div class="stat-value" data-k="triage-labels">{{ c.triage_labels.count }}</div>
     </div>
   </div>
+  </details>
 
   {% if status.cameras %}
   <h2 class="section-h">

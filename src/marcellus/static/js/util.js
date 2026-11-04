@@ -92,6 +92,66 @@
     toastTimer = setTimeout(function () { toastNode.classList.remove("show"); }, 4000);
   }
 
+  // Full-screen media viewer: dark backdrop, content nodes centered, closes
+  // on the close button, a backdrop click or Escape. `onKey(ev)` sees every
+  // other keydown while open (arrow-key stepping). Returns {overlay, close}.
+  function lightbox(contentNodes, opts) {
+    opts = opts || {};
+    var closeBtn = el("button", { type: "button", class: "sc-lb-close", "aria-label": "Close", text: "\u00d7" }, []);
+    var overlay = el("div", { class: "sc-lightbox", role: "dialog", "aria-modal": "true" },
+      [closeBtn].concat(contentNodes));
+    function onKey(ev) {
+      if (ev.key === "Escape") { close(); return; }
+      if (opts.onKey) opts.onKey(ev);
+    }
+    function close() {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey);
+      if (opts.onClose) opts.onClose();
+    }
+    closeBtn.addEventListener("click", close);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(overlay);
+    closeBtn.focus();
+    return { overlay: overlay, close: close };
+  }
+
+  // Times in the VIEWER's timezone. Server-side fmt_ts renders the box's
+  // clock (UTC on the NVR), so pages emit <time data-ts="<epoch s>"
+  // data-fmt="when|ago|short"> with that as the no-JS fallback and this
+  // rewrites them on load.
+  function when(ts) {
+    var d = new Date(ts * 1000);
+    var sameYear = d.getFullYear() === new Date().getFullYear();
+    return d.toLocaleString(undefined, {
+      weekday: "short", month: "short", day: "numeric",
+      year: sameYear ? undefined : "numeric", hour: "numeric", minute: "2-digit",
+    });
+  }
+  function ago(ts) {
+    var s = Math.max(0, Date.now() / 1000 - ts);
+    if (s < 60) return "just now";
+    if (s < 3600) return Math.round(s / 60) + " min ago";
+    if (s < 86400) return Math.round(s / 3600) + " h ago";
+    if (s < 86400 * 45) return Math.round(s / 86400) + " d ago";
+    return Math.round(s / (86400 * 30)) + " mo ago";
+  }
+  function short(ts) {
+    return new Date(ts * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
+  function localizeTimes(root) {
+    (root || document).querySelectorAll("time[data-ts]").forEach(function (t) {
+      var ts = parseFloat(t.dataset.ts);
+      if (!ts) return;
+      var fmt = t.dataset.fmt || "when";
+      t.textContent = fmt === "ago" ? ago(ts) : fmt === "short" ? short(ts) : when(ts);
+      t.setAttribute("datetime", new Date(ts * 1000).toISOString());
+      if (fmt !== "when") t.title = when(ts);
+    });
+  }
+  localizeTimes(document);
+
   // Reload-vs-overwrite conflict dialog: shared by any page that PUTs a
   // revisioned document and can hit a 409 (stale rev) -- mapedit's
   // inspector.js and zones.js both save /v1/push/settings this way.
@@ -133,6 +193,10 @@
     el: el,
     banner: banner,
     dialog: dialog,
+    lightbox: lightbox,
+    when: when,
+    ago: ago,
+    localizeTimes: localizeTimes,
     conflictDialog: conflictDialog,
     toast: toast,
     bindSessionInput: bindSessionInput,

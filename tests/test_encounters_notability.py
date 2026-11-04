@@ -115,13 +115,13 @@ def test_rule1_multi_camera_wins_over_everything() -> None:
         _m(camera="cam-b", labels=("raccoon",)),
     )
     assert (s.tag, s.reason) == ("notable", "multi_camera")
-    assert s.place == "private"  # the stamp still records where it got to
+    assert s.place == "yard"  # still records where it got to (private reads as yard)
 
 
 def test_rule2_left_public_beats_alerted() -> None:
     s = _stamp(_m(zones=("porch",)))
     assert (s.tag, s.reason, s.place) == ("notable", "left_public", "doors")
-    assert s.outcome == "notify"
+    assert s.outcome == "glance"  # person/doors is Glance (quiet) in the built-in table
 
 
 def test_no_zone_member_counts_as_street() -> None:
@@ -143,8 +143,8 @@ def test_rule3_alerted_via_zone_override() -> None:
 def test_zone_override_makes_outcome_louder_than_table() -> None:
     quiet = _stamp(_m(zones=("lawn",), sub_labels=()))
     assert quiet.outcome == "glance"
-    ladder_policy.set_zone_overrides({"lawn": {"person": "notify"}})
-    assert _stamp(_m(zones=("lawn",))).outcome == "notify"
+    ladder_policy.set_zone_overrides({"lawn": {"person": "urgent"}})
+    assert _stamp(_m(zones=("lawn",))).outcome == "alarm"
 
 
 def test_suppressed_maps_to_off() -> None:
@@ -253,11 +253,12 @@ def test_stamper_for_reads_zone_classes_at_call_time() -> None:
     stamper = notability.stamper_for(settings)
     member = _m(zones=("zz_unlisted",))
     before = stamper([member])
-    active = {**policy_settings.default_settings(), "zone_classes": {"zz_unlisted": "private"}}
+    active = {**policy_settings.default_settings(), "zone_classes": {"zz_unlisted": "doors"}}
     policy_settings._active = active
     after = stamper([member])
-    assert before.place != "private"
-    assert (after.place, after.reason) == ("private", "left_public")
+    # Unlisted zones guess to yard; the live settings reclass it to doors.
+    assert before.place == "yard"
+    assert (after.place, after.reason) == ("doors", "left_public")
 
 
 def test_stamper_for_uses_configured_linger() -> None:

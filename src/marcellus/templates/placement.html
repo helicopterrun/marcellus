@@ -1,10 +1,12 @@
 {% extends "base.html" %}
+{% from "_page_head.html" import page_head %}
 {% set active_page = 'placement' %}
 {% block title %}Placement Planner · Marcellus{% endblock %}
 
-{% block page_heading %}<h1 class="sr-only">Placement</h1>{% endblock %}
 {% block body %}
 <main id="main-content">
+  {{ page_head("Placement") }}
+  {% include "_tuning_tabs.html" %}
   <div class="ctrls">
     <div class="ctrl-row">
       <label>Camera / lens<select id="sel-lens"></select></label>

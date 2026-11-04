@@ -1,8 +1,9 @@
-"""The merged outcome ladder (content design 2026-08-16): one dial per
-subject x place (off/log/glance/notify/alarm) folding the old routing level
-and LA-family choice together. These tests cover the settings-schema half:
-derivation in both directions, "off" surviving a legacy round trip, the
-evaluator's suppression, and the glance surface lookup."""
+"""The outcome views of the v3 ladder (docs/ladder-v3.md): `ladder`
+(ignore/silent/glance/urgent) is authoritative and the legacy `outcomes`
+(off/log/glance/notify/alarm) and `routing_table_v2` views are derived from
+it. These tests cover the settings-schema half: derivation, an older client's
+legacy body translating into `ladder`, the evaluator's suppression of
+ignored non-person cells, and the glance surface lookup."""
 
 from __future__ import annotations
 
@@ -21,47 +22,74 @@ def _restore():
     policy_settings.apply_settings(policy_settings.normalize_settings({}))
 
 
-def test_defaults_include_outcomes_derived_from_v2_levels():
+def test_defaults_include_outcomes_derived_from_ladder():
     doc = policy_settings.default_settings()
-    assert doc["outcomes"]["person"]["doors"] == "notify"
+    assert doc["ladder"]["person"]["doors"] == "glance"
+    assert doc["outcomes"]["person"]["doors"] == "glance"
     assert doc["outcomes"]["person"]["off_limits"] == "alarm"
-    assert doc["outcomes"]["person"]["yard"] == "glance"   # quiet -> glance
-    assert doc["outcomes"]["thing"]["street"] == "log"
+    assert doc["outcomes"]["person"]["yard"] == "glance"
+    # Ignore renders as "off" for a non-person subject, "log" for a person.
+    assert doc["outcomes"]["thing"]["street"] == "off"
+    assert doc["outcomes"]["person"]["street"] == "log"
+    assert doc["routing_table_v2"]["thing"]["street"] == "log"
 
 
-def test_outcomes_are_the_authority_when_present():
+def test_ladder_is_the_authority_when_present():
     try:
         doc = _fresh({
-            "outcomes": {"person": {"yard": "alarm", "street": "off"}},
+            "ladder": {
+                "person": {"yard": "urgent", "street": "ignore"},
+                "vehicle": {"street": "ignore"},
+            },
+            # Legacy keys beside a ladder are ignored (re-derived).
+            "outcomes": {"person": {"yard": "log"}},
         })
-        # Derived levels follow the outcomes...
+        # Derived views follow the ladder...
+        assert doc["outcomes"]["person"]["yard"] == "alarm"
         assert doc["routing_table_v2"]["person"]["yard"] == "urgent"
-        assert doc["routing_table_v2"]["person"]["street"] == "log"  # off renders as log
-        # ...and the off cell reaches the evaluator as suppression.
-        snap = Snapshot(subject="person", place="street", zone="", label="person")
+        assert doc["routing_table_v2"]["person"]["street"] == "log"
+        assert doc["outcomes"]["vehicle"]["street"] == "off"
+        # ...an ignored non-person cell reaches the evaluator as suppression...
+        snap = Snapshot(subject="vehicle", place="street", zone="", label="car")
         assert ladder.evaluate_ladder(snap) == SUPPRESSED
-        # A non-off cell still evaluates normally.
+        # ...an ignored person cell is only Log (nudgeable)...
+        snap = Snapshot(subject="person", place="street", zone="", label="person")
+        assert ladder.evaluate_ladder(snap) == "log"
+        # ...and a non-ignored cell evaluates normally.
         snap = Snapshot(subject="person", place="yard", zone="", label="person")
         assert ladder.evaluate_ladder(snap) == "urgent"
     finally:
         _restore()
 
 
-def test_legacy_body_derives_outcomes_and_preserves_off():
+def test_legacy_body_translates_into_ladder_and_derives_outcomes():
     try:
-        # A stored doc with an off cell...
-        _fresh({"outcomes": {"person": {"street": "off"}}})
-        # ...then an old app build PUTs the legacy shape only (street=log,
-        # because that's how the legacy view renders an off cell).
+        # An old app build PUTs the legacy shape only.
         doc = policy_settings.normalize_settings({
-            "routing_table_v2": {"person": {
-                "street": "log", "yard": "quiet", "doors": "notify",
-                "private": "notify", "off_limits": "urgent",
-            }},
+            "routing_table_v2": {
+                "person": {
+                    "street": "log", "yard": "quiet", "doors": "notify",
+                    "private": "notify", "off_limits": "urgent",
+                },
+                "vehicle": {
+                    "street": "log", "yard": "quiet", "doors": "quiet",
+                    "private": "quiet", "off_limits": "quiet",
+                },
+            },
         })
-        assert doc["outcomes"]["person"]["street"] == "off"      # preserved
-        assert doc["outcomes"]["person"]["yard"] == "glance"     # quiet -> glance
+        person = doc["ladder"]["person"]
+        assert person["street"] == "ignore"
+        assert person["yard"] == "glance"        # yard quiet vs private notify: louder wins
+        assert person["doors"] == "silent"       # notify -> silent
+        assert person["off_limits"] == "urgent"
+        assert doc["outcomes"]["person"]["street"] == "log"     # person ignore
+        assert doc["outcomes"]["person"]["doors"] == "notify"   # silent reads back as notify
+        assert doc["outcomes"]["person"]["yard"] == "glance"
         assert doc["outcomes"]["person"]["off_limits"] == "alarm"
+        # A non-person log cell is Ignore, which renders as off.
+        assert doc["ladder"]["vehicle"]["street"] == "ignore"
+        assert doc["outcomes"]["vehicle"]["street"] == "off"
+        assert doc["outcomes"]["vehicle"]["yard"] == "glance"   # quiet -> glance
     finally:
         _restore()
 
@@ -85,13 +113,13 @@ def test_legacy_level_change_clears_off():
 def test_zone_override_outranks_off():
     try:
         _fresh({
-            "outcomes": {"person": {"yard": "off"}},
-            "zone_overrides": {"front_garden": {"person": "notify"}},
+            "ladder": {"vehicle": {"yard": "ignore"}},
+            "zone_overrides": {"front_garden": {"vehicle": "silent"}},
         })
-        snap = Snapshot(subject="person", place="yard", zone="front_garden", label="person")
-        assert ladder.evaluate_ladder(snap) == "notify"
+        snap = Snapshot(subject="vehicle", place="yard", zone="front_garden", label="car")
+        assert ladder.evaluate_ladder(snap) == "silent"
         # Same place without the zone: suppressed.
-        snap = Snapshot(subject="person", place="yard", zone="", label="person")
+        snap = Snapshot(subject="vehicle", place="yard", zone="", label="car")
         assert ladder.evaluate_ladder(snap) == SUPPRESSED
     finally:
         _restore()
@@ -107,18 +135,20 @@ def test_validation_rejects_bad_outcomes():
 
 def test_outcome_for_reads_active_and_falls_back_to_levels():
     try:
-        _fresh({"outcomes": {"person": {"yard": "glance"}}})
+        _fresh({"ladder": {"person": {"yard": "glance", "doors": "silent"}}})
         assert policy_settings.outcome_for("person", "yard") == "glance"
+        assert policy_settings.outcome_for("person", "doors") == "notify"  # silent
     finally:
         _restore()
-    # No outcomes in the active doc at all: derive from levels.
+    # No ladder or outcomes in the active (pre-v3) doc at all: derive from levels.
     saved = policy_settings._active
     try:
         doc = policy_settings.default_settings()
+        del doc["ladder"]
         del doc["outcomes"]
         policy_settings._active = doc
         ladder_policy.set_off_cells(set())
-        assert policy_settings.outcome_for("person", "doors") == "notify"
+        assert policy_settings.outcome_for("person", "doors") == "glance"
         assert policy_settings.outcome_for("person", "yard") == "glance"
     finally:
         policy_settings._active = saved

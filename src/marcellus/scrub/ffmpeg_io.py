@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 _FFMPEG = "ffmpeg"
@@ -208,7 +209,7 @@ _SHOWINFO_PTS = re.compile(rb"pts_time:\s*([0-9]+(?:\.[0-9]+)?)")
 
 async def extract_keyframes_with_pts(
     segment_path: Path, out_dir: Path, *, timeout_s: float = _EXTRACT_TIMEOUT_S,
-    cell_w: int = 320, cell_h: int = 180,
+    cell_w: int = 320, cell_h: int = 180, hwaccel_args: Sequence[str] = (),
 ) -> list[tuple[float, Path]]:
     """Keyframe-only decode returning `(pts_seconds, path)` for each frame.
 
@@ -223,7 +224,7 @@ async def extract_keyframes_with_pts(
     the two-process version assumed that across separate decodes.
     """
     proc = await _spawn(
-        _FFMPEG, "-nostdin", "-loglevel", "info",
+        _FFMPEG, "-nostdin", "-loglevel", "info", *hwaccel_args,
         "-skip_frame", "nokey", "-vsync", "0", "-i", str(segment_path),
         "-vf", f"scale={cell_w}:{cell_h},showinfo", "-q:v", "8", "-f", "image2",
         str(out_dir / "%06d.jpg"),
@@ -263,10 +264,12 @@ def _stderr_tail(err: bytes, limit: int = 300) -> str:
 async def extract_fps(
     segment_path: Path, out_dir: Path, interval_s: float, *,
     timeout_s: float = _EXTRACT_TIMEOUT_S, cell_w: int = 320, cell_h: int = 180,
+    hwaccel_args: Sequence[str] = (),
 ) -> list[Path]:
     """Full-decode `fps=1/N` fallback for a coarser GOP (§5.2)."""
     proc = await _spawn(
-        _FFMPEG, "-nostdin", "-loglevel", "error", "-i", str(segment_path),
+        _FFMPEG, "-nostdin", "-loglevel", "error", *hwaccel_args,
+        "-i", str(segment_path),
         "-vf", f"fps=1/{interval_s},scale={cell_w}:{cell_h}", "-q:v", "8", "-f", "image2",
         str(out_dir / "%06d.jpg"),
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,

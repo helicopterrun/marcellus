@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import time
 from typing import Any, Literal
-from urllib.parse import parse_qsl, quote
+from urllib.parse import parse_qsl, quote, urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -21,10 +21,13 @@ from marcellus.encounters import notability, store, title, visits
 from marcellus.encounters.adjacency import Adjacency, build_adjacency
 from marcellus.encounters.notability import Stamper
 from marcellus.errors import error_detail
-from marcellus.models.wire import EncounterResponse, EncountersResponse
+from marcellus.faces import people
+from marcellus.models.wire import EncounterPeopleResponse, EncountersPeopleResponse
 from marcellus.push import policy_settings
 from marcellus.routes._deps import settings_of as _settings
 from marcellus.routes._deps import templates_of as _templates
+from marcellus.routes.people import _resolve, _tz
+from marcellus.routes.sources import sightings_page_context
 
 router = APIRouter(tags=["encounters"])
 v1_router = APIRouter(prefix="/v1", tags=["v1"])
@@ -32,6 +35,8 @@ v1_router = APIRouter(prefix="/v1", tags=["v1"])
 #: HTML page default window.
 _DEFAULT_WINDOW_S = 48 * 3600.0
 _MAX_LIMIT = 500
+#: HTML list: first batch, and how much each "Show more" adds.
+_PAGE_BATCH = 25
 
 
 def _csv(value: str | None) -> list[str]:
@@ -165,34 +170,78 @@ def _flash_redirect(path: str, msg: str) -> RedirectResponse:
 
 @router.get("/encounters", response_class=HTMLResponse)
 async def encounters_page(
-    request: Request, camera: str | None = None, since: float | None = None, msg: str | None = None
+    request: Request,
+    camera: str | None = None,
+    since: float | None = None,
+    msg: str | None = None,
+    limit: int = _PAGE_BATCH,
 ) -> Any:
     settings = _settings(request)
     window_since = since if since is not None else time.time() - _DEFAULT_WINDOW_S
+    # Out-of-range values are clamped, not rejected: this is a page, and a
+    # hand-edited URL should still render something.
+    limit = max(1, min(int(limit), _MAX_LIMIT))
 
-    def _load(conn: Any) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
-        rows = store.list_recent(conn, since=window_since, limit=200, camera=camera)
-        by_encounter = store.members_for(conn, [r["id"] for r in rows])
-        return [(row, by_encounter[row["id"]]) for row in rows]
+    def _load(
+        conn: Any,
+    ) -> tuple[list[tuple[dict[str, Any], list[dict[str, Any]]]], int, list[dict[str, Any]]]:
+        # One extra row tells us whether "Show more" has anything to show and
+        # which row it should land on.
+        rows = store.list_recent(conn, since=window_since, limit=limit + 1, camera=camera)
+        total = store.count_recent(conn, since=window_since, camera=camera)
+        by_encounter = store.members_for(conn, [r["id"] for r in rows[:limit]])
+        return [(row, by_encounter[row["id"]]) for row in rows[:limit]], total, rows[limit:]
 
-    loaded = await db.with_sidecar(settings.sidecar.db_path, _load)
+    loaded, total, extra = await db.with_sidecar(settings.sidecar.db_path, _load)
     encounters = [
         dict(_summary(row, member_rows), members=[_member(m) for m in member_rows])
         for row, member_rows in loaded
     ]
+    more_href = None
+    if extra and limit < _MAX_LIMIT:
+        query: dict[str, Any] = {}
+        if camera:
+            query["camera"] = camera
+        if since is not None:
+            query["since"] = since
+        query["limit"] = min(limit + _PAGE_BATCH, _MAX_LIMIT)
+        more_href = f"/encounters?{urlencode(query)}#enc-{extra[0]['id']}"
+    external_sightings = await _external_sightings(request, window_since)
     return _templates(request).TemplateResponse(
         request,
         "encounters.html",
         {
             "encounters": encounters,
+            "total": total,
+            "more_href": more_href,
             "camera": camera or "",
             "since": window_since,
             "enabled": settings.encounters.enabled,
             "active_page": "encounters",
             "adjacency": _adjacency_for(request).to_json(),
             "msg": msg,
+            "external_sightings": external_sightings,
         },
     )
+
+
+async def _external_sightings(request: Request, since: float) -> dict[str, Any] | None:
+    """Recent external-source sightings for the page's "Wildlife camera"
+    gallery (guide_content's external-sources.md). Shown beside encounters,
+    never linked into them -- an external device has no zones/adjacency.
+    None when the feature is off, its service failed to start, or nothing
+    is in the window."""
+    service = getattr(request.app.state, "external_sources", None)
+    if service is None:
+        return None
+    names = service.source_names()
+    now = time.time()
+
+    def _load(conn: Any) -> dict[str, Any] | None:
+        return sightings_page_context(conn, since=since, now=now, source_names=names)
+
+    ctx: dict[str, Any] | None = await db.with_sidecar(service.db_path, _load)
+    return ctx
 
 
 @router.get("/encounters/{encounter_id}", response_class=HTMLResponse)
@@ -235,7 +284,7 @@ async def encounters_adjacency(request: Request) -> dict[str, Any]:
     return _adjacency_for(request).to_json()
 
 
-@v1_router.get("/encounters", response_model=EncountersResponse)
+@v1_router.get("/encounters", response_model=EncountersPeopleResponse)
 async def encounters_list(
     request: Request,
     since: float | None = None,
@@ -246,16 +295,26 @@ async def encounters_list(
     tag: Literal["notable", "background"] | None = None,
     label: str | None = None,
     place: str | None = None,
+    person: int | None = None,
+    tz: str = "UTC",
 ) -> dict[str, Any]:
     """Newest first. Page by passing the last row's `start` as `before`. The
     48 h default window applies only when neither `since` nor `before` is
     given; with `before` alone there is no lower bound. `camera`, `label`
-    and `place` take comma-separated lists (any-of); all filters AND."""
+    and `place` take comma-separated lists (any-of); all filters AND. `person`
+    is a person id (merged-away ids resolve; unknown is 404): only encounters
+    with a live sighting of that person; 400 while face_enrich is disabled."""
     settings = _settings(request)
+    zone = _tz(tz)
+    with_people = bool(settings.face_enrich.enabled)
     cameras = _csv(camera)
     labels = _csv(label)
     places = _csv(place)
-    unknown = [p for p in places if p not in policy_settings.PLACES]
+    # Ladder v3 retired `private` into `yard`: accept it, and match both
+    # spellings either way -- encounters stamped before v3 still say private.
+    unknown = [p for p in places if p not in policy_settings.LEGACY_PLACES]
+    if places and ("yard" in places or "private" in places):
+        places = [*dict.fromkeys([*places, "yard", "private"])]
     if unknown:
         raise HTTPException(
             status_code=422,
@@ -264,11 +323,17 @@ async def encounters_list(
                 f"unknown place {unknown[0]!r}; expected one of {list(policy_settings.PLACES)}",
             ),
         )
+    if person is not None and not with_people:
+        raise HTTPException(
+            status_code=400,
+            detail=error_detail("invalid", "person filter needs face_enrich.enabled"),
+        )
     window_since = since
     if since is None and before is None:
         window_since = time.time() - _DEFAULT_WINDOW_S
 
     def _load(conn: Any) -> list[dict[str, Any]]:
+        cluster = _resolve(conn, person) if person is not None else None
         rows = store.list_recent(
             conn,
             since=window_since,
@@ -279,28 +344,49 @@ async def encounters_list(
             tag=tag,
             labels=labels,
             places=places,
+            person_cluster=cluster,
         )
-        return summaries(conn, rows)
+        by_encounter = store.members_for(conn, [r["id"] for r in rows])
+        out = [_summary(r, by_encounter[r["id"]]) for r in rows]
+        found = (
+            people.people_for_events(conn, zone, by_encounter)
+            if with_people
+            else {}
+        )
+        for item in out:
+            item["people"] = found.get(item["id"], [])
+        return out
 
     out = await db.with_sidecar(settings.sidecar.db_path, _load)
     return {"t": time.time(), "encounters": out}
 
 
-@v1_router.get("/encounters/{encounter_id}", response_model=EncounterResponse)
-async def encounter_detail(encounter_id: str, request: Request) -> dict[str, Any]:
+@v1_router.get("/encounters/{encounter_id}", response_model=EncounterPeopleResponse)
+async def encounter_detail(
+    encounter_id: str, request: Request, tz: str = "UTC"
+) -> dict[str, Any]:
     settings = _settings(request)
+    zone = _tz(tz)
 
-    def _load(conn: Any) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    def _load(
+        conn: Any,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], list[dict[str, Any]]]:
         row = store.get(conn, encounter_id)
         if row is None:
-            return None, []
-        return row, store.members(conn, encounter_id)
+            return None, [], []
+        member_rows = store.members(conn, encounter_id)
+        found = (
+            people.people_for_events(conn, zone, {encounter_id: member_rows})
+            if settings.face_enrich.enabled
+            else {}
+        )
+        return row, member_rows, found.get(encounter_id, [])
 
-    row, member_rows = await db.with_sidecar(settings.sidecar.db_path, _load)
+    row, member_rows, who = await db.with_sidecar(settings.sidecar.db_path, _load)
     if row is None:
         raise HTTPException(status_code=404, detail=error_detail("not_found", "no such encounter"))
     return {
-        "encounter": _summary(row, member_rows),
+        "encounter": {**_summary(row, member_rows), "people": who},
         "members": [_member(m) for m in member_rows],
     }
 
@@ -378,7 +464,9 @@ async def merge_encounters_page(encounter_id: str, request: Request) -> Any:
         count = await db.with_sidecar(settings.sidecar.db_path, _do)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=error_detail("invalid", str(exc))) from exc
-    return _flash_redirect(f"/encounters/{encounter_id}", f"Merged {count} atom(s) from {source}")
+    return _flash_redirect(
+        f"/encounters/{encounter_id}", f"Merged {count} sighting(s) from {source}"
+    )
 
 
 @router.post("/encounters/{encounter_id}/atoms/{atom_id}/undo")

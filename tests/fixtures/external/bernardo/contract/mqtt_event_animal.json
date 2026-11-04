@@ -1,0 +1,19 @@
+{
+  "event_type": "animal",
+  "key": "20261015_210520",
+  "time": "2026-10-15T21:05:20-07:00",
+  "status": "complete",
+  "sensor": "pir",
+  "trigger_path": "gpio",
+  "mode": "night",
+  "camera": "cam",
+  "confidence": 0.927,
+  "activity": {
+    "cam": 0.1373,
+    "cam2": 0.0523
+  },
+  "degraded": [],
+  "poster_url": "http://192.168.1.37:8000/poster/20261015_210520",
+  "clip_url": "http://192.168.1.37:8000/media/_events/cam/evt_20261015_210520.mp4",
+  "page_url": "http://192.168.1.37:8000/#/events/2685"
+}
