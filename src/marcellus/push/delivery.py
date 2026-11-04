@@ -445,6 +445,7 @@ async def send_card_mutation(
     encounter_id: str = "",
     event_camera: str = "",
     cameras_path: list[str] | None = None,
+    summary_row: bool = True,
     fallback_out: list[str] | None = None,
     la_available: bool = True,
 ) -> int:
@@ -558,6 +559,11 @@ async def send_card_mutation(
                 fallback_sent.append(device.device_id)
         demoted = device.apns_token in demote_tokens
         if demoted and suppress_demoted and mutation == RESOLVE:
+            if not summary_row:
+                # User turned off the durable history row -- the LA was the
+                # whole story, so drop the deferred resolve entirely instead
+                # of scheduling it.
+                continue
             # The one durable history row still gets written -- just after
             # the resolved LA's dismissal window, not on top of it. Payload
             # is already passive/silent (quiet-resolve block above).
