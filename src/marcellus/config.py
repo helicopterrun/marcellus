@@ -454,6 +454,12 @@ class WildlifeSection(BaseModel):
     # One frame per segment misses an animal that crosses in under ~10s.
     frames_per_segment: int = 3
 
+    # Render node for VAAPI keyframe decode, e.g. "/dev/dri/renderD128" (the
+    # NVR's iGPU). Empty = software decode. On the nvr's 1440p segments this
+    # cuts ffmpeg CPU per segment ~1.1s -> ~0.5s with identical frames; the
+    # MegaDetector pass is the other ~60% of a run and stays on the CPU.
+    vaapi_device: str = ""
+
     # MegaDetector "animal" score floor. Deliberately low: SpeciesNet does the
     # rejecting. 0.2 kept every true positive in the benchmark.
     min_detector_score: float = 0.2

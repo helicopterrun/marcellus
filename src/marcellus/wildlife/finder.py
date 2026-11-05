@@ -159,22 +159,21 @@ def parse_showinfo(stderr: bytes) -> list[tuple[float, int, int]]:
     return out
 
 
-def extract_frames(
-    path: Path, *, width: int, count: int, timeout_s: float = 60.0
-) -> list[Frame]:
-    """Up to `count` keyframes from one segment, scaled to `width`, as RGB.
-
-    Keyframe-only decode (`-skip_frame nokey`) is the scrub generator's trick:
-    every camera here has a keyframe every 1s (package, crows-nest every 5s),
-    so this is ~10 cheap intra-frame decodes instead of 100-200 full ones.
-    Raw RGB on a pipe skips a JPEG encode/decode round trip per frame.
-    """
-    cmd = [
-        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "info",
+def _decode_cmd(path: Path, width: int, vaapi_device: str) -> list[str]:
+    # VAAPI decode keeps libavcodec's h264 parser, so `-skip_frame nokey` still
+    # applies (h264_qsv ignores it and hangs on the keyframe-only read) and
+    # the output is byte-identical to software decode. Frames are downloaded
+    # and scaled on the CPU: scale_vaapi/vpp_qsv fail on the distro iHD driver.
+    hw = ["-hwaccel", "vaapi", "-hwaccel_device", vaapi_device] if vaapi_device else []
+    return [
+        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "info", *hw,
         "-skip_frame", "nokey", "-vsync", "0", "-i", str(path),
         "-vf", f"scale={int(width)}:-2,showinfo",
         "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
     ]
+
+
+def _run_decode(cmd: list[str], path: Path, timeout_s: float) -> subprocess.CompletedProcess[bytes]:
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=timeout_s, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -182,6 +181,30 @@ def extract_frames(
     if proc.returncode != 0:
         tail = proc.stderr.decode("utf-8", "replace").strip()[-300:].replace("\n", " | ")
         raise FrameError(f"ffmpeg rc={proc.returncode} on {path}: {tail or 'no stderr'}")
+    return proc
+
+
+def extract_frames(
+    path: Path, *, width: int, count: int, timeout_s: float = 60.0, vaapi_device: str = ""
+) -> list[Frame]:
+    """Up to `count` keyframes from one segment, scaled to `width`, as RGB.
+
+    Keyframe-only decode (`-skip_frame nokey`) is the scrub generator's trick:
+    every camera here has a keyframe every 1s (package, crows-nest every 5s),
+    so this is ~10 cheap intra-frame decodes instead of 100-200 full ones.
+    Raw RGB on a pipe skips a JPEG encode/decode round trip per frame.
+
+    With `vaapi_device` set, decode runs on that render node; a failed
+    hardware run is retried once in software so a driver problem costs CPU,
+    not a segment's retry budget.
+    """
+    try:
+        proc = _run_decode(_decode_cmd(path, width, vaapi_device), path, timeout_s)
+    except FrameError as exc:
+        if not vaapi_device:
+            raise
+        logger.warning("wildlife: VAAPI decode failed, retrying in software: %s", exc)
+        proc = _run_decode(_decode_cmd(path, width, ""), path, timeout_s)
     info = parse_showinfo(proc.stderr)
     if not info:
         raise FrameError(f"no frames decoded from {path}")
@@ -608,7 +631,8 @@ def scan(
                 continue
             try:
                 frames = extract_frames(
-                    path, width=cfg.frame_width, count=cfg.frames_per_segment
+                    path, width=cfg.frame_width, count=cfg.frames_per_segment,
+                    vaapi_device=cfg.vaapi_device,
                 )
                 res = process_segment(conn, engine, seg, frames, cfg)
             except Exception as exc:  # noqa: BLE001 - record, retry on a later run

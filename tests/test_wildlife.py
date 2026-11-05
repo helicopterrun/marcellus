@@ -197,6 +197,30 @@ def test_extract_frames_keyframe_decode(tmp_path: Path) -> None:
     assert all((f.width, f.height, len(f.rgb)) == (160, 90, 160 * 90 * 3) for f in frames)
 
 
+def test_decode_cmd_adds_vaapi_before_input() -> None:
+    sw = finder._decode_cmd(Path("/x.mp4"), 1280, "")
+    assert "-hwaccel" not in sw
+    hw = finder._decode_cmd(Path("/x.mp4"), 1280, "/dev/dri/renderD128")
+    i = hw.index("-hwaccel")
+    assert hw[i : i + 4] == ["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128"]
+    assert i < hw.index("-i") and "-skip_frame" in hw
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_extract_frames_falls_back_to_software(tmp_path: Path) -> None:
+    seg = tmp_path / "seg.mp4"
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi",
+         "-i", "testsrc=size=320x180:rate=10:duration=2",
+         "-c:v", "libx264", "-g", "10", "-pix_fmt", "yuv420p", str(seg)],
+        check=True,
+    )
+    frames = finder.extract_frames(
+        seg, width=160, count=2, vaapi_device=str(tmp_path / "no-such-render-node")
+    )
+    assert len(frames) == 2
+
+
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
 def test_extract_frames_raises_on_garbage(tmp_path: Path) -> None:
     bad = tmp_path / "bad.mp4"
@@ -337,7 +361,7 @@ def _scan(s: Settings, models: FakeModels, monkeypatch: pytest.MonkeyPatch,
           frames: int = 1) -> dict[str, Any]:
     monkeypatch.setattr(
         finder, "extract_frames",
-        lambda path, *, width, count: [_frame(pts=float(i)) for i in range(frames)],
+        lambda path, *, width, count, vaapi_device: [_frame(pts=float(i)) for i in range(frames)],
     )
     return finder.scan(s, now=T0 + 3600, models=models)
 
@@ -428,7 +452,7 @@ def test_scan_records_missing_files_and_failures(
     ])
     (tmp_path / "rec" / f"recordings/2026-10-17/20/gate-walkway/{int(T0)}.mp4").unlink()
 
-    def boom(path: Path, *, width: int, count: int) -> list[Frame]:
+    def boom(path: Path, *, width: int, count: int, vaapi_device: str) -> list[Frame]:
         raise finder.FrameError("corrupt")
 
     monkeypatch.setattr(finder, "extract_frames", boom)
@@ -450,7 +474,9 @@ def test_scan_stops_at_the_time_budget(
     s = _settings(tmp_path, frigate_db_path, sidecar_db_path)
     _add_recordings(frigate_db_path, tmp_path, [("gate-walkway", T0 + 10 * i, 30, 0)
                                                 for i in range(3)])
-    monkeypatch.setattr(finder, "extract_frames", lambda p, *, width, count: [_frame()])
+    monkeypatch.setattr(
+        finder, "extract_frames", lambda p, *, width, count, vaapi_device: [_frame()]
+    )
     summary = finder.scan(s, now=T0 + 3600, models=FakeModels([], {}), max_runtime_s=-1)
     assert (summary["scanned"], summary["deferred"]) == (0, 3)
 
