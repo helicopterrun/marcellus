@@ -358,16 +358,18 @@ class MqttReviewSubscriber:
             logger.info("push: frigate reports offline via frigate/available")
 
     def on_message(self, _client: Any, _userdata: Any, msg: mqtt.MQTTMessage) -> None:
+        # Newer paho releases type payload as `bytes | bytearray`.
+        payload = bytes(msg.payload)
         if msg.topic == self.settings.mqtt_topic_reviews:
             if self._capture is not None:
-                self._capture.append(msg.topic, msg.payload)
-            self._handle_reviews_message(msg.payload)
+                self._capture.append(msg.topic, payload)
+            self._handle_reviews_message(payload)
         elif msg.topic == self.settings.mqtt_topic_events:
             if self._capture is not None:
-                self._capture.append(msg.topic, msg.payload)
-            self._handle_events_message(msg.payload)
+                self._capture.append(msg.topic, payload)
+            self._handle_events_message(payload)
         elif msg.topic == self.settings.mqtt_topic_available:
-            self._handle_available_message(msg.payload)
+            self._handle_available_message(payload)
 
     @property
     def connected(self) -> bool:
