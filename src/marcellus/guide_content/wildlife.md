@@ -81,6 +81,7 @@ lot between cameras. Start with the cameras where animals actually go. Set
 | `classifier_labels_path` | …/speciesnet-v4.0.3a-crop.labels.txt | SpeciesNet's class list, one taxonomy string per line, in model output order. |
 | `frame_width` | 1280 | Width frames are scaled to before detection. Small animals far from the camera need 1280; 640 lost an overhead squirrel. |
 | `frames_per_segment` | 3 | Keyframes sampled per 10s segment. More catches quicker dashes and costs proportionally more CPU. |
+| `vaapi_device` | "" | Render node for hardware keyframe decode, e.g. `/dev/dri/renderD128`. Empty decodes in software. Frames are identical either way; a failed hardware decode retries in software. |
 | `min_detector_score` | 0.2 | MegaDetector score floor for a candidate box. Low on purpose, because the classifier does the rejecting. |
 | `reject_score` | 0.8 | A box whose blank, human or vehicle probability reaches this is dropped. Lower it to drop more doubtful boxes. |
 | `exclude_suggestions` | ["bird"] | Suggestions recorded but never queued for review. Frigate already tracks birds. |
