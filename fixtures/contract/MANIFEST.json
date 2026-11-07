@@ -1,6 +1,6 @@
 {
   "files": {
-    "capabilities.json": "6544fbe81e50a9abca721c0dbb79386d4c6e859e17d1693c0b75742d35967aa4",
+    "capabilities.json": "7b6962eb166f6531d7b122b96f3ff9134aebbb7f7f0bb10e02bfdf480f50581b",
     "card_push.json": "32962eefc42db5bbc3561b9b0e19aabf72c6d9a3c6da48d1e35ceb49934b30ae",
     "card_push_silent.json": "d20c0cd6bd23a417cd71dcd92085b1940883e2065dbf8962c54e90e8506593dd",
     "card_push_test.json": "b3aa845223322fd9ebed4e7d4b7fdd7692f72e05382228a1d541f6ce722e6f9a",
@@ -23,6 +23,7 @@
     "v1_events_search.json": "bea2924484a8f196ffe0d35b73a5523709b62294e47b7baa05ec36e2e7cb7970",
     "v1_highlights.json": "6f7b277033f667cc24b2e6bc9c5a2886ba41b55f07c0116d74179c3bcd74ec59",
     "v1_people.json": "af384de1e2b5f1bb8d5bf5a5e9bc4c30b1e328d6c2acfea9c456c47dcaa27c10",
+    "v1_people_by_events.json": "77bd848134bd6ff80cab2dde57a94da98e98593abf183308fc1f3552c122c847",
     "v1_people_merge_suggestions.json": "493b94887387e8af6ee838d2a20d04375d3e3919ef5da949f1fc087508fa5248",
     "v1_people_merge_suggestions_dismiss.json": "019e1236ea47271e5b7fd42ba88e66bc1f9e3985e875d3e5063f6714f56fecbd",
     "v1_person.json": "f1c5f9c2ae03ad85aab7686e09d7d7f5f8edecd7688ffa676ec7d41ee55d12e3",

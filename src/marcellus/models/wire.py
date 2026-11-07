@@ -93,6 +93,8 @@ class PeopleCapabilities(_Wire):
     merge_suggestions: bool
     #: `GET /v1/encounters` accepts `person=<id>` (additive; same gate).
     encounter_filter: bool
+    #: `GET /v1/people/by-events` exists (additive; same gate).
+    event_lookup: bool
 
 
 class ExternalSourceCapability(_Wire):
@@ -726,3 +728,19 @@ class EncounterPeopleResponse(_Wire):
 
 class PersonForEventResponse(_Wire):
     person: Person | None
+
+
+class EventPersonEntry(_Wire):
+    event_id: str
+    #: Cluster id of the live person recognized on this event, else null.
+    person: int | None
+    #: This event's own face crop path, else null (always null when `person` is).
+    crop: str | None
+
+
+class PeopleByEventsResponse(_Wire):
+    t: float
+    #: Distinct persons referenced in `events`, ordered named-first, most days, id.
+    people: list[Person]
+    #: Exactly one entry per distinct requested id, in request order.
+    events: list[EventPersonEntry]

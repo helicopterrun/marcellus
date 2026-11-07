@@ -1341,6 +1341,10 @@ def _build_v1_person_sightings() -> dict[str, Any]:
     return _get_people("/v1/people/1/sightings")
 
 
+def _build_v1_people_by_events() -> dict[str, Any]:
+    return _get_people("/v1/people/by-events", ids="e1b,nope")
+
+
 def _build_v1_people_merge_suggestions() -> dict[str, Any]:
     return _get_people("/v1/people/merge-suggestions")
 
@@ -1385,6 +1389,7 @@ FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "v1_people.json": _build_v1_people,
     "v1_person.json": _build_v1_person,
     "v1_person_sightings.json": _build_v1_person_sightings,
+    "v1_people_by_events.json": _build_v1_people_by_events,
     "v1_people_merge_suggestions.json": _build_v1_people_merge_suggestions,
     "v1_people_merge_suggestions_dismiss.json": _build_v1_people_merge_suggestions_dismiss,
     "v1_sightings.json": _build_v1_sightings,

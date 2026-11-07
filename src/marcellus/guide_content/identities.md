@@ -2,7 +2,7 @@
 title: Identities
 section: people
 order: 2
-routes: ["/enrich/clusters", "/enrich/accuracy", "/v1/people", "/v1/people/{person_id}", "/v1/people/{person_id}/sightings", "/v1/people/{person_id}/similar", "/v1/people/{person_id}/avatar.jpg", "/v1/people/{person_id}/name", "/v1/people/{person_id}/merge", "/v1/people/{person_id}/follow", "/v1/people/{person_id}/note", "/v1/people/{person_id}/sightings/{event_id}", "/v1/faces/{event_id}/{rank}.jpg", "/v1/people/for-event/{event_id}", "/enrich/merge-proposals.json", "/v1/people/merge-suggestions", "/v1/people/merge-suggestions/dismiss", "/enrich/clusters/{cluster_id}/faces.json"]
+routes: ["/enrich/clusters", "/enrich/accuracy", "/v1/people", "/v1/people/{person_id}", "/v1/people/{person_id}/sightings", "/v1/people/{person_id}/similar", "/v1/people/{person_id}/avatar.jpg", "/v1/people/{person_id}/name", "/v1/people/{person_id}/merge", "/v1/people/{person_id}/follow", "/v1/people/{person_id}/note", "/v1/people/{person_id}/sightings/{event_id}", "/v1/faces/{event_id}/{rank}.jpg", "/v1/people/for-event/{event_id}", "/v1/people/by-events", "/enrich/merge-proposals.json", "/v1/people/merge-suggestions", "/v1/people/merge-suggestions/dismiss", "/enrich/clusters/{cluster_id}/faces.json"]
 config: ["face_enrich"]
 ---
 
@@ -96,6 +96,19 @@ encounter lists (`/v1/encounters`) carry a `people` list read live from the
 face data, so it stays right after a rename, merge, exclusion or delete, and
 `/v1/people/for-event/{event_id}` answers the same for a single event. Both are
 empty while `face_enrich` is off.
+
+`GET /v1/people/by-events?ids=<id>,<id>,...&tz=<IANA zone>` answers it for up
+to 100 events in one call (the app uses it for reel markers, the dossier and
+Search tiles). The response is `{t, people, events}`: `events` has one
+`{event_id, person, crop}` entry per distinct requested id, in request order;
+`people` lists each distinct person referenced once (full person record, with
+`days` and familiarity counted over all their sightings), named first, then
+most days. `person` and `crop` are both null when the event has no recognized
+person (unknown id, no face data, excluded sighting, or a person with no live
+sightings); `crop` alone is null when the event has a person but no stored
+crop. Blank and duplicate ids collapse; no ids gives empty lists; more than 100
+distinct ids is a 422 `too_many_ids`; a bad `tz` is a 422 `invalid_tz`.
+`/v1/capabilities` `people.event_lookup` says the route exists.
 
 ## Proposed merges
 

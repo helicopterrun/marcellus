@@ -1,0 +1,31 @@
+{
+  "events": [
+    {
+      "crop": "/v1/faces/e1b/0.jpg",
+      "event_id": "e1b",
+      "person": 1
+    },
+    {
+      "crop": null,
+      "event_id": "nope",
+      "person": null
+    }
+  ],
+  "people": [
+    {
+      "avatar_path": "/v1/faces/e1a/0.jpg",
+      "days": 3,
+      "familiarity": "named",
+      "first_seen": 1785900000.0,
+      "followed": true,
+      "handle": "Pear Fieldfare",
+      "id": 1,
+      "last_camera": "gate-face",
+      "last_seen": 1786080000.0,
+      "name": "Horatio",
+      "note": "the neighbour",
+      "sightings": 3
+    }
+  ],
+  "t": 1785952622.704
+}
