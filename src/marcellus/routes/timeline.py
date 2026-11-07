@@ -167,7 +167,7 @@ async def timeline(
 
     def _load_encounters(sc_conn: Any) -> list[dict[str, Any]]:
         rows = [r for eid in encounter_ids_seen if (r := store.get(sc_conn, eid)) is not None]
-        return summaries(sc_conn, rows)
+        return summaries(sc_conn, rows, with_people=bool(settings.face_enrich.enabled))
 
     encounter_summaries = await db.with_sidecar(settings.sidecar.db_path, _load_encounters)
     encounters_out = sorted(encounter_summaries, key=lambda e: e["start"])

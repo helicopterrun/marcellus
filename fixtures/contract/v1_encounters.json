@@ -99,7 +99,9 @@
       ],
       "end": 1785945524.704,
       "id": "enc_walk",
-      "identities": [],
+      "identities": [
+        "Horatio"
+      ],
       "labels": [
         "dog",
         "person"
@@ -167,7 +169,7 @@
         }
       ],
       "tag": "notable",
-      "title": "Person and dog \u00b7 Sidewalk \u2192 Front Garden \u2192 Front Door \u2192 Sidewalk"
+      "title": "Horatio, Elm Kite and dog \u00b7 Sidewalk \u2192 Front Garden \u2192 Front Door \u2192 Sidewalk"
     }
   ],
   "t": 1785952622.704

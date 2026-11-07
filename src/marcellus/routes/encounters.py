@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import timezone
 from typing import Any, Literal
 from urllib.parse import parse_qsl, quote, urlencode
 
@@ -79,16 +80,48 @@ def _stops_of(member_rows: list[dict[str, Any]]) -> list[visits.MemberStop]:
     ]
 
 
+def _person_labels(people_: list[dict[str, Any]] | None) -> list[str]:
+    """The words recognized people go by in a title: the name when set, else
+    the handle ("Alder Wren"); a person with neither is skipped. Order as given
+    (`people.people_for_events` sorts named first)."""
+    out: list[str] = []
+    for p in people_ or []:
+        label = (p.get("name") or "").strip() or (p.get("handle") or "").strip()
+        if label:
+            out.append(label)
+    return out
+
+
+def _merged_identities(stored: list[str], people_: list[dict[str, Any]] | None) -> list[str]:
+    """Stored identity strings plus the NAMES (never handles) of named
+    recognized people, de-duplicated case-insensitively, stored order first."""
+    out = list(stored)
+    seen = {s.strip().lower() for s in stored}
+    for p in people_ or []:
+        name = (p.get("name") or "").strip()
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            out.append(name)
+    return out
+
+
 def _title_and_stops(
-    row: dict[str, Any], member_rows: list[dict[str, Any]]
+    row: dict[str, Any],
+    member_rows: list[dict[str, Any]],
+    people_: list[dict[str, Any]] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """The encounter's "who + route" title (`encounters/title.py`) and its
     `stops` (`encounters/visits.py`), computed at read time from the encounter
-    row and its members, both through the real zone display-name lookup."""
+    row and its members, both through the real zone display-name lookup.
+
+    `people_` (the read-time `people.people_for_events` result) puts recognized
+    faces first among the identity words -- name, else handle -- ahead of the
+    stored sub_label strings, which go stale (face recognition lands minutes
+    after the encounter is stamped). None/empty leaves the stored-only title."""
     members = _stops_of(member_rows)
     text = title.encounter_title(
         json.loads(row["labels_json"]),
-        json.loads(row["identities_json"]),
+        [*_person_labels(people_), *json.loads(row["identities_json"])],
         title.route_places(members, policy_settings.zone_display_name),
     )
     stops = [
@@ -98,8 +131,12 @@ def _title_and_stops(
     return text, stops
 
 
-def _summary(row: dict[str, Any], member_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    text, stops = _title_and_stops(row, member_rows)
+def _summary(
+    row: dict[str, Any],
+    member_rows: list[dict[str, Any]],
+    people_: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    text, stops = _title_and_stops(row, member_rows, people_)
     return {
         "id": row["id"],
         "title": text,
@@ -108,7 +145,7 @@ def _summary(row: dict[str, Any], member_rows: list[dict[str, Any]]) -> dict[str
         "sealed": row["sealed_at"] is not None,
         "cameras": json.loads(row["cameras_json"]),
         "labels": json.loads(row["labels_json"]),
-        "identities": json.loads(row["identities_json"]),
+        "identities": _merged_identities(json.loads(row["identities_json"]), people_),
         "primary_event_id": row["primary_event_id"],
         "peak_severity": row["peak_severity"],
         "atom_count": row["atom_count"],
@@ -119,11 +156,25 @@ def _summary(row: dict[str, Any], member_rows: list[dict[str, Any]]) -> dict[str
     }
 
 
-def summaries(conn: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def summaries(
+    conn: Any, rows: list[dict[str, Any]], *, with_people: bool = False
+) -> list[dict[str, Any]]:
     """`_summary` for many encounter rows, fetching every member in one
-    query (no per-row lookups). Run inside `db.with_sidecar`."""
+    query (no per-row lookups). With `with_people` the titles/identities use
+    recognized faces (callers pass `settings.face_enrich.enabled`); the people
+    themselves are not attached. Run inside `db.with_sidecar`."""
     by_encounter = store.members_for(conn, [r["id"] for r in rows])
-    return [_summary(r, by_encounter[r["id"]]) for r in rows]
+    found = _found_people(conn, by_encounter) if with_people else {}
+    return [_summary(r, by_encounter[r["id"]], found.get(r["id"])) for r in rows]
+
+
+def _found_people(
+    conn: Any, by_encounter: dict[str, list[dict[str, Any]]]
+) -> dict[str, list[dict[str, Any]]]:
+    """Batched `people_for_events`. Names and handles do not depend on the
+    time zone (only the people's rhythm does), so UTC serves every caller that
+    only wants titles."""
+    return people.people_for_events(conn, timezone.utc, by_encounter)
 
 
 def _member(row: dict[str, Any]) -> dict[str, Any]:
@@ -177,6 +228,7 @@ async def encounters_page(
     limit: int = _PAGE_BATCH,
 ) -> Any:
     settings = _settings(request)
+    with_people = bool(settings.face_enrich.enabled)
     window_since = since if since is not None else time.time() - _DEFAULT_WINDOW_S
     # Out-of-range values are clamped, not rejected: this is a page, and a
     # hand-edited URL should still render something.
@@ -184,18 +236,28 @@ async def encounters_page(
 
     def _load(
         conn: Any,
-    ) -> tuple[list[tuple[dict[str, Any], list[dict[str, Any]]]], int, list[dict[str, Any]]]:
+    ) -> tuple[
+        list[tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]],
+        int,
+        list[dict[str, Any]],
+    ]:
         # One extra row tells us whether "Show more" has anything to show and
         # which row it should land on.
         rows = store.list_recent(conn, since=window_since, limit=limit + 1, camera=camera)
         total = store.count_recent(conn, since=window_since, camera=camera)
         by_encounter = store.members_for(conn, [r["id"] for r in rows[:limit]])
-        return [(row, by_encounter[row["id"]]) for row in rows[:limit]], total, rows[limit:]
+        kept = {r["id"]: by_encounter[r["id"]] for r in rows[:limit]}
+        found = _found_people(conn, kept) if with_people else {}
+        return (
+            [(row, by_encounter[row["id"]], found.get(row["id"], [])) for row in rows[:limit]],
+            total,
+            rows[limit:],
+        )
 
     loaded, total, extra = await db.with_sidecar(settings.sidecar.db_path, _load)
     encounters = [
-        dict(_summary(row, member_rows), members=[_member(m) for m in member_rows])
-        for row, member_rows in loaded
+        dict(_summary(row, member_rows, who), members=[_member(m) for m in member_rows])
+        for row, member_rows, who in loaded
     ]
     more_href = None
     if extra and limit < _MAX_LIMIT:
@@ -250,22 +312,30 @@ async def encounter_detail_page(encounter_id: str, request: Request, msg: str | 
 
     def _load(
         conn: Any,
-    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    ) -> tuple[
+        dict[str, Any] | None,
+        list[dict[str, Any]],
+        dict[str, list[dict[str, Any]]],
+        list[dict[str, Any]],
+    ]:
         row = store.get(conn, encounter_id)
         if row is None:
-            return None, [], {}
+            return None, [], {}, []
         member_rows = store.members(conn, encounter_id)
         decisions = {m["atom_id"]: store.decisions_for(conn, m["atom_id"]) for m in member_rows}
-        return row, member_rows, decisions
+        found = (
+            _found_people(conn, {encounter_id: member_rows}) if settings.face_enrich.enabled else {}
+        )
+        return row, member_rows, decisions, found.get(encounter_id, [])
 
-    row, member_rows, decisions = await db.with_sidecar(settings.sidecar.db_path, _load)
+    row, member_rows, decisions, who = await db.with_sidecar(settings.sidecar.db_path, _load)
     if row is None:
         raise HTTPException(status_code=404, detail=error_detail("not_found", "no such encounter"))
     return _templates(request).TemplateResponse(
         request,
         "encounter_detail.html",
         {
-            "encounter": _summary(row, member_rows),
+            "encounter": _summary(row, member_rows, who),
             "members": [_member(m) for m in member_rows],
             "decisions": decisions,
             "active_page": "encounters",
@@ -347,12 +417,8 @@ async def encounters_list(
             person_cluster=cluster,
         )
         by_encounter = store.members_for(conn, [r["id"] for r in rows])
-        out = [_summary(r, by_encounter[r["id"]]) for r in rows]
-        found = (
-            people.people_for_events(conn, zone, by_encounter)
-            if with_people
-            else {}
-        )
+        found = people.people_for_events(conn, zone, by_encounter) if with_people else {}
+        out = [_summary(r, by_encounter[r["id"]], found.get(r["id"])) for r in rows]
         for item in out:
             item["people"] = found.get(item["id"], [])
         return out
@@ -362,9 +428,7 @@ async def encounters_list(
 
 
 @v1_router.get("/encounters/{encounter_id}", response_model=EncounterPeopleResponse)
-async def encounter_detail(
-    encounter_id: str, request: Request, tz: str = "UTC"
-) -> dict[str, Any]:
+async def encounter_detail(encounter_id: str, request: Request, tz: str = "UTC") -> dict[str, Any]:
     settings = _settings(request)
     zone = _tz(tz)
 
@@ -386,7 +450,7 @@ async def encounter_detail(
     if row is None:
         raise HTTPException(status_code=404, detail=error_detail("not_found", "no such encounter"))
     return {
-        "encounter": {**_summary(row, member_rows), "people": who},
+        "encounter": {**_summary(row, member_rows, who), "people": who},
         "members": [_member(m) for m in member_rows],
     }
 
@@ -400,16 +464,25 @@ async def encounter_detail(
 
 
 async def _load_encounter_json(settings: Any, encounter_id: str) -> dict[str, Any]:
-    def _load(conn: Any) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    def _load(
+        conn: Any,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], list[dict[str, Any]]]:
         row = store.get(conn, encounter_id)
         if row is None:
-            return None, []
-        return row, store.members(conn, encounter_id)
+            return None, [], []
+        member_rows = store.members(conn, encounter_id)
+        found = (
+            _found_people(conn, {encounter_id: member_rows}) if settings.face_enrich.enabled else {}
+        )
+        return row, member_rows, found.get(encounter_id, [])
 
-    row, member_rows = await db.with_sidecar(settings.sidecar.db_path, _load)
+    row, member_rows, who = await db.with_sidecar(settings.sidecar.db_path, _load)
     if row is None:
         raise HTTPException(status_code=404, detail=error_detail("not_found", "no such encounter"))
-    return {"encounter": _summary(row, member_rows), "members": [_member(m) for m in member_rows]}
+    return {
+        "encounter": _summary(row, member_rows, who),
+        "members": [_member(m) for m in member_rows],
+    }
 
 
 @router.post("/encounters/{encounter_id}/atoms/{atom_id}/split")
