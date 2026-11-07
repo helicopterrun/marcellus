@@ -299,9 +299,9 @@ def _counts(request: Request, settings: Any) -> dict[str, Any]:
 
 def _camera_names(settings: Any) -> list[str]:
     with contextlib.suppress(Exception):
-        from marcellus.zones import load_camera_zones
+        from marcellus.zones import camera_names
 
-        return sorted(load_camera_zones(settings.frigate.config_path).keys())
+        return camera_names(settings.frigate.config_path)
     return []
 
 
