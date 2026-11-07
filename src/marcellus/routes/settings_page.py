@@ -19,7 +19,7 @@ from marcellus import __version__, db
 from marcellus.push import policy_settings, store
 from marcellus.routes import scrub as scrub_routes
 from marcellus.routes.tuning import _sections as _tuning_sections
-from marcellus.zones import load_camera_zones
+from marcellus.zones import camera_names
 
 router = APIRouter(tags=["settings"])
 
@@ -31,7 +31,7 @@ def _camera_summary(settings: Any) -> list[dict[str, Any]]:
     layout = active.get("camera_layout", {}) or {}
     optics = active.get("camera_optics", {}) or {}
     try:
-        cameras = sorted(load_camera_zones(settings.frigate.config_path).keys())
+        cameras = camera_names(settings.frigate.config_path)
     except Exception:  # noqa: BLE001 — a missing Frigate config is an empty list, not a 500
         cameras = sorted(set(layout) | set(optics))
     rows = []

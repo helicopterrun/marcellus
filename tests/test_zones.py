@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from marcellus.zones import (
+    camera_names,
     configured_camera_names,
     load_camera_zones,
     zones_containing_box,
@@ -85,6 +86,20 @@ def test_configured_camera_names_from_a_real_config(tmp_path: Path) -> None:
     cfg = tmp_path / "config.yml"
     cfg.write_text("cameras:\n  doorbell: {}\n  gate-face:\n    zones: {}\n")
     assert configured_camera_names(cfg) == {"doorbell", "gate-face"}
+
+
+def test_camera_names_includes_cameras_without_zones(tmp_path: Path) -> None:
+    # A recording-only or not-yet-zoned camera has no zones; load_camera_zones
+    # leaves it out, which once hid new cameras from /cameras and /live.
+    cfg = tmp_path / "config.yml"
+    cfg.write_text(
+        "cameras:\n"
+        "  shed:\n    zones:\n      yard:\n        coordinates: 0,0,1,0,1,1\n"
+        "  rooftop-garden:\n    detect:\n      enabled: false\n"
+    )
+    assert list(load_camera_zones(cfg)) == ["shed"]
+    assert camera_names(cfg) == ["rooftop-garden", "shed"]
+    assert camera_names(tmp_path / "nope.yml") == []
 
 
 def test_configured_camera_names_unreadable_or_empty_means_no_filter(tmp_path: Path) -> None:
