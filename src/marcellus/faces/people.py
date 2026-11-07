@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, tzinfo
 from typing import Any
@@ -104,12 +105,36 @@ def load_people(
     tz: tzinfo,
     *,
     person_id: int | None = None,
+    person_ids: Collection[int] | None = None,
     with_rhythm: bool = False,
 ) -> dict[int, Person]:
-    """Every person with at least one live sighting (or just `person_id`),
-    keyed by cluster id. A cluster whose sightings are all excluded is absent."""
+    """Every person with at least one live sighting (or just `person_id`, or
+    just the `person_ids`), keyed by cluster id. A cluster whose sightings are
+    all excluded is absent. `person_id` and `person_ids` are mutually exclusive."""
+    if person_id is not None and person_ids is not None:
+        raise ValueError("pass person_id or person_ids, not both")
+    if person_ids is not None:
+        wanted = sorted(set(person_ids))
+        merged: dict[int, Person] = {}
+        for i in range(0, len(wanted), 500):
+            merged.update(
+                _load_people_where(
+                    conn,
+                    tz,
+                    "AND e.cluster_id IN (" + ",".join("?" * len(wanted[i : i + 500])) + ") ",
+                    tuple(wanted[i : i + 500]),
+                    with_rhythm,
+                )
+            )
+        return merged
     where = "" if person_id is None else "AND e.cluster_id = ? "
     args: tuple[Any, ...] = () if person_id is None else (person_id,)
+    return _load_people_where(conn, tz, where, args, with_rhythm)
+
+
+def _load_people_where(
+    conn: sqlite3.Connection, tz: tzinfo, where: str, args: tuple[Any, ...], with_rhythm: bool
+) -> dict[int, Person]:
     people: dict[int, Person] = {}
     last_start: dict[int, float] = {}
     for r in conn.execute(
@@ -286,3 +311,59 @@ def people_for_events(
         persons = sorted((everyone[c] for c in found if c in everyone), key=sort_key)
         out[eid] = [p.wire() for p in persons]
     return out
+
+
+def people_by_events(
+    conn: sqlite3.Connection, tz: tzinfo, event_ids: Sequence[str]
+) -> dict[str, Any]:
+    """Who is in these events? A batch lookup for the app's reel markers,
+    dossier and Search tiles, in place of one `for-event` call per event.
+
+    Returns `{"people": [...], "events": [...]}`: `events` has exactly one entry
+    per requested id, in order (`person`/`crop` null when the event has no live
+    recognized person), `people` the distinct persons referenced, ordered by
+    `sort_key`. Light by design: a chunked event -> cluster lookup, a chunked
+    crop-rank lookup, then `load_people` for only the clusters found (never the
+    all-people scan). Everything is read at request time, so renames, merges
+    and exclusions show immediately. `days`/`familiarity` cover all of a
+    person's live sightings, not just the requested events.
+    """
+    ids = list(event_ids)
+    cluster_of: dict[str, int] = {}
+    for i in range(0, len(ids), 500):
+        chunk = ids[i : i + 500]
+        for r in conn.execute(
+            "SELECT event_id, cluster_id FROM face_enrichments WHERE cluster_id IS NOT NULL "
+            "AND excluded_at IS NULL AND event_id IN (" + ",".join("?" * len(chunk)) + ")",
+            chunk,
+        ):
+            cluster_of[str(r["event_id"])] = int(r["cluster_id"])
+    rank_of: dict[str, int] = {}
+    matched = list(cluster_of)
+    for i in range(0, len(matched), 500):
+        chunk = matched[i : i + 500]
+        for r in conn.execute(
+            "SELECT event_id, MIN(rank) AS crop_rank FROM face_crops "
+            "WHERE crop_path IS NOT NULL AND event_id IN (" + ",".join("?" * len(chunk)) + ") "
+            "GROUP BY event_id",
+            chunk,
+        ):
+            rank_of[str(r["event_id"])] = int(r["crop_rank"])
+    found = load_people(conn, tz, person_ids=set(cluster_of.values()))
+    events: list[dict[str, Any]] = []
+    for eid in ids:
+        cid = cluster_of.get(eid)
+        if cid is None or cid not in found:
+            events.append({"event_id": eid, "person": None, "crop": None})
+            continue
+        rank = rank_of.get(eid)
+        events.append(
+            {
+                "event_id": eid,
+                "person": cid,
+                "crop": None if rank is None else f"/v1/faces/{eid}/{rank}.jpg",
+            }
+        )
+    referenced = {e["person"] for e in events if e["person"] is not None}
+    persons = sorted((found[c] for c in referenced), key=sort_key)
+    return {"people": [p.wire() for p in persons], "events": events}

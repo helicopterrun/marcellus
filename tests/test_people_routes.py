@@ -167,6 +167,7 @@ def test_capabilities_people_block(client: TestClient) -> None:
         "sorts": ["recent", "days"],
         "merge_suggestions": True,
         "encounter_filter": True,
+        "event_lookup": True,
     }
 
 
@@ -176,6 +177,7 @@ def test_capabilities_people_disabled(world: World) -> None:
     assert people == {"enabled": False, "filters": [], "sorts": [],
         "merge_suggestions": False,
         "encounter_filter": False,
+        "event_lookup": False,
     }
 
 

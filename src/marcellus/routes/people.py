@@ -26,6 +26,7 @@ from marcellus.faces import consolidate, enrich, people
 from marcellus.models.wire import (
     MergeDismissResponse,
     MergeSuggestionsResponse,
+    PeopleByEventsResponse,
     PeopleOkResponse,
     PeopleResponse,
     PersonDetail,
@@ -150,6 +151,31 @@ async def person_for_event(event_id: str, request: Request, tz: str = "UTC") -> 
         return {"person": found.wire() if found else None}
 
     return await _run(request, _do)
+
+
+_BY_EVENTS_MAX = 100
+
+
+@v1_router.get("/people/by-events", response_model=PeopleByEventsResponse)
+async def people_by_events(request: Request, ids: str = "", tz: str = "UTC") -> dict[str, Any]:
+    """Who is in these events (up to 100 ids, comma-separated)? See
+    `people.people_by_events`. Declared before `/people/{person_id}` so that
+    path never captures it."""
+    zone = _tz(tz)
+    wanted = list(dict.fromkeys(s for s in (part.strip() for part in ids.split(",")) if s))
+    if len(wanted) > _BY_EVENTS_MAX:
+        raise HTTPException(
+            status_code=422,
+            detail=error_detail("too_many_ids", f"at most {_BY_EVENTS_MAX} event ids per call"),
+        )
+    if not wanted:
+        return {"t": time.time(), "people": [], "events": []}
+
+    def _do(conn: sqlite3.Connection) -> dict[str, Any]:
+        return people.people_by_events(conn, zone, wanted)
+
+    found = await _run(request, _do)
+    return {"t": time.time(), **found}
 
 
 @v1_router.get("/people/{person_id}", response_model=PersonDetail)
