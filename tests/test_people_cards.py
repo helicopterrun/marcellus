@@ -118,11 +118,12 @@ def test_excluded_rename_merge_delete(world: World, client: TestClient) -> None:
     assert ids() == [1]
     client.patch(f"/v1/people/2/sightings/{c}", json={"excluded": False})
     assert ids() == [1, 2]
-    # Rename shows at once; the encounter's identities strings are not consulted.
+    # Rename shows at once (people are read from face data, not the stored
+    # strings); `identities` gains the NAME, never the handle of the unnamed one.
     client.post("/v1/people/2/name", json={"name": "Marcellus"})
     got = listing(client)["enc"]
     assert [p["name"] for p in got["people"]] == ["Marcellus", None]
-    assert got["identities"] == []
+    assert got["identities"] == ["Marcellus"]
     # Merge: the survivor appears once.
     client.post("/v1/people/1/merge", json={"into": 2})
     assert ids() == [2]

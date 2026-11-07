@@ -341,6 +341,11 @@ util.js helpers; phone-first):
   "alley-wide → shed"), label chips, identities, atom count, open/sealed
   badge; expandable member list showing each atom's camera, span, labels,
   zones, `link_reason` and confidence. Filters: `?camera=`, `?since=`.
+* Titles and `identities` (HTML and `/v1`, when `face_enrich.enabled`) are
+  built at read time from recognized people first (name, else handle, named
+  first), then the stored sub_label strings, which go stale because face
+  recognition lands minutes after stamping; `identities` gains only the
+  *names* of named people, never handles. Push never uses these titles.
 * `GET /encounters/{id}` — same detail for one encounter, plus a "Related
   events" list linking to existing event detail/clip URLs already used by
   the triage pages.

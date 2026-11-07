@@ -118,7 +118,11 @@ async def observation_detail(atom_id: str, request: Request) -> dict[str, Any]:
         if row is None:
             return None, None, (None, None)
         encounter_row = store.get(conn, row["encounter_id"])
-        encounter = summaries(conn, [encounter_row])[0] if encounter_row is not None else None
+        encounter = (
+            summaries(conn, [encounter_row], with_people=bool(settings.face_enrich.enabled))[0]
+            if encounter_row is not None
+            else None
+        )
         neighbours = store.observation_neighbours(conn, atom_id)
         return row, encounter, neighbours
 
