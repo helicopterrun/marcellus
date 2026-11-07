@@ -299,9 +299,12 @@ def _candidate_decision(
                 best = learned  # None here means "reject" -- no flat fallback, see docstring.
             elif gap <= allowed_gap and adjacent_recent:
                 best = LinkDecision(enc.encounter_id, "adjacent", 0.6)
-        elif best is None and gap <= allowed_gap:
-            if any(adjacency.adjacent(atom.camera, cam) for cam in recent):
-                best = LinkDecision(enc.encounter_id, "adjacent", 0.6)
+        elif (
+            best is None
+            and gap <= allowed_gap
+            and any(adjacency.adjacent(atom.camera, cam) for cam in recent)
+        ):
+            best = LinkDecision(enc.encounter_id, "adjacent", 0.6)
 
     # -- Companionship: no shared family required. --
     recent = _recent_cameras(enc, cfg)
