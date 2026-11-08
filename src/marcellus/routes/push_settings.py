@@ -62,9 +62,9 @@ async def get_push_settings(request: Request) -> dict[str, Any]:
     # Frigate's config must show up here without a sidecar restart.
     policy_settings.load_zone_display_names(settings.frigate.config_path)
 
-    from marcellus.zones import load_camera_zones
+    from marcellus.zones import camera_names
 
-    available_cameras = sorted(load_camera_zones(settings.frigate.config_path).keys())
+    available_cameras = camera_names(settings.frigate.config_path)
     derived_headings = {
         cam: vec
         for cam in available_cameras
@@ -220,9 +220,9 @@ async def refresh_frigate_config(request: Request) -> dict[str, Any]:
     if changed:
         policy_settings.load_zone_display_names(path)
 
-    from marcellus.zones import load_camera_zones
+    from marcellus.zones import camera_names
 
-    return {"changed": changed, "cameras": sorted(load_camera_zones(path).keys())}
+    return {"changed": changed, "cameras": camera_names(path)}
 
 
 class SilenceRequest(BaseModel):

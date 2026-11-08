@@ -117,10 +117,21 @@ def configured_camera_names(config_path: str | Path) -> set[str] | None:
     return set(cams.keys())
 
 
+def camera_names(config_path: str | Path) -> list[str]:
+    """Every camera in Frigate's config.yml, sorted; [] if it can't be read.
+
+    Use this, not `load_camera_zones(...).keys()`, to list cameras: that mapping
+    leaves out cameras with no zones (a recording-only camera, or a new one not
+    zoned yet), which hid them from /cameras and 404'd their /live page.
+    """
+    return sorted(configured_camera_names(config_path) or ())
+
+
 def load_camera_zones(config_path: str | Path) -> dict[str, list[dict[str, Any]]]:
     """Return `{camera: [{name, coords, color, objects, inertia, loitering_time}, ...]}`.
 
     Reads Frigate's config.yml. Missing file or unparseable file -> {} (no crash).
+    Cameras without zones are absent -- list cameras with `camera_names`.
     """
     p = Path(config_path)
     if not p.exists():
