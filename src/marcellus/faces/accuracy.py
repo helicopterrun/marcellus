@@ -109,10 +109,15 @@ def _existing_keys(conn: sqlite3.Connection) -> set[tuple[str, str]]:
 
 
 def _split_pairs(
-    sights: list[_Sighting], taken: set[tuple[str, str]], rng: random.Random
+    sights: list[_Sighting],
+    taken: set[tuple[str, str]],
+    rng: random.Random,
+    since: float | None = None,
 ) -> Iterator[_Pair]:
     """Each cluster's best sighting against its nearest sighting elsewhere,
-    clusters in uniformly shuffled order."""
+    clusters in uniformly shuffled order. With `since`, only clusters with a
+    sighting at or after it take part and the representative is their best
+    recent sighting; the nearest other-cluster sighting may be from any time."""
     by_cluster: dict[int, list[int]] = {}
     for i, s in enumerate(sights):
         by_cluster.setdefault(s.cluster, []).append(i)
@@ -130,7 +135,10 @@ def _split_pairs(
         members = by_cluster[cid]
         # Highest quality; ties go to the smallest event_id (sights are
         # event_id-sorted, so the first of equals wins).
-        best = max(members, key=lambda i: (sights[i].quality, -i))
+        pool = members if since is None else [i for i in members if sights[i].ts >= since]
+        if not pool:
+            continue
+        best = max(pool, key=lambda i: (sights[i].quality, -i))
         if mat is not None:
             row = 1.0 - mat @ mat[best]
             row[[i for i, c in enumerate(cluster_of) if c == cid]] = np.inf
@@ -152,14 +160,23 @@ def _split_pairs(
 
 
 def _join_pairs(
-    sights: list[_Sighting], taken: set[tuple[str, str]], rng: random.Random
+    sights: list[_Sighting],
+    taken: set[tuple[str, str]],
+    rng: random.Random,
+    since: float | None = None,
 ) -> Iterator[_Pair]:
     """Each sighting against the member of its own cluster closest to the
-    cluster mean, preferring a different visit; sightings in uniform order."""
+    cluster mean, preferring a different visit; sightings in uniform order.
+    With `since`, only sightings at or after it are judged; the partner may be
+    any member of the cluster."""
     by_cluster: dict[int, list[_Sighting]] = {}
     for s in sights:
         by_cluster.setdefault(s.cluster, []).append(s)
-    pool = [s for s in sights if len(by_cluster[s.cluster]) >= 2]
+    pool = [
+        s
+        for s in sights
+        if len(by_cluster[s.cluster]) >= 2 and (since is None or s.ts >= since)
+    ]
     rng.shuffle(pool)
     means: dict[int, list[float]] = {}
     for s in pool:
@@ -179,16 +196,25 @@ def _join_pairs(
         yield _Pair("join", s, partner, enrich.cosine_distance(s.vec, partner.vec))
 
 
-def draw_pairs(conn: sqlite3.Connection, *, count: int, rng: random.Random, now: float) -> int:
+def draw_pairs(
+    conn: sqlite3.Connection,
+    *,
+    count: int,
+    rng: random.Random,
+    now: float,
+    since: float | None = None,
+) -> int:
     """Insert up to `count` new pairs (half split, half join; a short pool is
     topped up from the other) and return how many. No unordered event pair is
-    ever inserted twice, in any kind. The caller commits."""
+    ever inserted twice, in any kind. `since` (epoch seconds) restricts the
+    judged sightings to recent ones (see _split_pairs/_join_pairs) and is
+    stored as `drawn_since`. The caller commits."""
     if count <= 0:
         return 0
     sights = _load(conn)
     taken = _existing_keys(conn)
-    split_it = _split_pairs(sights, taken, rng)
-    join_it = _join_pairs(sights, taken, rng)
+    split_it = _split_pairs(sights, taken, rng, since)
+    join_it = _join_pairs(sights, taken, rng, since)
     chosen: list[_Pair] = []
 
     def take(it: Iterator[_Pair], n: int) -> int:
@@ -220,8 +246,9 @@ def draw_pairs(conn: sqlite3.Connection, *, count: int, rng: random.Random, now:
         same_visit = a.camera == b.camera and abs(a.ts - b.ts) <= VISIT_GAP_S
         conn.execute(
             "INSERT INTO face_pair_labels "
-            "(kind, event_a, event_b, cluster_a, cluster_b, distance, same_visit, drawn_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "(kind, event_a, event_b, cluster_a, cluster_b, distance, same_visit, "
+            "drawn_at, drawn_since) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 p.kind,
                 a.event_id,
@@ -231,6 +258,7 @@ def draw_pairs(conn: sqlite3.Connection, *, count: int, rng: random.Random, now:
                 p.distance,
                 int(same_visit),
                 now,
+                since,
             ),
         )
     return len(chosen)

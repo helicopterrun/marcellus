@@ -86,8 +86,10 @@ class Rig:
     def pairs(self) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM face_pair_labels ORDER BY pair_id").fetchall()
 
-    def draw(self, count: int, seed: int = 1) -> int:
-        n = accuracy.draw_pairs(self.conn, count=count, rng=random.Random(seed), now=NOW)
+    def draw(self, count: int, seed: int = 1, since: float | None = None) -> int:
+        n = accuracy.draw_pairs(
+            self.conn, count=count, rng=random.Random(seed), now=NOW, since=since
+        )
         self.conn.commit()
         return n
 
@@ -158,6 +160,87 @@ def test_join_pairs_stay_in_cluster_and_prefer_other_visit(rig: Rig) -> None:
     s_pair = next(r for r in joins if "s" in (r["event_a"], r["event_b"]))
     assert {s_pair["event_a"], s_pair["event_b"]} != {"s", "near"}
     assert s_pair["same_visit"] == 0
+
+
+def test_since_none_matches_default_and_stores_null(rig: Rig) -> None:
+    populate(rig)
+    rig.draw(10, seed=3)
+    a = [(r["event_a"], r["event_b"], r["kind"]) for r in rig.pairs()]
+    assert all(r["drawn_since"] is None for r in rig.pairs())
+    rig.conn.execute("DELETE FROM face_pair_labels")
+    accuracy.draw_pairs(rig.conn, count=10, rng=random.Random(3), now=NOW, since=None)
+    assert a == [(r["event_a"], r["event_b"], r["kind"]) for r in rig.pairs()]
+
+
+def test_since_filters_joins_to_recent_sightings(rig: Rig) -> None:
+    populate(rig, 4, 4)  # k=0..3 at NOW + 0/2/4/6 h
+    cut = NOW + 3 * HOUR
+    rig.draw(40, since=cut)
+    joins = [r for r in rig.pairs() if r["kind"] == "join"]
+    assert joins
+    for r in joins:
+        # Exactly one side is the judged (recent) sighting; the partner may be old.
+        ks = [int(r[c].split("-")[1]) for c in ("event_a", "event_b")]
+        assert max(ks) >= 2
+    assert all(r["drawn_since"] == cut for r in rig.pairs())
+
+
+def test_since_split_representative_is_best_recent_sighting(rig: Rig) -> None:
+    # Cluster 1: best overall (old, q .9) vs best recent (new, q .5).
+    rig.sight("a-old", 1, 0, ts=NOW, quality=0.9)
+    rig.sight("a-new", 1, 10, ts=NOW + 10 * HOUR, quality=0.5)
+    rig.sight("a-new2", 1, 12, ts=NOW + 11 * HOUR, quality=0.2)
+    rig.sight("b-new", 2, 60, ts=NOW + 10 * HOUR, quality=0.5)
+    rig.draw(6, since=NOW + 5 * HOUR)
+    splits = [r for r in rig.pairs() if r["kind"] == "split"]
+    sides = {e for r in splits for e in (r["event_a"], r["event_b"])}
+    assert "a-new" in sides and "a-old" not in sides
+
+
+def test_since_excludes_clusters_without_recent_sightings(rig: Rig) -> None:
+    rig.sight("old1", 1, 0, ts=NOW)
+    rig.sight("old2", 1, 5, ts=NOW + HOUR)
+    rig.sight("new1", 2, 50, ts=NOW + 10 * HOUR)
+    rig.sight("new2", 3, 90, ts=NOW + 10 * HOUR)
+    rig.draw(10, since=NOW + 5 * HOUR)
+    for r in rig.pairs():
+        if r["kind"] == "split":
+            # Cluster 1 has nothing recent: it may be the far side, never the anchor.
+            assert r["cluster_a"] != r["cluster_b"]
+    anchors = {r["cluster_a"] for r in rig.pairs() if r["kind"] == "split"} | {
+        r["cluster_b"] for r in rig.pairs() if r["kind"] == "split"
+    }
+    assert anchors & {2, 3}
+    assert not any(r["kind"] == "join" for r in rig.pairs())  # no recent join candidate
+
+
+def test_since_with_nothing_recent_draws_zero(rig: Rig) -> None:
+    populate(rig)
+    assert rig.draw(10, since=NOW + 100 * HOUR) == 0
+
+
+def test_migration_adds_drawn_since_to_existing_db(sidecar_db_path: Path) -> None:
+    conn = db.open_sidecar(sidecar_db_path)
+    # Rebuild without the column (no DROP COLUMN: CI's SQLite rejects it).
+    cols = [
+        r[1] for r in conn.execute("PRAGMA table_info(face_pair_labels)") if r[1] != "drawn_since"
+    ]
+    conn.execute(f"CREATE TABLE fpl_old AS SELECT {', '.join(cols)} FROM face_pair_labels")
+    conn.execute("DROP TABLE face_pair_labels")
+    conn.execute("ALTER TABLE fpl_old RENAME TO face_pair_labels")
+    conn.execute(
+        "INSERT INTO face_pair_labels (kind, event_a, event_b, cluster_a, cluster_b, "
+        "distance, same_visit, drawn_at) VALUES ('split', 'x', 'y', 1, 2, .3, 0, 0)"
+    )
+    conn.commit()
+    conn.close()
+    db._SCHEMA_APPLIED.discard(str(sidecar_db_path.resolve()))
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        assert "drawn_since" in {r[1] for r in conn.execute("PRAGMA table_info(face_pair_labels)")}
+        assert conn.execute("SELECT drawn_since FROM face_pair_labels").fetchone()[0] is None
+    finally:
+        conn.close()
 
 
 def test_same_visit_flag(rig: Rig) -> None:
@@ -470,6 +553,41 @@ def test_draw_defaults_and_bounds(client: TestClient) -> None:
     assert client.post("/enrich/accuracy/draw", json={"count": 201}).status_code == 422
     r = client.post("/enrich/accuracy/draw", json={})
     assert r.status_code == 200 and r.json()["total"] > 0
+
+
+def test_draw_since_returns_drawn_and_stores_cutoff(
+    client: TestClient, sidecar_db_path: Path
+) -> None:
+    cut = NOW + 3 * HOUR
+    r = client.post("/enrich/accuracy/draw", json={"count": 4, "since": cut})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["drawn"] == body["total"] > 0
+    conn = db.open_sidecar(sidecar_db_path)
+    try:
+        vals = {x[0] for x in conn.execute("SELECT drawn_since FROM face_pair_labels")}
+    finally:
+        conn.close()
+    assert vals == {cut}
+    # Pending pairs still block, with or without since.
+    assert client.post("/enrich/accuracy/draw", json={"since": cut}).status_code == 409
+
+
+def test_draw_since_nothing_qualifies(client: TestClient) -> None:
+    r = client.post("/enrich/accuracy/draw", json={"since": NOW + 100 * HOUR})
+    assert r.status_code == 200
+    assert r.json()["drawn"] == 0 and r.json()["total"] == 0
+
+
+def test_draw_without_since_reports_drawn(client: TestClient) -> None:
+    body = client.post("/enrich/accuracy/draw", json={"count": 4}).json()
+    assert body["drawn"] == 4
+
+
+def test_draw_rejects_future_or_negative_since(client: TestClient) -> None:
+    future = NOW * 2
+    assert client.post("/enrich/accuracy/draw", json={"since": future}).status_code == 422
+    assert client.post("/enrich/accuracy/draw", json={"since": -1}).status_code == 422
 
 
 def test_label_errors(client: TestClient) -> None:

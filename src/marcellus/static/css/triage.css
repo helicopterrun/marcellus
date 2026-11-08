@@ -1797,6 +1797,9 @@ body.map-full-open .me-toolbar {
 .fa-links { padding-left: var(--space-4); line-height: 1.8; }
 .fa-links a { color: var(--accent); }
 .fa-links li:has(.fa-wrong) { list-style: none; margin-left: calc(-1 * var(--space-4)); }
+.fa-since { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-3) 0 var(--space-2); font-size: var(--text-sm); color: var(--muted); }
+.fa-since-input { background: var(--surface); color: var(--text); border: 1px solid var(--stroke); border-radius: var(--radius-sm); padding: 6px 8px; font-family: var(--font-mono); font-size: var(--text-sm); color-scheme: dark; }
+.fa-note { color: var(--muted); margin: var(--space-2) 0 0; }
 .fa-wrong { display: flex; gap: var(--space-2); margin-bottom: var(--space-1); }
 
 /* Status page: verdict banner, key tiles, collapsible groups */

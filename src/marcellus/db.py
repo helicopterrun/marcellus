@@ -536,7 +536,10 @@ CREATE TABLE IF NOT EXISTS face_pair_labels (
     same_visit INTEGER NOT NULL,
     drawn_at   REAL NOT NULL,
     label      TEXT,
-    labeled_at REAL
+    labeled_at REAL,
+    -- Epoch seconds of the "only sightings since" cutoff the draw used; NULL =
+    -- all history. Also in _ADDED_COLUMNS.
+    drawn_since REAL
 );
 
 -- One row per Frigate person event the enrichment worker has settled or is
@@ -1006,6 +1009,11 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # CREATE TABLE literal above for fresh installs.
         ("face_box", "TEXT"),
         ("face_score", "REAL"),
+    ],
+    "face_pair_labels": [
+        # Recent-sightings-only draws (faces/accuracy.py): the cutoff used.
+        # Also in the CREATE TABLE literal above for fresh installs.
+        ("drawn_since", "REAL"),
     ],
     "face_enrichments": [
         # Soft-exclude (Wave 6B-2): added after face_enrichments first shipped.

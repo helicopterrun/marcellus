@@ -209,6 +209,22 @@ CREATE TABLE IF NOT EXISTS face_crops (
     PRIMARY KEY (event_id, rank)
 );
 """,
+    # face_pair_labels before drawn_since (recent-sightings-only draws).
+    "face_pair_labels": """
+CREATE TABLE IF NOT EXISTS face_pair_labels (
+    pair_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL,
+    event_a    TEXT NOT NULL,
+    event_b    TEXT NOT NULL,
+    cluster_a  INTEGER NOT NULL,
+    cluster_b  INTEGER NOT NULL,
+    distance   REAL NOT NULL,
+    same_visit INTEGER NOT NULL,
+    drawn_at   REAL NOT NULL,
+    label      TEXT,
+    labeled_at REAL
+);
+""",
 }
 
 
