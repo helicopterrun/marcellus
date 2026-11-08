@@ -27,7 +27,7 @@ from typing import Any, Literal
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from marcellus.config import Settings
 from marcellus.db import open_sidecar, with_sidecar
@@ -769,6 +769,15 @@ async def accuracy_state(request: Request) -> JSONResponse:
 
 class DrawPayload(BaseModel):
     count: int = Field(50, ge=1, le=200)
+    # Only judge sightings at or after this epoch second (None = all history).
+    since: float | None = Field(None, ge=0)
+
+    @field_validator("since")
+    @classmethod
+    def _not_future(cls, v: float | None) -> float | None:
+        if v is not None and v > time.time():
+            raise ValueError("since must not be in the future")
+        return v
 
 
 @router.post("/enrich/accuracy/draw")
@@ -777,6 +786,7 @@ async def accuracy_draw(request: Request, payload: DrawPayload | None = None) ->
     so batches never pile up."""
     s = _settings(request)
     count = payload.count if payload is not None else 50
+    since = payload.since if payload is not None else None
 
     def _do(conn: sqlite3.Connection) -> dict[str, Any] | None:
         pending = conn.execute(
@@ -784,9 +794,11 @@ async def accuracy_draw(request: Request, payload: DrawPayload | None = None) ->
         ).fetchone()
         if pending is not None:
             return None
-        accuracy.draw_pairs(conn, count=count, rng=random.Random(), now=time.time())
+        drawn = accuracy.draw_pairs(
+            conn, count=count, rng=random.Random(), now=time.time(), since=since
+        )
         conn.commit()
-        return _accuracy_state(s, conn)
+        return {**_accuracy_state(s, conn), "drawn": drawn}
 
     out = await with_sidecar(s.sidecar.db_path, _do)
     if out is None:

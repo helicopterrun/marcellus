@@ -146,6 +146,11 @@ changes no identity: duplicates and wrong sightings are listed as links for you
 to fix by hand. Deleting a person, or an ID expiring, removes its labelled pairs
 too.
 
+To test recent clustering (after changing `cluster_threshold`, say), set **Only
+sightings since** before **Label 50 more**: only sightings from that day on are
+judged, though the face they are compared with can be from any time. Leave it
+empty to draw from all history.
+
 ## Configuration
 
 The `face_enrich:` section (needs the `enrich` install extra): `enabled`,

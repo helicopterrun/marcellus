@@ -15,6 +15,10 @@
   var history = [];   // pair_ids labelled in this page session, oldest first
   var busy = false;
   var error = null;
+  var emptyNote = null;    // inline message when a draw found no qualifying pairs
+  var SINCE_KEY = 'fa-since';
+  var sinceValue = '';     // yyyy-mm-dd from the date input; '' = all history
+  try { sinceValue = localStorage.getItem(SINCE_KEY) || ''; } catch (e) { /* storage blocked */ }
   var imagesPending = 0;   // answers wait until both main faces have been seen
 
   function post(path, body) {
@@ -23,6 +27,27 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body || {}),
     });
+  }
+
+  // Local-midnight epoch seconds for a yyyy-mm-dd string, or null if empty/bad.
+  function sinceEpoch(v) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v || '');
+    if (!m) return null;
+    return new Date(+m[1], +m[2] - 1, +m[3]).getTime() / 1000;
+  }
+
+  function sinceControl() {
+    var input = el('input', { type: 'date', id: 'fa-since', class: 'fa-since-input' });
+    input.value = sinceValue;
+    input.disabled = busy;
+    input.addEventListener('change', function () {
+      sinceValue = input.value;
+      try { localStorage.setItem(SINCE_KEY, sinceValue); } catch (e) { /* storage blocked */ }
+    });
+    return el('div', { class: 'fa-since' }, [
+      el('label', { for: 'fa-since', text: 'Only sightings since' }),
+      input,
+    ]);
   }
 
   function pct(x) { return Math.round(x * 100) + '%'; }
@@ -74,7 +99,9 @@
     var start = el('button', { type: 'button', class: 'btn btn-primary', text: 'Start' });
     start.disabled = busy;
     start.addEventListener('click', function () { draw(50); });
+    root.appendChild(sinceControl());
     root.appendChild(start);
+    if (emptyNote) root.appendChild(el('p', { class: 'fa-note', role: 'status', text: emptyNote }));
   }
 
   function renderPair() {
@@ -170,7 +197,9 @@
     var more = el('button', { type: 'button', class: 'btn btn-primary', text: 'Label 50 more' });
     more.disabled = busy;
     more.addEventListener('click', function () { draw(50); });
+    root.appendChild(sinceControl());
     root.appendChild(more);
+    if (emptyNote) root.appendChild(el('p', { class: 'fa-note', role: 'status', text: emptyNote }));
   }
 
   function render() {
@@ -198,8 +227,15 @@
 
   function draw(count) {
     return run(async function () {
-      state = await post('/enrich/accuracy/draw', { count: count });
+      var since = sinceEpoch(sinceValue);
+      var body = { count: count };
+      if (since !== null) body.since = since;
+      state = await post('/enrich/accuracy/draw', body);
       history = [];
+      emptyNote = null;
+      if (state.drawn === 0 && since !== null) {
+        emptyNote = 'No new pairs from sightings since ' + sinceValue + '.';
+      }
     });
   }
 
