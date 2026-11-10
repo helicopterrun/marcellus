@@ -1,4 +1,8 @@
-# Push notifications
+---
+title: "Push notifications"
+banner:
+  content: "Design note: written alongside the code and may lag behind it. The <a href=\"/marcellus/guide/welcome/\">guide</a> describes current behavior."
+---
 
 How the sidecar turns Frigate detections into APNs pushes and Live
 Activities. This is the current-state design doc for everything under
@@ -7,7 +11,7 @@ Activities. This is the current-state design doc for everything under
 
 ## The routing model: the four-level ladder (v3)
 
-Full spec: [`docs/ladder-v3.md`](ladder-v3.md). One dial per **subject ×
+Full spec: [`docs/ladder-v3.md`](https://helicopterrun.github.io/marcellus/reference/ladder-v3/). One dial per **subject ×
 place** answering "what happens?". Subjects are `person` / `vehicle` /
 `animal` / `thing` / `package` / `bin` / `opening`; places are `street`
 (Public) / `yard` (Grounds) / `doors` (Entrances) / `off_limits`
@@ -96,7 +100,7 @@ above -- a doorbell ring skips the card pipeline, the ladder, and
 the rate limiter entirely and goes straight to a `doorbell.ring` payload
 (`docs/apns-payload-spec.md` § "A fourth family"), because a ring is a
 person at the door, not a detection to weigh subject×place odds on. See
-[the UniFi Protect guide](../src/marcellus/guide_content/unifi-protect.md)
+[the UniFi Protect guide](https://helicopterrun.github.io/marcellus/guide/unifi-protect/)
 for setup and troubleshooting.
 
 ## The attention ladder (evaluation)

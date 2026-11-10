@@ -1,6 +1,8 @@
-# Deployment notes
+---
+title: "Deployment notes"
+---
 
-The README's [Install](../README.md#install) section covers the common paths.
+The [deployment guide](https://helicopterrun.github.io/marcellus/guide/deployment/) covers the common install paths.
 This file collects the details that don't fit there.
 
 ## Layout

@@ -1,4 +1,8 @@
-# Card push payload contract (v1)
+---
+title: "Card push payload contract (v1)"
+banner:
+  content: "Design note: written alongside the code and may lag behind it. The <a href=\"/marcellus/guide/welcome/\">guide</a> describes current behavior."
+---
 
 The wire contract the iOS app (Elsinore) and its Notification Service
 Extension build against for the attention ladder's delivery pipeline
@@ -153,7 +157,7 @@ payload of this shape (or any shape) is sent for that mutation.
 A UniFi Protect doorbell ring is **not** a card-pipeline payload -- it
 bypasses the attention ladder, `card_key`/`mutation` vocabulary, and the
 sound-accounting budget above entirely (see
-[the UniFi Protect guide](../src/marcellus/guide_content/unifi-protect.md)
+[the UniFi Protect guide](https://helicopterrun.github.io/marcellus/guide/unifi-protect/)
 and `docs/push-notifications.md` § "Event sources" for why). It is
 distinguished on the wire by `aps.category == "doorbell.ring"`.
 

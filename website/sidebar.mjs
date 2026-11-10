@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../src/marcellus/', import.meta.url));
 const contentDir = root + 'guide_content/';
+const referenceDir = fileURLToPath(new URL('../docs/', import.meta.url));
 
 export function parseSections() {
   const py = readFileSync(root + 'guide.py', 'utf8');
@@ -30,9 +31,9 @@ export function buildSidebar() {
       }
       if (Number.isNaN(order)) throw new Error(`${f}: missing numeric order`);
       const stem = f.replace(/\.md$/, '');
-      return { slug: stem === 'welcome' ? 'index' : stem, section, order };
+      return { slug: `guide/${stem}`, section, order };
     });
-  return sections
+  const guide = sections
     .map(([section, label]) => ({
       label,
       items: topics
@@ -41,4 +42,23 @@ export function buildSidebar() {
         .map((t) => ({ slug: t.slug })),
     }))
     .filter((g) => g.items.length);
+  return [...guide, buildReference()];
+}
+
+// Reference group: docs/*.md, deployment first (user-facing ops docs), then the
+// design notes alphabetically by title.
+function buildReference() {
+  const specs = readdirSync(referenceDir)
+    .filter((f) => f.endsWith('.md'))
+    .map((f) => {
+      const fm = /^---\n([\s\S]*?)\n---/.exec(readFileSync(referenceDir + f, 'utf8'));
+      const title = fm && /^title:\s*"?(.+?)"?\s*$/m.exec(fm[1])?.[1];
+      if (!title) throw new Error(`docs/${f}: missing frontmatter title`);
+      return { slug: `reference/${f.replace(/\.md$/, '')}`, title };
+    })
+    .sort((a, b) => {
+      const rank = (t) => (t.slug === 'reference/deployment' ? 0 : 1);
+      return rank(a) - rank(b) || a.title.localeCompare(b.title);
+    });
+  return { label: 'Reference', collapsed: true, items: specs.map((t) => ({ slug: t.slug })) };
 }

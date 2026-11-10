@@ -17,8 +17,8 @@ function rewriteGuideLink(url) {
   const m = /^\/guide(?:\/([a-z0-9-]+))?\/?(#.*)?$/.exec(url);
   if (!m) return null;
   const [, slug, hash = ''] = m;
-  if (!slug || slug === 'welcome') return `${BASE}/${hash}`;
-  return `${BASE}/${slug}/${hash}`;
+  if (!slug) return `${BASE}/guide/welcome/${hash}`;
+  return `${BASE}/guide/${slug}/${hash}`;
 }
 
 export default function remarkMarcellusGuide() {

@@ -1,4 +1,8 @@
-# Map page (formerly `/cameras`) — rebuild notes
+---
+title: "Map page (formerly `/cameras`) — rebuild notes"
+banner:
+  content: "Design note: written alongside the code and may lag behind it. The <a href=\"/marcellus/guide/welcome/\">guide</a> describes current behavior."
+---
 
 Observations gathered before the from-scratch rebuild (2026-08-17). The page
 now lives at `/map` (`/cameras` remains an alias — `routes/map_page.py`). The page

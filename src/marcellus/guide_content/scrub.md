@@ -35,11 +35,17 @@ The `scrub:` config section:
 - `enabled` + `cameras` — which cameras get cached. Each camera costs disk
   and steady CPU, so enroll the ones you actually scrub.
 - `cache_dir` — where sheets are written. Must be a real local filesystem
-  path with room to grow.
+  path with room to grow, and on a different filesystem from
+  `frigate.recordings_path`; the sidecar refuses to enable the cache at
+  startup otherwise.
 - Interval/thinning/retention settings trade freshness and history depth for
   disk. The defaults follow the design spec and rarely need touching;
   retention pruning runs automatically.
 - `preserve_source_aspect` / `format` control how cells are rendered.
+  `preserve_source_aspect` (default on) derives each camera's cell height from
+  its own aspect ratio, because a 4:3 camera squeezed into a 16:9 cell is
+  anamorphic and nothing downstream can undo it. `format` defaults to `jpeg`,
+  which measured smaller than `webp` on real camera content.
 - `min_free_bytes` — free-space floor on the cache filesystem; a tick is
   skipped rather than grinding out ENOSPC below it (default 2GiB).
 - `recent_interval_s` / `aged_interval_s` — cadence of the two decode
@@ -56,7 +62,10 @@ The `scrub:` config section:
 - `aged_after_h` — footage age (hours) at which the aged tier's cadence
   takes over from the recent tier's (default 24).
 - `retention_days` — how long generated sprite sheets are kept before
-  pruning (default 4).
+  pruning (default 4, matching the measured continuous-recording window, not
+  Frigate's `record.retain.days`). Coverage responses report
+  `recording_retention_days` and `scrub_retention_days` separately; don't
+  read one as the other.
 - `cell_w` — sprite-sheet cell width in pixels (default 320); `cell_h` is
   the fallback height used only when the source aspect can't be measured or
   `preserve_source_aspect` is off (default 180).
@@ -99,6 +108,28 @@ The `scrub:` config section:
 - `canvas_cache_sheets` — how many still-growing sheet images the generator keeps in memory so each update decodes only the new frames instead of the whole sheet (default 24, about 37 MB each at 480×270 cells, so roughly 0.9 GB at most). Set it to at least 2 × the number of cameras (one growing recent and one growing aged sheet each); only those two tiers use it. 0 turns the cache off and re-reads every frame on every update, trading CPU for memory.
 - `derived_from_live_edge` — feed the derived tiers (`derived_intervals_s`) from the frames the live edge has just decoded, instead of decoding a full recent-tier sheet for every new derived cell just to crop that one cell back out (default on). Only a derived tier that is already caught up to the live edge is fed this way; the decimation pass still builds everything else (first run, catch-up after a restart, older history). Turn it off to build derived tiers only by decimation, as before.
 - `reel_motion_deadline_s` — how long a reel request waits for Frigate's motion data before answering without it (default 0.9 s). Frames, coverage and events are the sidecar's own and arrive regardless; when Frigate is slow the motion trace is left out (`motion_unavailable`) and filled in on the next poll once the background fetch lands. 0 waits as long as Frigate takes, as before.
+
+## Highlights
+
+`/v1/highlights/{camera}` serves "take me to the next interesting thing". It
+returns **raw tracked-object events, newest first**, not destinations, and
+events cluster hard: measured across three cameras, 40-50% of consecutive
+highlights were under 45s apart, so one person walking past emits three or
+four. Two opt-in parameters, both off by default:
+
+- `cluster_s=45` groups events within that many seconds into one destination
+  at the run's earliest start (`events` counts the members, `end` is the latest
+  end, `reason`/`score` come from the most confident member). Gaps are measured
+  end to start.
+- `order=score` ranks by peak confidence instead of recency. Recency stays the
+  default because a client scanning for adjacency depends on time order.
+
+`limit` bounds the events considered, not the destinations returned, and its
+reach in wall-clock time varies enormously with how busy a camera is
+(`limit=100` covered 3.4 hours on one camera and 152 hours on another), so a
+client filtering for a sparse label must page. `score` is the event's peak
+confidence, which current Frigate keeps in the `data` JSON blob, leaving the
+`score`/`top_score` columns NULL.
 
 ## If it goes wrong
 

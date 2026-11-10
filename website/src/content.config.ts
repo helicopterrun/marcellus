@@ -3,22 +3,19 @@ import { docsSchema } from '@astrojs/starlight/schema';
 import { glob } from 'astro/loaders';
 import { z } from 'astro/zod';
 
-// The in-app guide markdown is the single source of truth; it is read in place.
+// guide/ is the in-app guide markdown and reference/ is docs/, both symlinked and
+// read in place. section/order are enforced for guide/ topics by sidebar.mjs.
 export const collections = {
   docs: defineCollection({
     loader: glob({
       base: './src/content/docs',
-      pattern: '*.md',
-      // welcome.md is the site root.
-      generateId: ({ entry }) => {
-        const slug = entry.replace(/\.md$/, '');
-        return slug === 'welcome' ? 'index' : slug;
-      },
+      // Landing page, guide topics and reference specs (not the .yml sample).
+      pattern: '**/*.{md,mdx}',
     }),
     schema: docsSchema({
       extend: z.object({
-        section: z.string(),
-        order: z.number(),
+        section: z.string().optional(),
+        order: z.number().optional(),
         routes: z.array(z.string()).default([]),
         config: z.array(z.string()).default([]),
       }),

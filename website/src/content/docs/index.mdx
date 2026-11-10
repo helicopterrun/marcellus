@@ -1,0 +1,39 @@
+---
+title: Marcellus
+description: A companion sidecar for Frigate NVR, adding a scrub cache, push notifications, triage and analysis pages, and a face pipeline.
+template: splash
+hero:
+  tagline: A companion sidecar for Frigate NVR - scrub cache, push notifications, triage and analysis pages, face pipeline.
+  actions:
+    - text: Read the guide
+      link: /marcellus/guide/welcome/
+      icon: right-arrow
+    - text: GitHub
+      link: https://github.com/helicopterrun/marcellus
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+Marcellus runs as a single Docker container next to Frigate, bind-mounting Frigate's `config.yml` and `frigate.db` read-only and writing its own SQLite database.
+
+<CardGrid>
+  <Card title="Triage" icon="approve-check">
+    Label tracked-object events as true-positive, false-positive or skip, with snapshots, video clips and zone overlays. Labels go into the sidecar's own database; Frigate's is opened read-only.
+  </Card>
+  <Card title="Analysis" icon="seti:graph">
+    Read-only analysis over Frigate's database: score histograms, motion rate, FPS budget against detector capacity, zone hit counts and annotation offset diagnostics. Available as a CLI and as JSON endpoints.
+  </Card>
+  <Card title="Scrub cache" icon="seti:video">
+    A uniform-cadence sprite-sheet cache generated from real recording segments, so clients get a predictable, gap-free timeline (`/v1/scrub`).
+  </Card>
+  <Card title="Reverse proxy" icon="random">
+    Forwards unhandled requests to Frigate's authenticated origin, so a client can hold a single base URL.
+  </Card>
+  <Card title="Push notifications" icon="rocket">
+    Subscribes to Frigate's `frigate/reviews` MQTT topic and routes each event through the attention ladder: an APNs card, a Live Activity, or just a logged decision. Off by default.
+  </Card>
+</CardGrid>
+
+Ready to install? Start with the [deployment guide](/marcellus/guide/deployment/), or read the [design specs](/marcellus/reference/scrub-cache-and-proxy-spec/).
