@@ -1,23 +1,156 @@
+/* Marcellus docs theme: tokens mirror src/marcellus/static/css/triage.css.
+   The app is dark-only, so the site is too: the same palette is applied to
+   the light data-theme, and the theme picker is removed. */
+@font-face {
+  font-family: "Departure Mono";
+  src: url("/marcellus/fonts/DepartureMono-Regular.otf") format("opentype");
+  font-weight: 400 700;
+  font-display: swap;
+}
+:root,
+:root[data-theme='light'],
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --mc-panel: #111216;
+  --mc-surface: #1B1C21;
+  --mc-surface-2: #24262C;
+  --mc-stroke: #303238;
+  --mc-stroke-soft: #232429;
+  --mc-text: #ECE9E3;
+  --mc-muted: #96979D;
+  --mc-accent: #E2AA52;
+  --mc-accent-2: #ECB758;
+  --mc-parchment: #EBCF9D;
+  --mc-ember: #C35B2E;
+  --mc-radius: 8px;
+
+  --sl-color-white: #F6F3EC;
+  --sl-color-gray-1: #ECE9E3;
+  --sl-color-gray-2: #C9C6C0;
+  --sl-color-gray-3: #A3A4A9;
+  --sl-color-gray-4: #8B8E95;
+  --sl-color-gray-5: #303238;
+  --sl-color-gray-6: #1B1C21;
+  --sl-color-gray-7: #16171B;
+  --sl-color-black: #111216;
+  --sl-color-accent-low: #3A2C12;
+  --sl-color-accent: #C98F32;
+  --sl-color-accent-high: #ECB758;
+  --sl-color-text: #ECE9E3;
+  --sl-color-text-accent: #E2AA52;
+  --sl-color-text-invert: #111216;
+  --sl-color-bg: #111216;
+  --sl-color-bg-nav: #1B1C21;
+  --sl-color-bg-sidebar: #1B1C21;
+  --sl-color-bg-inline-code: #1B1C21;
+  --sl-color-hairline-light: #303238;
+  --sl-color-hairline: #232429;
+  --sl-color-hairline-shade: #0B0C10;
+  --sl-color-backdrop-overlay: rgba(11, 12, 16, 0.75);
+  --sl-shadow-sm: none;
+  --sl-shadow-md: none;
+  --sl-shadow-lg: none;
+  /* Departure Mono for chrome/headings/code; system sans for prose
+     (the app does the same: mono titles and readouts, sans paragraphs). */
+  --mc-mono: "Departure Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --sl-font: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto, sans-serif;
+  --sl-font-mono: var(--mc-mono);
+}
+
+/* Chrome and headings in the pixel font. */
+h1, h2, h3, h4, h5, h6,
+.site-title, .sl-markdown-content :is(h1,h2,h3,h4,h5,h6),
+starlight-toc summary, .sidebar-content summary, .sidebar-content .large,
+.right-sidebar h2, header nav a, .hero h1, .hero .tagline + .actions a,
+.sl-link-button, .card .title, .starlight-aside__title, th, .pagination-links .link-title,
+.sidebar-content a[aria-current], mobile-starlight-toc nav {
+  font-family: var(--mc-mono);
+  font-weight: 400;
+}
+h1, h2, h3 { letter-spacing: 0; }
+.sidebar-content a { font-size: var(--sl-text-sm); }
+
+/* Links */
+.sl-markdown-content a:not(.sl-link-button):not(.mc-app-link) {
+  color: var(--mc-accent);
+  text-decoration-color: color-mix(in srgb, var(--mc-accent) 45%, transparent);
+  text-underline-offset: 0.2em;
+}
+.sl-markdown-content a:not(.sl-link-button):hover { color: var(--mc-accent-2); text-decoration-color: currentColor; }
+:focus-visible { outline: 2px solid var(--mc-accent); outline-offset: 2px; }
+
+/* Header, sidebar, surfaces */
+header.header { background: var(--mc-surface); border-bottom: 1px solid var(--mc-stroke); }
+.sidebar-pane { background: var(--mc-surface); border-inline-end: 1px solid var(--mc-stroke); }
+.site-title { color: var(--mc-text); }
+.site-title img { border-radius: 4px; }
+.sidebar-content a[aria-current='page'] { background: var(--mc-surface-2); color: var(--mc-text); box-shadow: inset 2px 0 0 var(--mc-accent); }
+.sidebar-content a:hover { background: var(--mc-surface-2); color: var(--mc-text); }
+.right-sidebar a[aria-current='true'] { color: var(--mc-accent); }
+
+/* Panels: cards, asides, code, tables */
+.card {
+  background: var(--mc-surface);
+  border: 1px solid var(--mc-stroke);
+  border-radius: 10px;
+}
+.card:hover { border-color: var(--mc-accent); }
+.card .title { color: var(--mc-text); }
+.card .icon { background: var(--sl-color-accent-low); border: 1px solid var(--mc-stroke); border-radius: 4px; color: var(--mc-accent); }
+.starlight-aside {
+  background: var(--mc-surface);
+  border: 1px solid var(--mc-stroke);
+  border-inline-start-width: 3px;
+  border-radius: var(--mc-radius);
+}
+.starlight-aside--note { border-inline-start-color: var(--mc-accent); }
+.starlight-aside--tip { border-inline-start-color: var(--mc-parchment); }
+.starlight-aside--caution { border-inline-start-color: var(--mc-ember); }
+.starlight-aside--danger { border-inline-start-color: #F87171; }
+.sl-markdown-content :not(pre) > code {
+  background: var(--mc-panel);
+  border: 1px solid var(--mc-stroke-soft);
+  border-radius: 4px;
+  color: var(--mc-text);
+}
+.expressive-code { --ec-brdRad: 8px; --ec-brdCol: var(--mc-stroke); }
+.sl-markdown-content table { font-family: var(--mc-mono); font-size: var(--sl-text-sm); }
+.sl-markdown-content th { background: var(--mc-surface); color: var(--mc-muted); }
+.sl-markdown-content :is(th, td) { border-color: var(--mc-stroke); }
+
+/* Landing hero */
+.hero h1 { color: var(--mc-parchment); font-size: clamp(2rem, 6vw, 3.25rem); }
+.hero img { border-radius: 22px; border: 1px solid var(--mc-stroke); width: clamp(5rem, 14vw, 8rem); height: auto; }
+.hero .tagline { color: var(--mc-muted); }
+.sl-link-button { border-radius: 4px; border: 1px solid var(--mc-stroke); }
+.sl-link-button.primary { background: var(--mc-accent); border-color: var(--mc-accent); color: #111216; }
+.sl-link-button.primary:hover { background: var(--mc-accent-2); border-color: var(--mc-accent-2); color: #111216; }
+.sl-link-button.minimal { color: var(--mc-accent); border-color: transparent; }
+
+/* Guide helpers */
 .mc-live-stat {
   display: inline-block;
   font-size: 0.7em;
   font-weight: 500;
   padding: 0 0.45em;
-  border: 1px dashed var(--sl-color-gray-4);
+  border: 1px dashed var(--mc-accent);
   border-radius: 999px;
-  color: var(--sl-color-gray-3);
+  font-family: var(--mc-mono);
+  background: var(--sl-color-accent-low);
+  color: var(--mc-accent-2);
   vertical-align: baseline;
   cursor: help;
 }
 .mc-app-link {
-  border-bottom: 1px dotted var(--sl-color-gray-3);
+  color: var(--mc-parchment);
+  border-bottom: 1px dotted var(--mc-accent);
   cursor: help;
 }
 .mc-app-link::after {
   content: '\2197';
   font-size: 0.7em;
   margin-left: 0.15em;
-  color: var(--sl-color-gray-3);
+  color: var(--mc-accent);
 }
 ol.mc-steps {
   list-style: none;
@@ -32,7 +165,7 @@ ol.mc-steps > li {
   padding-inline-start: 2.5rem;
   padding-bottom: 1rem;
   min-height: 2rem;
-  border-inline-start: 1px solid var(--sl-color-gray-5);
+  border-inline-start: 1px solid var(--mc-stroke);
   margin-inline-start: 0.9rem;
 }
 ol.mc-steps > li:last-child { border-inline-start-color: transparent; }
@@ -43,11 +176,18 @@ ol.mc-steps > li::before {
   top: 0;
   width: 1.8rem;
   height: 1.8rem;
-  border-radius: 50%;
-  background: var(--sl-color-accent);
-  color: var(--sl-color-black);
-  font-weight: 600;
+  border-radius: 4px;
+  background: var(--mc-accent);
+  color: #111216;
+  font-family: var(--mc-mono);
+  font-weight: 400;
+  border-radius: 4px;
   font-size: 0.85rem;
   display: grid;
   place-items: center;
 }
+
+/* App screenshots inserted by the remark plugin */
+.mc-shot { margin: 1.5rem 0; }
+.mc-shot img { width: 100%; height: auto; display: block; border: 1px solid var(--sl-color-gray-5); border-radius: 8px; }
+.mc-shot figcaption { margin-top: 0.5rem; font-size: var(--sl-text-sm); color: var(--sl-color-gray-3); }
