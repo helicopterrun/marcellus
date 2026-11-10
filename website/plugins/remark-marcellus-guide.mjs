@@ -1,6 +1,7 @@
 // Remark plugin translating the in-app guide's custom syntax (see
 // src/marcellus/guide.py) into static-site equivalents.
 import { visit, SKIP } from 'unist-util-visit';
+import { SCREENSHOTS } from '../screenshots.mjs';
 
 const STAT_RE = /\{\{stat:([a-z0-9_]+)\}\}/g;
 const BASE = '/marcellus';
@@ -21,8 +22,32 @@ function rewriteGuideLink(url) {
   return `${BASE}/guide/${slug}/${hash}`;
 }
 
+function topicSlug(file) {
+  const path = (file?.path || file?.history?.[0] || '').replace(/\\/g, '/');
+  const m = /\/(?:guide_content|guide)\/([a-z0-9-]+)\.md$/.exec(path);
+  return m ? m[1] : null;
+}
+
+function insertScreenshot(tree, slug) {
+  const shot = SCREENSHOTS[slug];
+  if (!shot) return;
+  const [src, caption] = shot;
+  const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  const node = {
+    type: 'html',
+    value: `<figure class="mc-shot"><a href="${BASE}/screenshots/${src}"><img src="${BASE}/screenshots/${src}" alt="${esc(caption)}" loading="lazy" decoding="async"></a><figcaption>${esc(caption)}</figcaption></figure>`,
+  };
+  // After the intro: the first paragraph, before the first heading.
+  const firstPara = tree.children.findIndex((n) => n.type === 'paragraph');
+  const firstHeading = tree.children.findIndex((n) => n.type === 'heading');
+  let at = firstPara >= 0 && (firstHeading < 0 || firstPara < firstHeading) ? firstPara + 1 : 0;
+  tree.children.splice(at, 0, node);
+}
+
 export default function remarkMarcellusGuide() {
-  return (tree) => {
+  return (tree, file) => {
+    const slug = topicSlug(file);
+    if (slug) insertScreenshot(tree, slug);
     // b. walkthrough blocks -> numbered steps
     visit(tree, 'code', (node, index, parent) => {
       if (node.lang !== 'walkthrough' || !parent || index == null) return;
