@@ -1,4 +1,8 @@
-# Marcellus: scrub-cache + Frigate proxy — implementation spec
+---
+title: "Marcellus: scrub-cache + Frigate proxy — implementation spec"
+banner:
+  content: "Design note: written alongside the code and may lag behind it. The <a href=\"/marcellus/guide/welcome/\">guide</a> describes current behavior."
+---
 
 **Status:** design spec, ready to build against. Written 2026-07-30, revised 2026-07-30 after client-side review (PR #3) and Phase 1 measurements against the live box.
 **Audience:** whoever implements the sidecar side of Elsinore's reel.

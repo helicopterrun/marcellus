@@ -1,4 +1,8 @@
-# Encounters — design and slice 1 spec
+---
+title: "Encounters — design and slice 1 spec"
+banner:
+  content: "Design note: written alongside the code and may lag behind it. The <a href=\"/marcellus/guide/welcome/\">guide</a> describes current behavior."
+---
 
 Status: slice 1 (adjacency, store, linker, live hook + reconciler, inspection
 page, /v1 read endpoints). Written 2026-09-19.

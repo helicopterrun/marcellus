@@ -9,6 +9,10 @@ config: []
 `fsc` (alias `marcellus`) is the Marcellus command-line tool -- same
 settings/config as the server, run one-off or from cron/systemd timers.
 
+In Docker, run it inside the container, for example
+`docker exec marcellus fsc --help` or
+`docker exec marcellus fsc scrub generate --camera doorbell`.
+
 ## Top-level
 
 - `fsc serve` -- run the HTTP server.

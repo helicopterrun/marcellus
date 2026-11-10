@@ -1,4 +1,8 @@
-# Attention ladder v3: four levels, four places
+---
+title: "Attention ladder v3: four levels, four places"
+banner:
+  content: "Design note: written alongside the code and may lag behind it. The <a href=\"/marcellus/guide/welcome/\">guide</a> describes current behavior."
+---
 
 Status: approved by the owner 2026-10-16. Implementation spec for the sidecar
 (this repo) and the Elsinore app. Owner-facing write-up of the same design:

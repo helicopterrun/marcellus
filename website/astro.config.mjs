@@ -15,6 +15,8 @@ export default defineConfig({
       social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/helicopterrun/marcellus' }],
       customCss: ['./src/styles/marcellus.css'],
       sidebar: buildSidebar(),
+      editLink: { baseUrl: 'https://github.com/helicopterrun/marcellus/edit/main/' },
+      routeMiddleware: './edit-url.mjs',
       plugins: [starlightLinksValidator()],
     }),
   ],
