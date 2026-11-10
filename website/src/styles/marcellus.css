@@ -1,0 +1,53 @@
+.mc-live-stat {
+  display: inline-block;
+  font-size: 0.7em;
+  font-weight: 500;
+  padding: 0 0.45em;
+  border: 1px dashed var(--sl-color-gray-4);
+  border-radius: 999px;
+  color: var(--sl-color-gray-3);
+  vertical-align: baseline;
+  cursor: help;
+}
+.mc-app-link {
+  border-bottom: 1px dotted var(--sl-color-gray-3);
+  cursor: help;
+}
+.mc-app-link::after {
+  content: '\2197';
+  font-size: 0.7em;
+  margin-left: 0.15em;
+  color: var(--sl-color-gray-3);
+}
+ol.mc-steps {
+  list-style: none;
+  counter-reset: mc-step;
+  padding-inline-start: 0;
+  margin-block: 1.5rem;
+}
+ol.mc-steps > li {
+  counter-increment: mc-step;
+  position: relative;
+  margin: 0;
+  padding-inline-start: 2.5rem;
+  padding-bottom: 1rem;
+  min-height: 2rem;
+  border-inline-start: 1px solid var(--sl-color-gray-5);
+  margin-inline-start: 0.9rem;
+}
+ol.mc-steps > li:last-child { border-inline-start-color: transparent; }
+ol.mc-steps > li::before {
+  content: counter(mc-step);
+  position: absolute;
+  inset-inline-start: -0.95rem;
+  top: 0;
+  width: 1.8rem;
+  height: 1.8rem;
+  border-radius: 50%;
+  background: var(--sl-color-accent);
+  color: var(--sl-color-black);
+  font-weight: 600;
+  font-size: 0.85rem;
+  display: grid;
+  place-items: center;
+}
