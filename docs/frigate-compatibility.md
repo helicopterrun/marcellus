@@ -1,4 +1,6 @@
-# Frigate compatibility
+---
+title: "Frigate compatibility"
+---
 
 Marcellus depends on three things it does not own: Frigate's SQLite database,
 which it opens read-only and queries directly; Frigate's HTTP API; and
