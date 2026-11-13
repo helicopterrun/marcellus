@@ -1,0 +1,1054 @@
+{
+ "_generated": "by tools/frigate_schema_fixture.py from frigate/api/*.py and frigate/api/defs/{request,query}/*.py (ast, not executed) -- do not hand-edit",
+ "tag": "v0.17.2",
+ "source": "github.com/blakeblackshear/frigate @ v0.17.2 (3d4dd3ac4b00e7257bd3412608a783001d7d77ed)",
+ "routes": [
+  {
+   "method": "GET",
+   "path": "/api/",
+   "handler": "app.py:is_healthy",
+   "auth": "[Depends(allow_public())]"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/audio/transcribe",
+   "handler": "classification.py:transcribe_audio",
+   "auth": ""
+  },
+  {
+   "method": "GET",
+   "path": "/api/auth",
+   "handler": "auth.py:auth",
+   "auth": "[Depends(allow_public())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/auth/first_time_login",
+   "handler": "auth.py:first_time_login",
+   "auth": "[Depends(allow_public())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/classification/attributes",
+   "handler": "classification.py:get_custom_attributes",
+   "auth": ""
+  },
+  {
+   "method": "POST",
+   "path": "/api/classification/generate_examples/object",
+   "handler": "classification.py:generate_object_examples",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/classification/generate_examples/state",
+   "handler": "classification.py:generate_state_examples",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "DELETE",
+   "path": "/api/classification/{name}",
+   "handler": "classification.py:delete_classification_model",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/classification/{name}/dataset",
+   "handler": "classification.py:get_classification_dataset",
+   "auth": ""
+  },
+  {
+   "method": "POST",
+   "path": "/api/classification/{name}/dataset/categorize",
+   "handler": "classification.py:categorize_classification_image",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/classification/{name}/dataset/{category}/create",
+   "handler": "classification.py:create_classification_category",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/classification/{name}/dataset/{category}/delete",
+   "handler": "classification.py:delete_classification_dataset_images",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/classification/{name}/dataset/{old_category}/rename",
+   "handler": "classification.py:rename_classification_category",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/classification/{name}/train",
+   "handler": "classification.py:get_classification_images",
+   "auth": ""
+  },
+  {
+   "method": "POST",
+   "path": "/api/classification/{name}/train",
+   "handler": "classification.py:train_configured_model",
+   "auth": ""
+  },
+  {
+   "method": "POST",
+   "path": "/api/classification/{name}/train/delete",
+   "handler": "classification.py:delete_classification_train_images",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/config",
+   "handler": "app.py:config",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/config/raw",
+   "handler": "app.py:config_raw",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/config/raw_paths",
+   "handler": "app.py:config_raw_paths",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/config/save",
+   "handler": "app.py:config_save",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/config/schema.json",
+   "handler": "app.py:config_schema",
+   "auth": "[Depends(allow_public())]"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/config/set",
+   "handler": "app.py:config_set",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/description/generate",
+   "handler": "event.py:generate_description_embedding",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/event_ids",
+   "handler": "event.py:event_ids",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/events",
+   "handler": "event.py:events",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "DELETE",
+   "path": "/api/events/",
+   "handler": "event.py:delete_events",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/events/explore",
+   "handler": "event.py:events_explore",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/events/search",
+   "handler": "event.py:events_search",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/events/summary",
+   "handler": "event.py:events_summary",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/events/{camera_name}/{label}/create",
+   "handler": "event.py:create_event",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "DELETE",
+   "path": "/api/events/{event_id}",
+   "handler": "event.py:delete_event",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/events/{event_id}",
+   "handler": "event.py:event",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/events/{event_id}/attributes",
+   "handler": "event.py:set_attributes",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/events/{event_id}/clip.mp4",
+   "handler": "media.py:event_clip",
+   "auth": ""
+  },
+  {
+   "method": "POST",
+   "path": "/api/events/{event_id}/description",
+   "handler": "event.py:set_description",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/events/{event_id}/description/regenerate",
+   "handler": "event.py:regenerate_description",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/events/{event_id}/end",
+   "handler": "event.py:end_event",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/events/{event_id}/false_positive",
+   "handler": "event.py:false_positive",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/events/{event_id}/plus",
+   "handler": "event.py:send_to_plus",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/events/{event_id}/preview.gif",
+   "handler": "media.py:event_preview",
+   "auth": ""
+  },
+  {
+   "method": "POST",
+   "path": "/api/events/{event_id}/recognized_license_plate",
+   "handler": "event.py:set_plate",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "DELETE",
+   "path": "/api/events/{event_id}/retain",
+   "handler": "event.py:delete_retain",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/events/{event_id}/retain",
+   "handler": "event.py:set_retain",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/events/{event_id}/snapshot-clean.webp",
+   "handler": "media.py:event_snapshot_clean",
+   "auth": ""
+  },
+  {
+   "method": "GET",
+   "path": "/api/events/{event_id}/snapshot.jpg",
+   "handler": "media.py:event_snapshot",
+   "auth": ""
+  },
+  {
+   "method": "POST",
+   "path": "/api/events/{event_id}/sub_label",
+   "handler": "event.py:set_sub_label",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/events/{event_id}/thumbnail.{extension}",
+   "handler": "media.py:event_thumbnail",
+   "auth": ""
+  },
+  {
+   "method": "POST",
+   "path": "/api/export/{camera_name}/start/{start_time}/end/{end_time}",
+   "handler": "export.py:export_recording",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "DELETE",
+   "path": "/api/export/{event_id}",
+   "handler": "export.py:export_delete",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "PATCH",
+   "path": "/api/export/{event_id}/rename",
+   "handler": "export.py:export_rename",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/exports",
+   "handler": "export.py:get_exports",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/exports/{export_id}",
+   "handler": "export.py:get_export",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/faces",
+   "handler": "classification.py:get_faces",
+   "auth": ""
+  },
+  {
+   "method": "POST",
+   "path": "/api/faces/recognize",
+   "handler": "classification.py:recognize_face",
+   "auth": ""
+  },
+  {
+   "method": "POST",
+   "path": "/api/faces/reprocess",
+   "handler": "classification.py:reclassify_face",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/faces/train/{name}/classify",
+   "handler": "classification.py:train_face",
+   "auth": ""
+  },
+  {
+   "method": "POST",
+   "path": "/api/faces/{name}/create",
+   "handler": "classification.py:create_face",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/faces/{name}/delete",
+   "handler": "classification.py:deregister_faces",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/faces/{name}/register",
+   "handler": "classification.py:register_face",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/faces/{old_name}/rename",
+   "handler": "classification.py:rename_face",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/ffprobe",
+   "handler": "camera.py:ffprobe",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/ffprobe/snapshot",
+   "handler": "camera.py:ffprobe_snapshot",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/go2rtc/streams",
+   "handler": "camera.py:go2rtc_streams",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "DELETE",
+   "path": "/api/go2rtc/streams/{stream_name}",
+   "handler": "camera.py:go2rtc_delete_stream",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/go2rtc/streams/{stream_name}",
+   "handler": "camera.py:go2rtc_camera_stream",
+   "auth": "[Depends(require_go2rtc_stream_access)]"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/go2rtc/streams/{stream_name}",
+   "handler": "camera.py:go2rtc_add_stream",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/labels",
+   "handler": "app.py:get_labels",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/login",
+   "handler": "auth.py:login",
+   "auth": "[Depends(allow_public())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/logout",
+   "handler": "auth.py:logout",
+   "auth": "[Depends(allow_public())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/logs/{service}",
+   "handler": "app.py:logs",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/lpr/reprocess",
+   "handler": "classification.py:reprocess_license_plate",
+   "auth": ""
+  },
+  {
+   "method": "GET",
+   "path": "/api/metrics",
+   "handler": "app.py:metrics",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/notifications/pubkey",
+   "handler": "notification.py:get_vapid_pub_key",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/notifications/register",
+   "handler": "notification.py:register_notifications",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/nvinfo",
+   "handler": "app.py:nvinfo",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/onvif/probe",
+   "handler": "camera.py:onvif_probe",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/plus/models",
+   "handler": "app.py:plusModels",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/preview/{camera_name}/start/{start_ts}/end/{end_ts}",
+   "handler": "preview.py:preview_ts",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/preview/{camera_name}/start/{start_ts}/end/{end_ts}/frames",
+   "handler": "preview.py:get_preview_frames_from_cache",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/preview/{file_name}/thumbnail.jpg",
+   "handler": "media.py:preview_thumbnail",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/preview/{file_name}/thumbnail.webp",
+   "handler": "media.py:preview_thumbnail",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/preview/{year_month}/{day}/{hour}/{camera_name}/{tz_name}",
+   "handler": "preview.py:preview_hour",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/profile",
+   "handler": "auth.py:profile",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/recognized_license_plates",
+   "handler": "app.py:get_recognized_license_plates",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/recordings/storage",
+   "handler": "media.py:get_recordings_storage_usage",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/recordings/summary",
+   "handler": "media.py:all_recordings_summary",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/recordings/unavailable",
+   "handler": "media.py:no_recordings",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/reindex",
+   "handler": "classification.py:reindex_embeddings",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/reolink/detect",
+   "handler": "camera.py:reolink_detect",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/restart",
+   "handler": "app.py:restart",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/review",
+   "handler": "review.py:review",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/review/activity/motion",
+   "handler": "review.py:motion_activity",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/review/event/{event_id}",
+   "handler": "review.py:get_review_from_event",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/review/summarize/start/{start_ts}/end/{end_ts}",
+   "handler": "review.py:generate_review_summary",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/review/summary",
+   "handler": "review.py:review_summary",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/review/{event_id}/preview",
+   "handler": "media.py:review_preview",
+   "auth": ""
+  },
+  {
+   "method": "GET",
+   "path": "/api/review/{review_id}",
+   "handler": "review.py:get_review",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "DELETE",
+   "path": "/api/review/{review_id}/viewed",
+   "handler": "review.py:set_not_reviewed",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/review_ids",
+   "handler": "review.py:review_ids",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/reviews/delete",
+   "handler": "review.py:delete_reviews",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/reviews/viewed",
+   "handler": "review.py:set_multiple_reviewed",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/stats",
+   "handler": "app.py:stats",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/stats/history",
+   "handler": "app.py:stats_history",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/sub_labels",
+   "handler": "app.py:get_sub_labels",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/timeline",
+   "handler": "app.py:timeline",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/timeline/hourly",
+   "handler": "app.py:hourly_timeline",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/trigger/embedding",
+   "handler": "event.py:create_trigger_embedding",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "DELETE",
+   "path": "/api/trigger/embedding/{camera_name}/{name}",
+   "handler": "event.py:delete_trigger_embedding",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/trigger/embedding/{camera_name}/{name}",
+   "handler": "event.py:update_trigger_embedding",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/triggers/status/{camera_name}",
+   "handler": "event.py:get_triggers_status",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/users",
+   "handler": "auth.py:get_users",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/users",
+   "handler": "auth.py:create_user",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "DELETE",
+   "path": "/api/users/{username}",
+   "handler": "auth.py:delete_user",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/users/{username}/password",
+   "handler": "auth.py:update_password",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/users/{username}/role",
+   "handler": "auth.py:update_role",
+   "auth": "[Depends(require_role(['admin']))]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/vainfo",
+   "handler": "app.py:vainfo",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/version",
+   "handler": "app.py:version",
+   "auth": "[Depends(allow_public())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/vod/clip/{camera_name}/start/{start_ts}/end/{end_ts}",
+   "handler": "media.py:vod_clip",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/vod/event/{event_id}",
+   "handler": "media.py:vod_event",
+   "auth": "[Depends(allow_any_authenticated())]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/vod/{camera_name}/start/{start_ts}/end/{end_ts}",
+   "handler": "media.py:vod_ts",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/vod/{year_month}/{day}/{hour}/{camera_name}",
+   "handler": "media.py:vod_hour_no_timezone",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/vod/{year_month}/{day}/{hour}/{camera_name}/{tz_name}",
+   "handler": "media.py:vod_hour",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/{camera_name}",
+   "handler": "media.py:mjpeg_feed",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/{camera_name}/grid.jpg",
+   "handler": "media.py:grid_snapshot",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/{camera_name}/latest.{extension}",
+   "handler": "media.py:latest_frame",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "POST",
+   "path": "/api/{camera_name}/plus/{frame_time}",
+   "handler": "media.py:submit_recording_snapshot_to_plus",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/{camera_name}/ptz/info",
+   "handler": "media.py:camera_ptz_info",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/{camera_name}/recordings",
+   "handler": "media.py:recordings",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/{camera_name}/recordings/summary",
+   "handler": "media.py:recordings_summary",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/{camera_name}/recordings/{frame_time}/snapshot.{format}",
+   "handler": "media.py:get_snapshot_from_recording",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/{camera_name}/start/{start_ts}/end/{end_ts}/clip.mp4",
+   "handler": "media.py:recording_clip",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/{camera_name}/start/{start_ts}/end/{end_ts}/preview.gif",
+   "handler": "media.py:preview_gif",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/{camera_name}/start/{start_ts}/end/{end_ts}/preview.mp4",
+   "handler": "media.py:preview_mp4",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/{camera_name}/{label}/best.jpg",
+   "handler": "media.py:label_thumbnail",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/{camera_name}/{label}/clip.mp4",
+   "handler": "media.py:label_clip",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/{camera_name}/{label}/snapshot.jpg",
+   "handler": "media.py:label_snapshot",
+   "auth": "[Depends(require_camera_access)]"
+  },
+  {
+   "method": "GET",
+   "path": "/api/{camera_name}/{label}/thumbnail.jpg",
+   "handler": "media.py:label_thumbnail",
+   "auth": "[Depends(require_camera_access)]"
+  }
+ ],
+ "models": {
+  "AppConfigSetBody": {
+   "requires_restart": "int",
+   "update_topic": "str | None",
+   "config_data": "Optional[Dict[str, Any]]"
+  },
+  "AppPostLoginBody": {
+   "user": "str",
+   "password": "str"
+  },
+  "AppPostUsersBody": {
+   "username": "str",
+   "password": "str",
+   "role": "Optional[str]"
+  },
+  "AppPutPasswordBody": {
+   "password": "str",
+   "old_password": "Optional[str]"
+  },
+  "AppPutRoleBody": {
+   "role": "str"
+  },
+  "AppTimelineHourlyQueryParameters": {
+   "cameras": "Optional[str]",
+   "labels": "Optional[str]",
+   "after": "Optional[float]",
+   "before": "Optional[float]",
+   "limit": "Optional[int]",
+   "timezone": "Optional[str]"
+  },
+  "AudioTranscriptionBody": {
+   "event_id": "str"
+  },
+  "DeleteFaceImagesBody": {
+   "ids": "List[str]"
+  },
+  "EventsAttributesBody": {
+   "attributes": "List[str]"
+  },
+  "EventsCreateBody": {
+   "sub_label": "Optional[str]",
+   "score": "Optional[float]",
+   "duration": "Optional[int]",
+   "include_recording": "Optional[bool]",
+   "draw": "Optional[dict]"
+  },
+  "EventsDeleteBody": {
+   "event_ids": "List[str]"
+  },
+  "EventsDescriptionBody": {
+   "description": "Union[str, None]"
+  },
+  "EventsEndBody": {
+   "end_time": "Optional[float]"
+  },
+  "EventsLPRBody": {
+   "recognizedLicensePlate": "str",
+   "recognizedLicensePlateScore": "Optional[float]"
+  },
+  "EventsQueryParams": {
+   "camera": "Optional[str]",
+   "cameras": "Optional[str]",
+   "label": "Optional[str]",
+   "labels": "Optional[str]",
+   "sub_label": "Optional[str]",
+   "sub_labels": "Optional[str]",
+   "attributes": "Optional[str]",
+   "zone": "Optional[str]",
+   "zones": "Optional[str]",
+   "limit": "Optional[int]",
+   "after": "Optional[float]",
+   "before": "Optional[float]",
+   "time_range": "Optional[str]",
+   "has_clip": "Optional[int]",
+   "has_snapshot": "Optional[int]",
+   "in_progress": "Optional[int]",
+   "include_thumbnails": "Optional[int]",
+   "favorites": "Optional[int]",
+   "min_score": "Optional[float]",
+   "max_score": "Optional[float]",
+   "min_speed": "Optional[float]",
+   "max_speed": "Optional[float]",
+   "recognized_license_plate": "Optional[str]",
+   "is_submitted": "Optional[int]",
+   "min_length": "Optional[float]",
+   "max_length": "Optional[float]",
+   "event_id": "Optional[str]",
+   "sort": "Optional[str]",
+   "timezone": "Optional[str]"
+  },
+  "EventsSearchQueryParams": {
+   "query": "Optional[str]",
+   "event_id": "Optional[str]",
+   "search_type": "Optional[str]",
+   "include_thumbnails": "Optional[int]",
+   "limit": "Optional[int]",
+   "cameras": "Optional[str]",
+   "labels": "Optional[str]",
+   "sub_labels": "Optional[str]",
+   "attributes": "Optional[str]",
+   "zones": "Optional[str]",
+   "after": "Optional[float]",
+   "before": "Optional[float]",
+   "time_range": "Optional[str]",
+   "has_clip": "Optional[bool]",
+   "has_snapshot": "Optional[bool]",
+   "is_submitted": "Optional[bool]",
+   "timezone": "Optional[str]",
+   "min_score": "Optional[float]",
+   "max_score": "Optional[float]",
+   "min_speed": "Optional[float]",
+   "max_speed": "Optional[float]",
+   "recognized_license_plate": "Optional[str]",
+   "sort": "Optional[str]"
+  },
+  "EventsSubLabelBody": {
+   "subLabel": "str",
+   "subLabelScore": "Optional[float]",
+   "camera": "Optional[str]"
+  },
+  "EventsSummaryQueryParams": {
+   "timezone": "Optional[str]",
+   "has_clip": "Optional[int]",
+   "has_snapshot": "Optional[int]"
+  },
+  "ExportRecordingsBody": {
+   "playback": "PlaybackFactorEnum",
+   "source": "PlaybackSourceEnum",
+   "name": "Optional[str]",
+   "image_path": "Union[str, SkipJsonSchema[None]]",
+   "chapters": "Optional[ChaptersEnum]"
+  },
+  "ExportRenameBody": {
+   "name": "str"
+  },
+  "GenerateObjectExamplesBody": {
+   "model_name": "str",
+   "label": "str"
+  },
+  "GenerateStateExamplesBody": {
+   "model_name": "str",
+   "cameras": "Dict[str, Tuple[float, float, float, float]]"
+  },
+  "MediaEventsSnapshotQueryParams": {
+   "download": "Optional[bool]",
+   "timestamp": "Optional[int]",
+   "bbox": "Optional[int]",
+   "crop": "Optional[int]",
+   "height": "Optional[int]",
+   "quality": "Optional[int]"
+  },
+  "MediaLatestFrameQueryParams": {
+   "bbox": "Optional[int]",
+   "timestamp": "Optional[int]",
+   "zones": "Optional[int]",
+   "mask": "Optional[int]",
+   "motion": "Optional[int]",
+   "paths": "Optional[int]",
+   "regions": "Optional[int]",
+   "quality": "Optional[int]",
+   "height": "Optional[int]",
+   "store": "Optional[int]"
+  },
+  "MediaMjpegFeedQueryParams": {
+   "fps": "int",
+   "height": "int",
+   "bbox": "Optional[int]",
+   "timestamp": "Optional[int]",
+   "zones": "Optional[int]",
+   "mask": "Optional[int]",
+   "motion": "Optional[int]",
+   "regions": "Optional[int]"
+  },
+  "MediaRecordingsAvailabilityQueryParams": {
+   "cameras": "str",
+   "before": "Union[float, SkipJsonSchema[None]]",
+   "after": "Union[float, SkipJsonSchema[None]]",
+   "scale": "int"
+  },
+  "MediaRecordingsSummaryQueryParams": {
+   "timezone": "str",
+   "cameras": "Optional[str]"
+  },
+  "RegenerateQueryParameters": {
+   "source": "Optional[RegenerateDescriptionEnum]",
+   "force": "Optional[bool]"
+  },
+  "RenameFaceBody": {
+   "new_name": "str"
+  },
+  "ReviewActivityMotionQueryParams": {
+   "cameras": "str",
+   "before": "Union[float, SkipJsonSchema[None]]",
+   "after": "Union[float, SkipJsonSchema[None]]",
+   "scale": "int"
+  },
+  "ReviewModifyMultipleBody": {
+   "ids": "conlist(constr(min_length=1), min_length=1)",
+   "reviewed": "bool"
+  },
+  "ReviewQueryParams": {
+   "cameras": "str",
+   "labels": "str",
+   "zones": "str",
+   "reviewed": "Union[int, SkipJsonSchema[None]]",
+   "limit": "Union[int, SkipJsonSchema[None]]",
+   "severity": "Union[SeverityEnum, SkipJsonSchema[None]]",
+   "before": "Union[float, SkipJsonSchema[None]]",
+   "after": "Union[float, SkipJsonSchema[None]]"
+  },
+  "ReviewSummaryQueryParams": {
+   "cameras": "str",
+   "labels": "str",
+   "zones": "str",
+   "timezone": "str"
+  },
+  "SubmitPlusBody": {
+   "include_annotation": "int"
+  },
+  "TriggerEmbeddingBody": {
+   "type": "TriggerType",
+   "data": "str",
+   "threshold": "float"
+  }
+ }
+}

@@ -27,6 +27,18 @@ Actively developed and running in production alongside one Frigate 0.17
 deployment, with the Elsinore iOS app as its main client. It is still a
 single-deployment project at heart, so expect portability rough edges.
 
+### Tested Frigate versions
+
+| Frigate | Fixture tests (CI) | Verified on a live server |
+|---|---|---|
+| 0.17.2 | yes | yes |
+| 0.18.2 | yes | not yet |
+
+Marcellus reads Frigate's database and API directly. CI runs its read paths and
+API calls against schema and route fixtures generated from each release's
+upstream source. What each release changed, and what Marcellus depends on, is in
+[docs/frigate-compatibility.md](docs/frigate-compatibility.md).
+
 ## Quick install
 
 ```sh

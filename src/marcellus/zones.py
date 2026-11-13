@@ -15,8 +15,17 @@ ZONE_PALETTE = (
 
 
 def _parse_coords(coords: object) -> list[tuple[float, float]] | None:
+    """Frigate zone `coordinates` -> [(x, y), ...], or None if unusable.
+
+    Frigate accepts two spellings (`ZoneConfig.coordinates: str | list[str]`
+    in 0.17 and 0.18): one comma-separated string, or a YAML list of "x,y"
+    strings. Only the first was handled; a list-form zone was silently
+    dropped from every overlay and zone test.
+    """
     if not coords:
         return None
+    if isinstance(coords, (list, tuple)):
+        coords = ",".join(str(p) for p in coords)
     try:
         nums = [float(x) for x in str(coords).split(",")]
     except ValueError:
@@ -78,7 +87,8 @@ def zones_containing_box(
 
     Returns empty set if box is missing/invalid. Full-frame zones (e.g.
     `*_critter` regional gates) are excluded — they're trivially active for any
-    in-frame box and add no spatial signal.
+    in-frame box and add no spatial signal. So are zones with `enabled: false`
+    (Frigate 0.18+), which Frigate ignores at runtime: no object can be in one.
     """
     if not box or len(box) != 4:
         return set()
@@ -88,7 +98,8 @@ def zones_containing_box(
     return {
         z["name"]
         for z in zones
-        if not is_full_frame(z["coords"])
+        if z.get("enabled", True)
+        and not is_full_frame(z["coords"])
         and point_in_polygon(cx, by, z["coords"])
     }
 
@@ -170,6 +181,10 @@ def load_camera_zones(config_path: str | Path) -> dict[str, list[dict[str, Any]]
                     # Frigate's optional display name — push copy prefers it
                     # over humanizing the rule-shaped zone key.
                     "friendly_name": zd.get("friendly_name"),
+                    # Frigate 0.18 added `enabled` (default true; 0.17 has no
+                    # such key, so absent means enabled). Carried, not
+                    # filtered: overlays and routing still list the zone.
+                    "enabled": zd.get("enabled", True) is not False,
                 }
             )
         if cam_zones:
