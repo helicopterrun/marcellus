@@ -16,7 +16,7 @@ import logging
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from marcellus import db
 from marcellus.push import card_store, decision_trace, library, policy_settings, store
@@ -138,6 +138,23 @@ class DeviceRegistration(BaseModel):
     # alone (or the config default order, for a brand-new device) -- an
     # explicit `null` clears any device-specific slots back to that default.
     doorbell_slots: list[str] | None = None
+
+    # Per-install relay credential the app obtained from the relay (see
+    # docs/push-notifications.md). Opaque; stored per device, sent to the
+    # relay as `Authorization: Bearer`, never returned or logged. An invalid
+    # value is dropped (treated as absent) rather than 422ing the whole
+    # registration. Empty keeps whatever is already stored.
+    relay_credential: str = ""
+
+    @field_validator("relay_credential", mode="before")
+    @classmethod
+    def _sane_relay_credential(cls, value: Any) -> str:
+        if value is None or value == "":
+            return ""
+        if store.valid_relay_credential(value):
+            return str(value)
+        logger.warning("push: registration relay_credential failed sanity check; ignored")
+        return ""
 
 
 class ReceiptEntry(BaseModel):
@@ -284,6 +301,7 @@ async def register_device(
             frequent_pushes_enabled=body.frequent_pushes_enabled,
             doorbell_rings=doorbell_rings,
             doorbell_slots=doorbell_slots,
+            relay_credential=body.relay_credential,
         )
         if body.snoozes is not None:
             store.replace_snoozes(conn, apns_token=apns_token, snoozes=body.snoozes)
@@ -302,10 +320,12 @@ async def register_device(
     uses_situations = bool(parsed)
     logger.info(
         "push: registration apns_token=%s schema_version=%s uses_situations=%s "
+        "relay_credential=%s "
         "(situations stored for back-compat; card pipeline is the alert path)",
         apns_token[:8],
         schema_version,
         uses_situations,
+        "present" if body.relay_credential else "absent",
     )
     if previous is not None and previous.uses_situations != uses_situations:
         # The edge that actually matters: a device silently flipping mode

@@ -58,6 +58,9 @@ class PushCapabilities(_Wire):
     attention_subjects: list[str]
     #: Attention ladder version (v3: settings carry `ladder`). Additive.
     ladder_version: int
+    #: `PUT /v1/push/devices/...` accepts a per-install `relay_credential`.
+    #: Additive; absent on older sidecars.
+    relay_credentials: bool = False
 
 
 class DecisionsCapabilities(_Wire):

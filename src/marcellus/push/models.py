@@ -120,6 +120,9 @@ class Device:
     #: M-2: this device's 3 doorbell-LCD quick-reply slot ids, or `None` to
     #: use `unifi_protect.lcd_presets`' default order.
     doorbell_slots: tuple[str, str, str] | None = None
+    #: Per-install relay credential, sent as `Authorization: Bearer`. A secret:
+    #: `repr=False` keeps it out of any logged/printed Device.
+    relay_credential: str = field(default="", repr=False)
 
     @property
     def can_live_activity(self) -> bool:

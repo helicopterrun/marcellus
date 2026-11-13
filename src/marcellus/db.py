@@ -187,7 +187,8 @@ CREATE TABLE IF NOT EXISTS push_devices (
     -- default order. Ids are resolved lazily at send/read time, not
     -- validated against current presets/images here -- a slot can reference
     -- a preset that's since been removed and just gets dropped then.
-    doorbell_slots TEXT
+    doorbell_slots TEXT,
+    relay_credential TEXT NOT NULL DEFAULT ''
 );
 
 -- Opaque, sidecar-minted, short-lived handles standing in for
@@ -988,6 +989,9 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # M-2: this device's 3 doorbell-LCD quick-reply slot ids (JSON), or
         # NULL for the config default order.
         ("doorbell_slots", "TEXT"),
+        # Per-install relay credential (opaque `v1.<b64url>.<b64url>` string
+        # the app obtained from the relay). Never returned by any endpoint.
+        ("relay_credential", "TEXT NOT NULL DEFAULT ''"),
     ],
     "push_handles": [
         ("situation_id", "TEXT NOT NULL DEFAULT ''"),

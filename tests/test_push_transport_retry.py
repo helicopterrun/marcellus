@@ -21,7 +21,7 @@ from marcellus.push.transport import RelayTransport, compute_retry_delay
 def _device(**kwargs: object) -> Device:
     defaults: dict[str, object] = dict(
         apns_token="tok1", device_id="d_abc", bundle_id="com.pondhouse.Elsinore",
-        environment="sandbox",
+        environment="sandbox", relay_credential="v1.test.cred",
     )
     defaults.update(kwargs)
     return Device(**defaults)  # type: ignore[arg-type]

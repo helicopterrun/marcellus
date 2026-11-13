@@ -65,6 +65,7 @@
     ],
     "enabled": false,
     "ladder_version": 3,
+    "relay_credentials": true,
     "transport": "mock"
   },
   "scrub_cache": {
