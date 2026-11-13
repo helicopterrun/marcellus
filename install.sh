@@ -15,7 +15,7 @@ RAW="https://raw.githubusercontent.com/$REPO/main"
 INSTALL_DIR="${INSTALL_DIR:-/opt/marcellus}"
 # Release train, not :latest — reruns of this script should not silently
 # cross a minor version.
-IMAGE="ghcr.io/$REPO:0.3"
+IMAGE="ghcr.io/$REPO:0.4"
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
