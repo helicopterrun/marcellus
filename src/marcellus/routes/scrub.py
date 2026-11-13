@@ -300,6 +300,10 @@ async def capabilities(request: Request) -> dict[str, Any]:
             # `ladder` only when it sees this; otherwise it treats the
             # sidecar as v2. Additive.
             "ladder_version": policy_settings.SETTINGS_VERSION,
+            # Registrations may carry a per-install `relay_credential`
+            # (docs/push-notifications.md). The app asks the relay for one
+            # only when it sees this. Additive.
+            "relay_credentials": True,
         },
         "decisions": {"enabled": True},
         "search": {"enabled": True, "related_events": True},

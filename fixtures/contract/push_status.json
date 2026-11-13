@@ -12,6 +12,8 @@
   "paused_until": null,
   "quiet_hours_active": false,
   "relay": {
+    "last_auth_issue": null,
+    "last_auth_issue_at": null,
     "last_error": null,
     "last_error_at": null,
     "last_ok_at": "2026-08-05T17:56:50Z",

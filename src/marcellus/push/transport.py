@@ -123,6 +123,12 @@ class RelayHealth:
     last_error: str | None = None
     last_error_at: float | None = None
     last_status_code: int | None = None
+    #: Credential problems, kept apart from `last_error` so a later unrelated
+    #: error does not hide them: "relay rejected credentials" (a 401) or "no
+    #: relay credential" (a device with neither a credential nor a configured
+    #: relay_key, whose send was skipped). Never carries a credential value.
+    last_auth_issue: str | None = None
+    last_auth_issue_at: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         from marcellus.push.store import epoch_to_iso as _epoch_to_iso
@@ -132,6 +138,8 @@ class RelayHealth:
             "last_error": self.last_error,
             "last_error_at": _epoch_to_iso(self.last_error_at),
             "last_status_code": self.last_status_code,
+            "last_auth_issue": self.last_auth_issue,
+            "last_auth_issue_at": _epoch_to_iso(self.last_auth_issue_at),
         }
 
 
@@ -147,6 +155,8 @@ def reset_relay_health_for_tests() -> None:
     RELAY_HEALTH.last_error = None
     RELAY_HEALTH.last_error_at = None
     RELAY_HEALTH.last_status_code = None
+    RELAY_HEALTH.last_auth_issue = None
+    RELAY_HEALTH.last_auth_issue_at = None
 
 
 @dataclass
@@ -379,8 +389,9 @@ class RelayTransport:
         self._client = client or self._build_client(timeout)
         self._owns_client = client is None
         self._relay_key = relay_key
-        if not relay_key:
-            logger.warning("push: relay_key not set — relay requests will be unauthenticated")
+        # Per-device credentials make an empty relay_key valid; the server
+        # logs the startup warning, and sends for devices with neither skip.
+        self._auth_log_at: dict[str, float] = {}
 
         # -- Retry + circuit breaker (wave 2A) --
         self._retry_attempts = retry_attempts
@@ -417,10 +428,25 @@ class RelayTransport:
     def _environment(cls, device: Device) -> str:
         return cls._RELAY_ENVIRONMENT.get(device.environment, device.environment)
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, device: Device) -> dict[str, str]:
+        """Per-install credential as a Bearer token, plus the legacy shared
+        key whenever one is configured (the relay accepts either)."""
+        headers: dict[str, str] = {}
+        if device.relay_credential:
+            headers["Authorization"] = f"Bearer {device.relay_credential}"
         if self._relay_key:
-            return {"x-relay-key": self._relay_key}
-        return {}
+            headers["x-relay-key"] = self._relay_key
+        return headers
+
+    def _note_auth_issue(self, issue: str, device: Device) -> None:
+        """Record in RELAY_HEALTH and log (rate-limited to one line per issue
+        per 5 minutes) a credential problem. Never logs a credential."""
+        now = time.time()
+        RELAY_HEALTH.last_auth_issue = issue
+        RELAY_HEALTH.last_auth_issue_at = now
+        if now - self._auth_log_at.get(issue, 0.0) >= 300.0:
+            self._auth_log_at[issue] = now
+            logger.warning("push: %s (device=%s)", issue, device.device_id)
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -444,7 +470,9 @@ class RelayTransport:
             "apns-collapse-id": collapse_id,
         }
         url = f"{self.base_url}/v1/relay/push"
-        return await self._send_with_retry(url, payload, kind="push", log_key=collapse_id)
+        return await self._send_with_retry(
+            url, payload, kind="push", log_key=collapse_id, device=device
+        )
 
     async def send_situation(
         self, device: Device, *, payload: dict[str, Any], collapse_id: str,
@@ -462,7 +490,9 @@ class RelayTransport:
         if apns_expiration is not None:
             body["apns_expiration"] = apns_expiration
         url = f"{self.base_url}/v1/relay/situation"
-        return await self._send_with_retry(url, body, kind="situation", log_key=collapse_id)
+        return await self._send_with_retry(
+            url, body, kind="situation", log_key=collapse_id, device=device
+        )
 
     async def send_live_activity(
         self, device: Device, *, token: str, payload: dict[str, Any],
@@ -485,7 +515,8 @@ class RelayTransport:
             body["apns_expiration"] = apns_expiration
         url = f"{self.base_url}/v1/relay/liveactivity"
         return await self._send_with_retry(
-            url, body, kind="liveactivity", event=event, log_key=collapse_id
+            url, body, kind="liveactivity", event=event, log_key=collapse_id,
+            device=device,
         )
 
     async def send_test(self, device: Device) -> TransportResult:
@@ -507,7 +538,7 @@ class RelayTransport:
         }
         url = f"{self.base_url}/v1/relay/test"
         return await self._send_with_retry(
-            url, payload, kind="test", log_key=device.device_id
+            url, payload, kind="test", log_key=device.device_id, device=device
         )
 
     # -- Retry + circuit breaker (wave 2A) ------------------------------------
@@ -586,16 +617,25 @@ class RelayTransport:
         body: dict[str, Any],
         *,
         kind: str,
+        device: Device,
         event: str | None = None,
         log_key: str = "",
     ) -> TransportResult:
+        if not device.relay_credential and not self._relay_key:
+            # Nothing to authenticate with: do not send unauthenticated.
+            STATS.incr("relay.send.failed")
+            STATS.incr("relay.send.no_credential")
+            self._note_auth_issue(
+                "no relay credential for device and no relay_key configured", device
+            )
+            return TransportResult(ok=False, error="no relay credential")
         skip = self._breaker_skip()
         if skip is not None:
             return skip
 
         probe = self._is_half_open_probe()
         max_attempts = 1 if probe else self._max_attempts(kind, event)
-        headers = self._headers()
+        headers = self._headers(device)
         label = kind if event is None else f"{kind} {event}"
 
         last_error = "unknown error"
@@ -701,6 +741,21 @@ class RelayTransport:
                 if self._breaker_is_open():
                     break
                 continue
+
+            if resp.status_code == 401:
+                # The relay answered, so this is not an outage: no breaker
+                # failure, never prunes the device (it is our credential
+                # that was refused, not the token). Surfaced in health/doctor.
+                self._record_breaker_outcome(failed=False)
+                STATS.incr("relay.send.failed")
+                STATS.incr("relay.send.auth_rejected")
+                RELAY_HEALTH.last_error = "relay rejected credentials (HTTP 401)"
+                RELAY_HEALTH.last_error_at = time.time()
+                RELAY_HEALTH.last_status_code = 401
+                self._note_auth_issue("relay rejected credentials (HTTP 401)", device)
+                return TransportResult(
+                    ok=False, error="relay rejected credentials (HTTP 401)", status_code=401,
+                )
 
             # Any other 4xx: terminal, never retried.
             self._record_breaker_outcome(failed=False)

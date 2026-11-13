@@ -472,7 +472,7 @@ async def test_relay_situation_carries_priority_and_expiration():
         return httpx.Response(200, json={"ok": True})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    relay = RelayTransport("https://relay.test", client=client)
+    relay = RelayTransport("https://relay.test", client=client, relay_key="k")
     dev = _device()
     await relay.send_situation(
         dev, payload={"aps": {}}, collapse_id="c1",
@@ -492,7 +492,7 @@ async def test_relay_situation_omits_priority_when_none():
         return httpx.Response(200, json={"ok": True})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    relay = RelayTransport("https://relay.test", client=client)
+    relay = RelayTransport("https://relay.test", client=client, relay_key="k")
     dev = _device()
     await relay.send_situation(dev, payload={"aps": {}}, collapse_id="c1")
     assert "apns_priority" not in captured["json"]
@@ -509,7 +509,7 @@ async def test_relay_la_carries_priority_and_expiration():
         return httpx.Response(200, json={"ok": True})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    relay = RelayTransport("https://relay.test", client=client)
+    relay = RelayTransport("https://relay.test", client=client, relay_key="k")
     dev = _device()
     await relay.send_live_activity(
         dev, token="tok", payload={"aps": {}}, collapse_id="c1",
@@ -580,19 +580,20 @@ async def test_relay_key_on_la_and_test_endpoints():
     await relay.aclose()
 
 
-def test_relay_without_key_logs_critical_at_startup(caplog):
-    """`transport = "relay"` with an empty relay_key is a live misconfiguration
-    (every push goes out unauthenticated) -- startup must say so at CRITICAL,
-    without refusing to start (a deploy mid-upgrade shouldn't hard-fail)."""
+def test_relay_without_key_logs_warning_at_startup(caplog):
+    """`transport = "relay"` with an empty relay_key is valid now (devices
+    bring per-install credentials): startup warns, never CRITICAL, and does
+    not refuse to start."""
     from marcellus.config import PushSection, Settings
     from marcellus.server import _build_push_transport
 
     settings = Settings(push=PushSection(transport="relay", relay_key=""))
-    with caplog.at_level(logging.CRITICAL, logger="marcellus.server"):
+    with caplog.at_level(logging.WARNING, logger="marcellus.server"):
         transport = _build_push_transport(settings)
     assert isinstance(transport, RelayTransport)
-    critical = [r for r in caplog.records if r.levelno == logging.CRITICAL]
-    assert critical and "relay_key" in critical[0].getMessage()
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warned and "relay credential" in warned[0].getMessage()
 
     caplog.clear()
     with caplog.at_level(logging.CRITICAL, logger="marcellus.server"):

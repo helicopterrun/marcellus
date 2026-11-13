@@ -303,13 +303,13 @@ def _build_push_transport(settings: Settings) -> PushTransport:
     credentials (spec §4). "relay" posts to `push.relay_base_url`."""
     if settings.push.transport == "relay":
         if not settings.push.relay_key:
-            # Deliberately not fatal -- an LXC deploy mid-upgrade must not
-            # hard-fail on a missing key -- but every push would go to the
-            # relay unauthenticated, so it has to be unmissable in the log.
-            logger.critical(
-                "push: transport is 'relay' but push.relay_key is EMPTY -- every "
-                "relay request will be sent UNAUTHENTICATED. Set push.relay_key "
-                "in the sidecar config."
+            # A valid configuration now: the app brings a per-install relay
+            # credential in its registration. Devices with neither a
+            # credential nor this key are skipped (never sent unauthenticated).
+            logger.warning(
+                "push: transport is 'relay' and no relay_key configured; pushes "
+                "are authenticated only for devices whose app supplied a relay "
+                "credential"
             )
         return RelayTransport(
             settings.push.relay_base_url,
