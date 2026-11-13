@@ -91,12 +91,26 @@ def _row_to_device(row: sqlite3.Row) -> Device:
             int(_col(row, "doorbell_rings", 1) if _col(row, "doorbell_rings", 1) is not None else 1)
         ),
         doorbell_slots=doorbell_slots,
+        relay_credential=str(_col(row, "relay_credential", "") or ""),
     )
 
 
 # Registration fields this phase persists without reading. Named here so the
 # later-phase handoffs have one place to look for what is already arriving.
 IGNORED_REGISTRATION_FIELDS = ("live_activity_token", "morning_digest", "llm")
+
+
+def valid_relay_credential(value: object) -> bool:
+    """Sanity check only -- the credential is opaque to this server and is
+    never parsed. Non-empty, `v1.` prefix, <= 2048 chars, printable ASCII."""
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= 2048
+        and value.startswith("v1.")
+        and value.isascii()
+        and value.isprintable()
+        and " " not in value
+    )
 
 
 def upsert_device(
@@ -121,6 +135,7 @@ def upsert_device(
     frequent_pushes_enabled: bool = False,
     doorbell_rings: bool = True,
     doorbell_slots: list[str] | None = None,
+    relay_credential: str = "",
 ) -> str:
     """Idempotent PUT on the token (spec §1) -- overwrites filter state in
     place rather than accumulating duplicate rows that would double-fire
@@ -137,8 +152,9 @@ def upsert_device(
         "(apns_token, device_id, bundle_id, environment, app_version, cameras, labels, "
         " min_severity, registered_at, updated_at, schema_version, timezone, location, "
         " situations, live_activity_token, morning_digest, llm, push_to_start_token, "
-        " la_capable, frequent_pushes_enabled, doorbell_rings, doorbell_slots) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " la_capable, frequent_pushes_enabled, doorbell_rings, doorbell_slots, "
+        " relay_credential) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(apns_token) DO UPDATE SET "
         "bundle_id=excluded.bundle_id, environment=excluded.environment, "
         "app_version=excluded.app_version, cameras=excluded.cameras, labels=excluded.labels, "
@@ -155,7 +171,11 @@ def upsert_device(
         # the app uploads it from an async token stream, so the first PUT after
         # launch can legitimately race ahead of the token arriving.
         "push_to_start_token=CASE WHEN excluded.push_to_start_token != '' "
-        " THEN excluded.push_to_start_token ELSE push_devices.push_to_start_token END",
+        " THEN excluded.push_to_start_token ELSE push_devices.push_to_start_token END, "
+        # Same keep-if-empty rule: the credential arrives from an async relay
+        # fetch, so an early PUT without it must not blank a working one.
+        "relay_credential=CASE WHEN excluded.relay_credential != '' "
+        " THEN excluded.relay_credential ELSE push_devices.relay_credential END",
         (
             apns_token,
             device_id,
@@ -179,6 +199,7 @@ def upsert_device(
             int(frequent_pushes_enabled),
             int(doorbell_rings),
             json.dumps(doorbell_slots) if doorbell_slots is not None else None,
+            relay_credential,
         ),
     )
     # Commits itself (spec Wave 2B §3): sqlite3's default isolation leaves
@@ -188,6 +209,20 @@ def upsert_device(
     # commit right here instead of leaving it to the caller.
     conn.commit()
     return device_id
+
+
+def clear_push_to_start_token(conn: sqlite3.Connection, apns_token: str) -> bool:
+    """Forget a push-to-start token the relay/APNs reported dead, so it is not
+    retried on every update. The device row stays; the next registration that
+    carries a fresh token restores Live Activity starts (an empty one keeps the
+    now-empty value)."""
+    cur = conn.execute(
+        "UPDATE push_devices SET push_to_start_token = '' "
+        "WHERE apns_token = ? AND push_to_start_token != ''",
+        (apns_token,),
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def delete_device(conn: sqlite3.Connection, apns_token: str) -> bool:

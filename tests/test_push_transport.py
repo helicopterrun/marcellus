@@ -9,7 +9,7 @@ from marcellus.push.transport import LogTransport, RelayTransport
 def _device(**kwargs):
     defaults = dict(
         apns_token="tok1", device_id="d_abc", bundle_id="com.pondhouse.Elsinore",
-        environment="sandbox",
+        environment="sandbox", relay_credential="v1.test.cred",
     )
     defaults.update(kwargs)
     return Device(**defaults)
@@ -262,3 +262,85 @@ async def test_relay_transport_translates_prod_to_production() -> None:
     assert seen == ["production", "production", "sandbox"], (
         "both routes must translate, and sandbox must pass through untouched"
     )
+
+
+async def _capture_headers(relay_key: str, device: Device, status: int = 200):
+    seen: list[httpx.Headers] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers)
+        return httpx.Response(status, json={"detail": "x"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    relay = RelayTransport("https://relay.example.test", client=client, relay_key=relay_key)
+    return relay, seen
+
+
+async def test_credential_sent_as_bearer_alongside_legacy_key():
+    from marcellus.push.transport import reset_relay_health_for_tests
+
+    reset_relay_health_for_tests()
+    dev = _device(relay_credential="v1.abc.def")
+    relay, seen = await _capture_headers("shared", dev)
+    for call in (
+        relay.send(dev, handle="h", server_id="s", severity="alert", collapse_id="c"),
+        relay.send_situation(dev, payload={"aps": {}}, collapse_id="c"),
+        relay.send_live_activity(
+            dev, token="t", payload={}, collapse_id="c", event="update"
+        ),
+        relay.send_test(dev),
+    ):
+        assert (await call).ok
+    assert len(seen) == 4
+    for h in seen:
+        assert h["authorization"] == "Bearer v1.abc.def"
+        assert h["x-relay-key"] == "shared"
+
+
+async def test_bearer_only_when_no_key_and_key_only_when_no_credential():
+    dev = _device(relay_credential="v1.abc.def")
+    relay, seen = await _capture_headers("", dev)
+    assert (await relay.send_test(dev)).ok
+    assert seen[0]["authorization"] == "Bearer v1.abc.def"
+    assert "x-relay-key" not in seen[0]
+
+    legacy = _device(relay_credential="")
+    relay, seen = await _capture_headers("shared", legacy)
+    assert (await relay.send_test(legacy)).ok
+    assert "authorization" not in seen[0]
+    assert seen[0]["x-relay-key"] == "shared"
+
+
+async def test_no_credential_and_no_key_skips_send_and_records_issue():
+    from marcellus.push.transport import RELAY_HEALTH, reset_relay_health_for_tests
+
+    reset_relay_health_for_tests()
+    dev = _device(relay_credential="")
+    relay, seen = await _capture_headers("", dev)
+    result = await relay.send_test(dev)
+    assert result.ok is False and result.unregistered is False
+    assert seen == []
+    assert RELAY_HEALTH.last_auth_issue and "no relay credential" in RELAY_HEALTH.last_auth_issue
+    reset_relay_health_for_tests()
+
+
+async def test_401_surfaces_in_health_without_pruning_or_tripping_breaker():
+    from marcellus.push.transport import RELAY_HEALTH, reset_relay_health_for_tests
+
+    reset_relay_health_for_tests()
+    dev = _device(relay_credential="v1.secret.value")
+    relay, seen = await _capture_headers("", dev, status=401)
+    for _ in range(6):  # well past breaker_failures (3)
+        result = await relay.send_test(dev)
+        assert result.ok is False
+        assert result.unregistered is False
+        assert result.status_code == 401
+    assert len(seen) == 6  # breaker never opened
+    assert RELAY_HEALTH.last_auth_issue == "relay rejected credentials (HTTP 401)"
+    assert RELAY_HEALTH.last_status_code == 401
+    assert "secret" not in str(RELAY_HEALTH.as_dict())
+    reset_relay_health_for_tests()
+
+
+def test_device_repr_hides_credential():
+    assert "v1.test.cred" not in repr(_device())

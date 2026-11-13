@@ -264,6 +264,7 @@ def test_status_carries_relay_health(client: TestClient) -> None:
     relay = resp.json()["relay"]
     assert relay == {
         "last_ok_at": None, "last_error": None, "last_error_at": None, "last_status_code": None,
+        "last_auth_issue": None, "last_auth_issue_at": None,
     }
 
     RELAY_HEALTH.last_ok_at = 123.0
@@ -283,7 +284,7 @@ async def test_relay_transport_updates_health_on_success_and_failure() -> None:
 
     device = Device(
         apns_token="tok", device_id="d_1", bundle_id="com.x", environment="prod",
-        cameras=(), labels=(), min_severity="alert",
+        cameras=(), labels=(), min_severity="alert", relay_credential="v1.t.c",
     )
 
     async def _handler(request: httpx.Request) -> httpx.Response:

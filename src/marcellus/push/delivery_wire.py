@@ -964,6 +964,16 @@ async def _deliver_live_activities(
             # failing push-to-start token it repeats on every mutation
             # (device_row stays None) -- DEBUG (Wave 2B §4).
             logger.debug("push: LA start result ok=%s error=%s", result.ok, result.error)
+            if result.unregistered:
+                # The push-to-start token is dead (410 / BadDeviceToken).
+                # Forget it so every later mutation stops retrying it; the
+                # device row stays (the alert token may be fine) and the
+                # next registration with a fresh token restores starts.
+                logger.info(
+                    "push: clearing dead push-to-start token device=%s (%s)",
+                    device.device_id, result.error,
+                )
+                store.clear_push_to_start_token(conn, device.apns_token)
             if not result.ok:
                 continue
             covered.add(device.apns_token)
@@ -1112,6 +1122,17 @@ async def _deliver_live_activities(
         )
         if result.ok:
             covered.add(device.apns_token)
+        elif result.unregistered:
+            # The per-activity token is dead (the activity is gone on the
+            # phone): drop the record so updates stop going to it.
+            logger.info(
+                "push: dropping dead activity token device=%s activity=%s (%s)",
+                device.device_id, device_row["activity_id"], result.error,
+            )
+            store.delete_activity(conn, device_row["activity_id"])
+            conn.commit()
+            _la_prev_state.pop(device.apns_token, None)
+            continue
         store.touch_activity(
             conn, device_row["activity_id"], thumbnail_revision=revision, pushed=True, now=now,
         )

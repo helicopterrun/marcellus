@@ -548,6 +548,9 @@ logs a per-card verdict (tuning trace only; no routing changes yet).
   "last_error_at", "last_status_code"}`, an in-memory, process-lifetime
   record updated by `push/transport.py`'s `RelayTransport` on every relay
   HTTP response (a restart resets it — a "since last restart" snapshot).
+  It also carries `last_auth_issue` / `last_auth_issue_at`: "relay rejected
+  credentials (HTTP 401)" or "no relay credential for device and no
+  relay_key configured" (see "Relay authentication").
 - `POST /v1/push/silence` — `{"card_key": ...}` drops the cell that card
   routed through (its zone override, or its ladder cell if it has no
   zone) to `silent` (Quiet), responding `applied: "silent"`, through the same validate → normalize → save → apply
@@ -571,7 +574,10 @@ being opaque, unguessable, and short-lived — the NSE holds no session.
   keyed on the token; the response echoes the `schema_version` the sidecar
   will evaluate under, `situations_accepted`, and Live Activity readiness.
   Unknown body fields are accepted, dropped, and logged by name. Omitting
-  `snoozes` leaves existing ones alone; explicit `[]` clears them.
+  `snoozes` leaves existing ones alone; explicit `[]` clears them. The
+  optional `relay_credential` is stored per device and never returned (see
+  "Relay authentication"); like `push_to_start_token`, an empty or absent
+  value keeps the stored one.
 - `POST /v1/push/devices/{apns_token}/test` — alerts-slice2 §D: sends a
   real **card** payload (`mutation: "test"`, synthetic `card_key`,
   `v:1`/`mutable-content:1`) through the same relay call real cards use
@@ -665,11 +671,57 @@ truncates rather than rejects). `build_collapse_id` trims from the head and
 keeps the track id whole, so two subjects 30s apart never share a collapse
 id.
 
+## Relay authentication (per-install credentials)
+
+The relay accepts either of two credentials, and the sidecar sends whatever
+it has:
+
+1. **Per-install credential (preferred).** When `GET /v1/capabilities` shows
+   `push.relay_credentials: true`, the Elsinore app obtains an opaque
+   credential from the relay for this install and includes it as
+   `relay_credential` in its normal `PUT /v1/push/devices/{apns_token}`
+   registration. The sidecar stores it on that device's row
+   (`push_devices.relay_credential`) and sends
+   `Authorization: Bearer <credential>` on every relay call made for that
+   device. Live Activity sends (start, update, end) use the credential of
+   the device row the activity belongs to (`push_activities.apns_token`).
+2. **Shared `push.relay_key` (legacy).** Sent as `x-relay-key` whenever it is
+   configured, alongside the Bearer header if both exist. It is now optional:
+   needed only for a self-run relay that does not issue credentials, or for
+   app versions that predate them.
+
+The credential is opaque to the sidecar. A registration value is accepted
+only if it is non-empty, starts with `v1.`, is at most 2048 characters and
+is printable ASCII without spaces; anything else is ignored (warning logged,
+no value) rather than failing the registration. Empty keeps the stored value,
+so a re-registration that races ahead of the app's credential fetch does not
+blank a working one.
+
+A device with neither a credential nor a configured `relay_key` is skipped:
+nothing is sent unauthenticated, and `relay.last_auth_issue` in
+`GET /v1/push/status` records it (the log line is rate-limited to one per
+five minutes). A relay `401` is recorded as `relay rejected credentials`
+(`last_auth_issue`, `last_error`, `last_status_code: 401`); it does not prune
+the device and does not count toward the circuit breaker, since the relay
+answered. With `transport: relay` and an empty `relay_key`, startup logs a
+WARNING (not an error): pushes are authenticated only for devices whose app
+supplied a credential.
+
+**Privacy.** The credential lives only in the sidecar's own database. It is
+never returned by any endpoint (device detail, status, decisions feed,
+capabilities), never written to logs (registration logs only
+`relay_credential=present|absent`), and is excluded from `repr` of the
+in-memory `Device`.
+
 ## Failure modes
 
 - A `410`/`400` from the transport is a permanent dead token: the device
   row is pruned immediately (`push/engine.py`), never retried. This is the
   primary cleanup path — the app can't promise to DELETE before uninstall.
+  The exceptions are Live Activity tokens: a dead `push_to_start_token`
+  (start send answered 410/400) is cleared on the device row, which stays
+  registered, so it is not retried on every update; a dead per-activity
+  update token drops that activity record.
 - A retryable relay failure (network error, 5xx, 429) gets bounded in-request
   retries with exponential backoff and jitter (`transport.py:40-68`,
   `compute_retry_delay` — 0.5s/1.5s/4.5s... capped, or the relay's own

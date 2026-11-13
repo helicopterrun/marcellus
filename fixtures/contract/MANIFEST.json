@@ -1,6 +1,6 @@
 {
   "files": {
-    "capabilities.json": "93a57562bb385f67a9ffb643f0de7618dc50c66ef92d140266f92d2ea3c0f4ec",
+    "capabilities.json": "fd6bb448ef3f374cbe475bbbc501939227083d71cb1d3dd184e3d713204f8415",
     "card_push.json": "32962eefc42db5bbc3561b9b0e19aabf72c6d9a3c6da48d1e35ceb49934b30ae",
     "card_push_silent.json": "d20c0cd6bd23a417cd71dcd92085b1940883e2065dbf8962c54e90e8506593dd",
     "card_push_test.json": "b3aa845223322fd9ebed4e7d4b7fdd7692f72e05382228a1d541f6ce722e6f9a",
@@ -16,7 +16,7 @@
     "push_settings_get.json": "2074f9476a24ca6399f355debac903a7d55c3c8271cbe2eab14941a239dbf0bb",
     "push_settings_put.json": "ff430bbb364120cb38dae3fece28de6f61bb987a8b7117fd7cf0b77cbc29940a",
     "push_silence.json": "decbd6421a67d42d2a563f7f27ef6f5ee51ac1d0f626df3f71ed3fc1049fe552",
-    "push_status.json": "aeaef705e827cc0347f299b8ad6112880cf3a30c2932421b27721575ebb8e360",
+    "push_status.json": "89ff338bf6292fa0205b2c29b0dcea2f9508f81058347169f830b7ef535402ab",
     "v1_coverage.json": "5c42781a60b9afe9dc624a91a932e2cfb781c68620c8ce8a1d7a2ad279e49556",
     "v1_encounters.json": "bc88ef701d9597d9e55ec297bd43365138fc6f01dd64c9ccce2f5bb18f53cb81",
     "v1_events_related.json": "ba5debfaff2236c6baf68e4b24c3f1fcb214ebfeeac160b9b82b90fcbc57988a",

@@ -352,8 +352,12 @@ class MqttReviewSubscriber:
     def _handle_available_message(self, payload_bytes: bytes) -> None:
         self.last_seen = time.time()
         text = payload_bytes.decode("utf-8", errors="replace").strip()
-        # `frigate/available` is plain text, not JSON -- "online" | "offline".
-        self.frigate_online = text != "offline"
+        # `frigate/available` is plain text, not JSON: "online", or "offline"
+        # (the broker's last-will when Frigate drops off). Frigate 0.18 also
+        # publishes a retained "stopped" on a clean shutdown (frigate/comms/
+        # mqtt.py `stop()`), which used to read as online until the next
+        # restart. Any other text keeps the old benefit of the doubt.
+        self.frigate_online = text not in ("offline", "stopped")
         if not self.frigate_online:
             logger.info("push: frigate reports offline via frigate/available")
 

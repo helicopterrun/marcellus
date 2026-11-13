@@ -1,6 +1,6 @@
 # Marcellus
 
-A companion sidecar for [Frigate NVR](https://github.com/blakeblackshear/frigate): scrub
+A companion server ("sidecar") for [Frigate NVR](https://github.com/blakeblackshear/frigate): scrub
 cache, push notifications, triage and analysis pages, face pipeline.
 
 It adds:
@@ -26,6 +26,18 @@ Runs as a single Docker container next to Frigate, bind-mounting Frigate's
 Actively developed and running in production alongside one Frigate 0.17
 deployment, with the Elsinore iOS app as its main client. It is still a
 single-deployment project at heart, so expect portability rough edges.
+
+### Tested Frigate versions
+
+| Frigate | Fixture tests (CI) | Verified on a live server |
+|---|---|---|
+| 0.17.2 | yes | yes |
+| 0.18.2 | yes | not yet |
+
+Marcellus reads Frigate's database and API directly. CI runs its read paths and
+API calls against schema and route fixtures generated from each release's
+upstream source. What each release changed, and what Marcellus depends on, is in
+[docs/frigate-compatibility.md](docs/frigate-compatibility.md).
 
 ## Quick install
 
@@ -60,6 +72,16 @@ cosign verify ghcr.io/helicopterrun/marcellus:0.4 \
   design specs for the scrub cache and proxy API, push notifications, the
   attention ladder, and encounters. These are design notes and may lag the code.
 
+## Privacy
+
+Marcellus runs on your own hardware. Push notifications are off by default; when
+on, alert text and camera/zone names pass through a small relay on their way to
+Apple, and nothing else leaves your network. Exactly what is sent is listed in
+[What leaves your network](https://helicopterrun.github.io/marcellus/guide/privacy/).
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+Marcellus is an independent project and is not affiliated with or endorsed by
+Frigate, Inc. Frigate is a trademark of Frigate, Inc.

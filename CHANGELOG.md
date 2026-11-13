@@ -34,10 +34,16 @@ About 330 commits since 0.3.0. Written for operators upgrading from 0.3.0.
   (four levels, four places) replaces the older outcome tables; older
   sidecars are still served by legacy payloads, but 0.4 is expected by current
   app builds. Run the app's contract-fixture sync after wire changes.
-- **Frigate:** developed and run against Frigate 0.17. Optional features
+- **Frigate:** developed against Frigate 0.17 and tested against 0.17.2 and 0.18.2 (see
+  `docs/frigate-compatibility.md`). Optional features
   need extra config sections (see Added): `unifi_protect`, `external_sources`,
   `wildlife`, `recording_watch`, `encounters`. All are off or inert unless
   configured; unknown old YAML keys are ignored.
+- **Relay credentials:** devices now authenticate to the push relay with a
+  per-install credential (`push_devices.relay_credential`, additive column;
+  `capabilities.push.relay_credentials`). `relay_key` is now optional. A device
+  with neither a credential nor a key is skipped with a diagnostic instead of
+  being sent unauthenticated, so check the decisions feed after upgrading.
 - **Push privacy change:** person names are no longer sent in anything pushed
   to devices (#140). Re-check any custom copy.
 - Optional hardware decode: `scrub` and `wildlife` have VAAPI options
@@ -77,6 +83,10 @@ About 330 commits since 0.3.0. Written for operators upgrading from 0.3.0.
   GET `/v1/events/search`, `/v1/events/{id}/related`, `/v1/push/map/track`.
 - Backup/restore CLI, login rate limiter, settings sync CLI.
 - `live_activities.summary_row` to opt out of the post-LA summary row (#97).
+- Frigate compatibility tests against 0.17.2 and 0.18.2, with a "Tested Frigate
+  versions" table (#168).
+- "What leaves your network" privacy page in the guide and docs (#166).
+- Per-install relay credentials for push (#169).
 - Login landing page, new Marcellus look and icon, docs site (Starlight) with
   app screenshots (#161-#165).
 
@@ -105,6 +115,10 @@ About 330 commits since 0.3.0. Written for operators upgrading from 0.3.0.
   ghost cameras for renamed ones.
 - External-source one-shot notices no longer read as standing alerts (#149).
 - Retry of the WAL switch on first open; deploy health URL (#100).
+
+- Frigate 0.18: `frigate/available` "stopped" state, and list-form and
+  disabled zones, are now handled (#168).
+- Dead push-to-start tokens are cleared (#169).
 
 ### Removed
 
