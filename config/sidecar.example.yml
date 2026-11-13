@@ -222,7 +222,8 @@ push:
   enabled: false
   # "mock" logs what would be sent and always succeeds -- the only transport
   # usable without real APNs credentials, and the safe default. "relay" posts
-  # the minimal, content-free payload to relay_base_url below.
+  # finished alerts to relay_base_url below (see the guide page "What leaves
+  # your network" for exactly what the relay receives).
   transport: mock
   # Short opaque id of this sidecar instance, sent in the push payload so a
   # device with more than one server registered can route the NSE's handle
@@ -245,9 +246,17 @@ push:
   offline_silence_s: 60.0
   backfill_lookback_s: 60.0
   # Only used when transport: relay. The relay holds the one real APNs .p8
-  # key and never receives camera names, labels, or snapshots -- only
-  # {device_token, environment, handle, server_id, severity}.
+  # key and forwards the alert text, camera/zone names and routing fields you
+  # send it to Apple. It never receives image bytes or people's names (see
+  # the guide page "What leaves your network"). The URL below is a placeholder
+  # that never resolves; replace it with your relay's address. (If you omit the
+  # line entirely, the code default is the app developer's hosted relay.)
   relay_base_url: https://push-relay.example.invalid
+  # Shared secret sent as the x-relay-key header; must equal the relay's
+  # RELAY_KEY setting. Empty by default, and a relay transport with an empty
+  # key logs a critical error. Whoever operates the relay issues the key; set
+  # it via MARCELLUS_PUSH__RELAY_KEY rather than committing it here.
+  relay_key: ""
   # Per-attempt timeout; a 3-attempt retryable send is bounded at roughly
   # 2*relay_timeout_s + relay_timeout_s + ~2s of backoff.
   relay_timeout_s: 5.0

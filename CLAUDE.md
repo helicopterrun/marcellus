@@ -15,6 +15,18 @@ pages, face pipeline. Server-rendered Jinja + vanilla JS, SQLite sidecar DB.
   a guide topic (`guide_content/*.md` frontmatter maps routes/config keys).
 - Template JS includes need `?v={{ asset_v }}` cache-busters.
 
+## Docs site
+
+Starlight (Astro) site in `website/`, published to
+https://helicopterrun.github.io/marcellus/ by `.github/workflows/docs.yml`
+(builds on PRs touching `website/**`, `docs/**` or the guide sources; deploys
+only from main). The guide pages are `src/marcellus/guide_content/*.md`
+(symlinked in; they also ship inside the app) and the Reference section is
+`docs/*.md`. Build locally with `cd website && npm ci && npm run build`
+(Node 22); a guide or docs change must build, since the link validator fails
+on a broken internal link. Public pages must stay free of LAN addresses,
+hostnames and personal names.
+
 ## Deploy (LXC "nvr", deploy-only — dev happens on this Mac)
 
 `ssh nvr "cd /opt/marcellus && git fetch && git reset --hard

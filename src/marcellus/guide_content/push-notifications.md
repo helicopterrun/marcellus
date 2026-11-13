@@ -160,7 +160,14 @@ The `push:` config section:
 - `delivery_la_stale_s` — Live Activity stale-date offset from now (default
   900s).
 - `relay_key` — auth key sent as the `x-relay-key` header on every relay
-  request.
+  request. It defaults to empty, and with `transport: relay` an empty key is
+  logged as a critical error at startup because every request would go
+  unauthenticated. The key is a shared secret chosen by whoever runs the
+  relay (it must equal the relay's `RELAY_KEY` setting). These docs do not describe
+  any way to obtain a key for the developer's hosted relay, so a fresh install
+  should assume it cannot send real pushes until it has one; `mock` transport
+  (logs, sends nothing) or a relay you run yourself needs no outside key. See
+  [What leaves your network](/guide/privacy).
 - `external_base_url` — phone-reachable base URL for this sidecar instance,
   used to build card-contract media URLs. Empty (default) omits `media`
   entirely.
@@ -203,7 +210,7 @@ The `push:` config section:
 
 | Field | Default | Effect |
 |---|---|---|
-| `relay_base_url` | the shared `elsinore-push-relay` worker | Base URL the sidecar posts content-free templated alerts to. Override only when running your own relay fork under your own bundle id/team. |
+| `relay_base_url` | the shared `elsinore-push-relay` worker | Base URL the sidecar posts finished alerts to (what the relay sees is listed in [What leaves your network](/guide/privacy)). Override only when running your own relay fork under your own bundle id/team. |
 | `relay_timeout_s` | `5.0` | Per-attempt timeout, in seconds, for a relay-transport send. |
 | `relay_retry_attempts` | `3` | Total send attempts for retryable push kinds (push, Live Activity start/end); `1` disables retry. Live Activity update/situation/test always send once regardless. |
 | `relay_breaker_failures` | `3` | Consecutive transport failures (exception or 5xx; 429/4xx never count) that open the circuit breaker. |

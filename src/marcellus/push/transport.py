@@ -3,15 +3,16 @@
 `PushTransport` is the interface the engine (`engine.py`) sends through;
 `LogTransport` and `RelayTransport` are the two implementations.
 
-**Decision override from the spec (§4's open question), confirmed:** the
-relay-visible alert text is fully generic ("New alert on your server"-style)
-rather than naming the camera. The relay's only inputs are exactly the
-spec's minimal set -- `{device_token, environment, handle, server_id,
-severity}` plus the `apns-collapse-id` -- and it constructs the templated
-`aps` text itself; camera/label detail is redeemed later by the NSE from the
-handle, never sent here. This makes both transports below equally content-
--free by construction: there's no camera-name parameter to plumb through
-even if a future transport wanted one.
+**What the relay sees (corrected 2026-11):** the original spec decision was a
+fully generic, content-free alert built by the relay from
+`{device_token, environment, handle, server_id, severity}`. That is only the
+legacy `send()` route, which nothing in the sidecar calls any more. Today card
+alerts, Live Activity pushes and doorbell rings go through `send_situation()` /
+`send_live_activity()`, which forward the sidecar-built APNs body verbatim:
+title/body text, camera and zone names, `card_key`, and (Live Activities) the
+content-state. Image bytes and people's names are never included (see
+`delivery_wire._copy`). The user-facing list is the guide page
+`guide_content/privacy.md`; keep it in step with this module.
 
 No real APNs credentials exist yet (spec §4 -- the relay is the only sane
 way to get Elsinore's `.p8` key off the sidecar). `LogTransport` is what
@@ -338,11 +339,12 @@ class LogTransport:
 class RelayTransport:
     """Posts the minimal relay payload (spec §4) over HTTP.
 
-    The relay holds the one real `.p8` key and signs the APNs provider JWT;
-    it never receives a camera name, label, or anything content-bearing --
-    only `{device_token, environment, handle, server_id, severity}` plus the
-    collapse id, which it uses to fill in a fixed, severity-keyed template
-    before forwarding to APNs.
+    The relay holds the one real `.p8` key and signs the APNs provider JWT.
+    `send()` posts only `{device_token, environment, handle, server_id,
+    severity}` plus the collapse id (the relay fills a fixed template), but it
+    is the legacy route; `send_situation`/`send_live_activity` forward the
+    full sidecar-built payload, which includes alert text and camera/zone
+    names (never image bytes or people's names).
     """
 
     #: The sidecar's own API, its DB CHECK constraint and spec §1 all spell the

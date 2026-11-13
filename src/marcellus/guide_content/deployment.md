@@ -65,6 +65,12 @@ Optional features are Python "extras" — install only what you use:
 | `http2` | faster proxying |
 | `annotation` | annotation-offset analysis |
 | `enrich` | identity clustering ([Identities](/enrich/clusters)) |
+| `wildlife` | the wildlife detector |
+| `unifi_protect` | UniFi Protect doorbell rings |
+
+The Docker image and `install.sh` install only `http2`. For the other extras,
+add them yourself (`pip install "marcellus[enrich]"` in the venv) or build your
+own image.
 
 ## Upgrading
 
