@@ -146,7 +146,9 @@ same crontab) — `fsc backup`/`restore` don't manage retention.
 Tagging `vX.Y.Z` (matching `__version__` in `src/marcellus/__init__.py`)
 runs `.github/workflows/release.yml`: multi-arch image to
 `ghcr.io/helicopterrun/marcellus` (`latest`, `X.Y`, `vX.Y.Z`) plus an
-sdist/wheel attached to the GitHub Release.
+sdist/wheel attached to the GitHub Release. Images are signed keylessly with
+cosign (verify command in the README). `install.sh` and `docker-compose.yml`
+pin the `X.Y` train; bump both when you cut a new minor.
 
 ### High-res cross-camera face capture (optional)
 

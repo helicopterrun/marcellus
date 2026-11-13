@@ -50,6 +50,18 @@ your Frigate URLs and paths. Re-run it to upgrade. Requirements, manual Docker
 Compose and systemd installs, and upgrade notes are in the
 [deployment guide](https://helicopterrun.github.io/marcellus/guide/deployment/).
 
+### Verify the image
+
+Release images (`ghcr.io/helicopterrun/marcellus`) are multi-arch (amd64 and
+arm64) and signed keylessly with [cosign](https://github.com/sigstore/cosign)
+by the release workflow. Signing starts with v0.4.0; earlier images are unsigned.
+
+```sh
+cosign verify ghcr.io/helicopterrun/marcellus:0.4 \
+  --certificate-identity-regexp '^https://github.com/helicopterrun/marcellus/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
 ## Documentation
 
 - [Documentation site](https://helicopterrun.github.io/marcellus/)
