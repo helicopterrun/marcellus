@@ -14,7 +14,7 @@ export default defineConfig({
       title: 'Marcellus',
       logo: { src: './src/assets/icon.svg', alt: 'Marcellus' },
       favicon: '/favicon.svg',
-      components: { ThemeSelect: './src/components/Empty.astro' },
+      components: { ThemeSelect: './src/components/Empty.astro', Footer: './src/components/Footer.astro' },
       head: [{ tag: 'script', content: "document.documentElement.dataset.theme='dark';" }],
       social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/helicopterrun/marcellus' }],
       customCss: ['./src/styles/marcellus.css'],

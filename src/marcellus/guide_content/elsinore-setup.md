@@ -28,5 +28,5 @@ the broken link outright.
 
 - The phone must reach the sidecar's address (same network, VPN, or however
   you've published it).
-- Push requires the sidecar's `push` transport configured for the relay.
+- Push requires the sidecar's `push` transport configured for the relay, which in turn needs a relay key (see [Push notifications](/guide/push-notifications) and [What leaves your network](/guide/privacy)).
 - Widgets and Live Activities need notification permission granted.

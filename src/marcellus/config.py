@@ -1301,7 +1301,7 @@ class PushSection(BaseModel):
     # Relay auth key — sent as x-relay-key header on every relay request.
     relay_key: str = ""
     # Phone-reachable base URL for *this sidecar instance*, e.g.
-    # "http://192.168.50.207:5001" or "https://sidecar.example.com". Used to
+    # "http://nvr.example.lan:5001" or "https://sidecar.example.com". Used to
     # build the complete URL the card contract's `media` field documents
     # (docs/apns-payload-spec.md) -- unlike the v1/situations flow, which
     # only ever sends `handle` + `server_id` and lets the already-registered

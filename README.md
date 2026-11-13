@@ -1,6 +1,6 @@
 # Marcellus
 
-A companion sidecar for [Frigate NVR](https://github.com/blakeblackshear/frigate): scrub
+A companion server ("sidecar") for [Frigate NVR](https://github.com/blakeblackshear/frigate): scrub
 cache, push notifications, triage and analysis pages, face pipeline.
 
 It adds:
@@ -48,6 +48,16 @@ Compose and systemd installs, and upgrade notes are in the
   design specs for the scrub cache and proxy API, push notifications, the
   attention ladder, and encounters. These are design notes and may lag the code.
 
+## Privacy
+
+Marcellus runs on your own hardware. Push notifications are off by default; when
+on, alert text and camera/zone names pass through a small relay on their way to
+Apple, and nothing else leaves your network. Exactly what is sent is listed in
+[What leaves your network](https://helicopterrun.github.io/marcellus/guide/privacy/).
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+Marcellus is an independent project and is not affiliated with or endorsed by
+Frigate, Inc. Frigate is a trademark of Frigate, Inc.
