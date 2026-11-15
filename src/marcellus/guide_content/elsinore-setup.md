@@ -30,7 +30,11 @@ the broken link outright.
 
 - The phone must reach the address you gave it (same network, VPN, or however
   you've published it).
+<<<<<<< HEAD
 - Alerts, Live Activities, Encounters, the scrub reel and People need
   Marcellus. Elsinore works with Frigate alone without them.
 - Push requires the sidecar's `push` transport configured for the relay, which in turn needs a relay key (see [Push notifications](/guide/push-notifications) and [What leaves your network](/guide/privacy)).
+=======
+- Push needs `push.enabled: true`. The default transport (`auto`) starts using the relay once the app has registered with a relay credential; a relay key is only needed for a self-run relay (see [Push notifications](/guide/push-notifications) and [What leaves your network](/guide/privacy)).
+>>>>>>> 05ef6ff (Default push transport auto, -full Docker image with face recognition, relay credential guide)
 - Widgets and Live Activities need notification permission granted.

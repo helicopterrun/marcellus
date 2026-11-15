@@ -701,7 +701,17 @@ no value) rather than failing the registration. Empty keeps the stored value,
 so a re-registration that races ahead of the app's credential fetch does not
 blank a working one.
 
-A device with neither a credential nor a configured `relay_key` is skipped:
+**Transport `auto` (default).** `push.transport` is `auto`, `relay` or `mock`.
+`auto` is decided per send: a send goes to the relay when `relay_key` is set or
+the target device has a stored credential, and is logged and dropped (the mock
+behaviour) otherwise. A device that registers a credential therefore starts
+receiving pushes with no restart. The wrapped relay transport keeps its own
+retries, circuit breaker and `RELAY_HEALTH`. `GET /v1/push/status` reports
+`transport`, `transport_effective` (`relay` or `mock`) and, when `auto` has
+nothing to send through, `transport_note`: "no device has supplied a relay
+credential yet ...". Explicit `relay` and `mock` behave exactly as before.
+
+A device with neither a credential nor a configured `relay_key` (under explicit `relay`) is skipped:
 nothing is sent unauthenticated, and `relay.last_auth_issue` in
 `GET /v1/push/status` records it (the log line is rate-limited to one per
 five minutes). A relay `401` is recorded as `relay rejected credentials`

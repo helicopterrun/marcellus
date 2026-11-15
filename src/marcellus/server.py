@@ -33,7 +33,7 @@ from marcellus.push import store as push_store
 from marcellus.push.engine import PushEngine
 from marcellus.push.log_context import PushContextFilter
 from marcellus.push.mqtt import MqttReviewSubscriber, compute_backoff
-from marcellus.push.transport import LogTransport, PushTransport, RelayTransport
+from marcellus.push.transport import AutoTransport, LogTransport, PushTransport, RelayTransport
 from marcellus.push.unifi_protect import ProtectRingSubscriber
 from marcellus.routes import analysis as analysis_routes
 from marcellus.routes import debug as debug_routes
@@ -299,27 +299,37 @@ def _check_scrub_inputs(settings: Settings) -> None:
 
 
 def _build_push_transport(settings: Settings) -> PushTransport:
-    """Mock/log transport by default -- the only one usable without real APNs
-    credentials (spec §4). "relay" posts to `push.relay_base_url`."""
-    if settings.push.transport == "relay":
-        if not settings.push.relay_key:
-            # A valid configuration now: the app brings a per-install relay
-            # credential in its registration. Devices with neither a
-            # credential nor this key are skipped (never sent unauthenticated).
-            logger.warning(
-                "push: transport is 'relay' and no relay_key configured; pushes "
-                "are authenticated only for devices whose app supplied a relay "
-                "credential"
-            )
-        return RelayTransport(
-            settings.push.relay_base_url,
-            timeout=settings.push.relay_timeout_s,
-            relay_key=settings.push.relay_key,
-            retry_attempts=settings.push.relay_retry_attempts,
-            breaker_failures=settings.push.relay_breaker_failures,
-            breaker_open_s=settings.push.relay_breaker_open_s,
+    """"auto" (default) uses the relay once it can authenticate, else logs
+    only; "mock" never leaves the box; "relay" posts to `push.relay_base_url`
+    (spec §4)."""
+    mode = settings.push.transport
+    if mode == "mock":
+        return LogTransport()
+    if mode == "relay" and not settings.push.relay_key:
+        # A valid configuration now: the app brings a per-install relay
+        # credential in its registration. Devices with neither a
+        # credential nor this key are skipped (never sent unauthenticated).
+        logger.warning(
+            "push: transport is 'relay' and no relay_key configured; pushes "
+            "are authenticated only for devices whose app supplied a relay "
+            "credential"
         )
-    return LogTransport()
+    relay = RelayTransport(
+        settings.push.relay_base_url,
+        timeout=settings.push.relay_timeout_s,
+        relay_key=settings.push.relay_key,
+        retry_attempts=settings.push.relay_retry_attempts,
+        breaker_failures=settings.push.relay_breaker_failures,
+        breaker_open_s=settings.push.relay_breaker_open_s,
+    )
+    if mode == "relay":
+        return relay
+    logger.info(
+        "push: transport is 'auto' -- using the relay %s",
+        "(relay_key configured)" if settings.push.relay_key
+        else "for devices that supply a relay credential; others are logged only",
+    )
+    return AutoTransport(relay, LogTransport(), relay_key=settings.push.relay_key)
 
 
 async def _push_subscriber_loop(app: FastAPI) -> None:
@@ -820,7 +830,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         if running_engine is not None:
             await running_engine.aclose()
         running_transport = getattr(app.state, "push_transport", None)
-        if isinstance(running_transport, RelayTransport):
+        if isinstance(running_transport, (RelayTransport, AutoTransport)):
             await running_transport.aclose()
         client = getattr(app.state, "http_client", None)
         if client is not None:

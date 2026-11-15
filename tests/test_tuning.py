@@ -97,7 +97,7 @@ def test_live_knobs_classification():
 def test_enum_knobs():
     assert tuning.KNOBS_BY_KEY["scrub.format"].kind == "enum"
     assert tuning.KNOBS_BY_KEY["scrub.format"].choices == ("jpeg", "webp")
-    assert tuning.KNOBS_BY_KEY["push.transport"].choices == ("mock", "relay")
+    assert tuning.KNOBS_BY_KEY["push.transport"].choices == ("auto", "mock", "relay")
     assert tuning.KNOBS_BY_KEY["push.dwell_source"].choices == ("events", "reviews")
     assert tuning.KNOBS_BY_KEY["log_level"].choices == ("DEBUG", "INFO", "WARNING", "ERROR")
 

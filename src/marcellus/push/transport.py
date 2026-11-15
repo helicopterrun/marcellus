@@ -780,3 +780,66 @@ class RelayTransport:
             label, log_key, attempt + 1, last_error,
         )
         return TransportResult(ok=False, error=last_error)
+
+
+#: Shown in push status when `transport: auto` has nothing to send through yet.
+AUTO_IDLE_NOTE = (
+    "no device has supplied a relay credential yet; nothing is being sent "
+    "(set push.relay_key for a self-run relay, or update the app)"
+)
+
+
+class AutoTransport:
+    """`push.transport: auto` -- relay when it can authenticate, else mock.
+
+    Decided per send, so a device that registers a relay credential starts
+    receiving pushes without a restart: the relay is used when `relay_key` is
+    configured or the target device carries a credential; otherwise the send
+    is logged and dropped exactly like the mock transport. Everything about
+    the relay path (retries, circuit breaker, RELAY_HEALTH) is the wrapped
+    `RelayTransport`'s own.
+    """
+
+    def __init__(self, relay: RelayTransport, mock: LogTransport, *, relay_key: str) -> None:
+        self.relay = relay
+        self.mock = mock
+        self._relay_key = relay_key
+
+    @property
+    def sent(self) -> list[dict[str, object]]:
+        return self.mock.sent
+
+    def _pick(self, device: Device) -> PushTransport:
+        if self._relay_key or device.relay_credential:
+            return self.relay
+        return self.mock
+
+    async def aclose(self) -> None:
+        await self.relay.aclose()
+
+    async def send(self, device: Device, **kwargs: Any) -> TransportResult:
+        return await self._pick(device).send(device, **kwargs)
+
+    async def send_situation(self, device: Device, **kwargs: Any) -> TransportResult:
+        return await self._pick(device).send_situation(device, **kwargs)
+
+    async def send_live_activity(self, device: Device, **kwargs: Any) -> TransportResult:
+        return await self._pick(device).send_live_activity(device, **kwargs)
+
+    async def send_test(self, device: Device) -> TransportResult:
+        return await self._pick(device).send_test(device)
+
+
+def effective_transport(
+    configured: str, relay_key: str, devices: list[Device]
+) -> tuple[str, str | None]:
+    """(`relay`|`mock`, note) -- what the configured transport amounts to now.
+
+    Explicit values map to themselves with no note; `auto` resolves from the
+    relay key and the registered devices' credentials.
+    """
+    if configured != "auto":
+        return configured, None
+    if relay_key or any(d.relay_credential for d in devices):
+        return "relay", None
+    return "mock", AUTO_IDLE_NOTE

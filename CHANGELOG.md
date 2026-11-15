@@ -21,6 +21,9 @@ may change behaviour). Numbers are pull requests.
   not published to PyPI (`install.sh` now installs from the repository only);
   the old `frigate-sidecar` image is frozen at 0.3; LAN addresses in tracked
   files replaced with documentation placeholders.
+- Push: new default `push.transport: auto` uses the relay once a `relay_key` is set or a device supplies a relay credential (checked per send, no restart), and sends nothing until then; explicit `relay` / `mock` are unchanged. The example config no longer ships a placeholder relay URL.
+- Docker: releases also publish `X.Y-full` / `vX.Y.Z-full` / `latest-full` images (amd64) with the `annotation` and `enrich` extras for face recognition.
+- Guide: relay credentials, optional `relay_key`, and the `auto` transport.
 
 ## [0.4.0] - 2026-11-15
 

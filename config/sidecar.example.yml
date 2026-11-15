@@ -220,11 +220,15 @@ proxy:
 # the last capability tier to light up, never a dependency of any other one.
 push:
   enabled: false
-  # "mock" logs what would be sent and always succeeds -- the only transport
-  # usable without real APNs credentials, and the safe default. "relay" posts
-  # finished alerts to relay_base_url below (see the guide page "What leaves
-  # your network" for exactly what the relay receives).
-  transport: mock
+  # transport:
+  #   auto  (default) use the relay once it can authenticate -- when relay_key
+  #         is set or a registered device has supplied a relay credential --
+  #         and only log what would be sent until then. Re-checked on every
+  #         send, no restart needed.
+  #   relay always use the relay (relay_base_url below).
+  #   mock  never send anything; log only.
+  # A self-run relay needs relay_base_url + relay_key (below).
+  transport: auto
   # Short opaque id of this sidecar instance, sent in the push payload so a
   # device with more than one server registered can route the NSE's handle
   # fetch correctly. Leave blank to auto-generate one at startup.
@@ -245,17 +249,16 @@ push:
   # resuming live pushes rather than silently dropping an alert.
   offline_silence_s: 60.0
   backfill_lookback_s: 60.0
-  # Only used when transport: relay. The relay holds the one real APNs .p8
-  # key and forwards the alert text, camera/zone names and routing fields you
-  # send it to Apple. It never receives image bytes or people's names (see
-  # the guide page "What leaves your network"). The URL below is a placeholder
-  # that never resolves; replace it with your relay's address. (If you omit the
-  # line entirely, the code default is the app developer's hosted relay.)
-  relay_base_url: https://push-relay.example.invalid
-  # Shared secret sent as the x-relay-key header; must equal the relay's
-  # RELAY_KEY setting. Empty by default, and a relay transport with an empty
-  # key logs a critical error. Whoever operates the relay issues the key; set
-  # it via MARCELLUS_PUSH__RELAY_KEY rather than committing it here.
+  # The relay (used by transport auto/relay) holds the one real APNs .p8 key
+  # and forwards the alert text, camera/zone names and routing fields you send
+  # it to Apple. It never receives image bytes or people's names (see the
+  # guide page "What leaves your network"). Leave relay_base_url unset to use
+  # the hosted relay. A self-run relay needs both relay_base_url and relay_key.
+  # relay_base_url: https://your-relay.example.com
+  # Shared secret sent as the x-relay-key header; must equal your relay's
+  # RELAY_KEY setting. Optional with the hosted relay (the app brings a
+  # per-install credential instead); needed for a self-run relay. Set it via
+  # MARCELLUS_PUSH__RELAY_KEY rather than committing it here.
   relay_key: ""
   # Per-attempt timeout; a 3-attempt retryable send is bounded at roughly
   # 2*relay_timeout_s + relay_timeout_s + ~2s of backoff.

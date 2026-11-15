@@ -68,9 +68,22 @@ Optional features are Python "extras" — install only what you use:
 | `wildlife` | the wildlife detector |
 | `unifi_protect` | UniFi Protect doorbell rings |
 
-The Docker image and `install.sh` install only `http2`. For the other extras,
-add them yourself (`pip install "marcellus[enrich] @ git+https://github.com/helicopterrun/marcellus"` in the venv) or build your
-own image.
+The default Docker image and `install.sh` install only `http2`. For face
+recognition in Docker, use the `-full` image instead (below). For the other
+extras, add them yourself (`pip install "marcellus[wildlife] @ git+https://github.com/helicopterrun/marcellus"` in the venv) or
+build your own image with `--build-arg EXTRAS=http2,wildlife`.
+
+**Docker, with face recognition.** Each release also publishes
+`ghcr.io/helicopterrun/marcellus:X.Y-full` (also `vX.Y.Z-full` and
+`latest-full`), which adds the `annotation` and `enrich` extras. It is built for
+amd64 only (face recognition's insightface library publishes no prebuilt
+packages and compiles from source, too slow under CI emulation; on arm64 build
+it yourself with `--build-arg EXTRAS=http2,annotation,enrich`), and it is several hundred MB larger than the slim image. The face
+model (about 300 MB) is downloaded the first time it is needed, into
+`face_enrich.model_dir`; set that to `/data/models` so it lives on the data
+volume and survives container re-creation. To switch, set
+`SIDECAR_IMAGE=ghcr.io/helicopterrun/marcellus:0.4-full` in `.env` and run
+`docker compose up -d`.
 
 ## Upgrading
 
@@ -90,7 +103,8 @@ rename. That image is frozen at 0.3; the current image is
 `ghcr.io/helicopterrun/marcellus`.
 
 Releases are tagged `vX.Y.Z`; the Docker image is published multi-arch
-(amd64 and arm64) with `latest`, `X.Y` and `vX.Y.Z` tags, and
+(amd64 and arm64) with `latest`, `X.Y` and `vX.Y.Z` tags (the `-full` variant,
+amd64 only, adds a `-full` suffix to each), and
 `/v1/capabilities` reports the running version. Upgrading an existing
 `frigate-sidecar` deployment is covered in the repo's `docs/deployment.md`
 (env vars, config path, systemd units and the DB filename all have

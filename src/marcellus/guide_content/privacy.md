@@ -39,8 +39,9 @@ run your own (see below).
 
 Every request carries the phone's **APNs device token** and its APNs
 environment (`production` or `sandbox`), an `apns-collapse-id` (the alert's
-card key, below), and the shared secret `push.relay_key` as an `x-relay-key`
-header. The rest depends on the kind of alert. For each, these are all the
+card key, below), and a credential: the install's own relay credential as an
+`Authorization: Bearer` header, plus `push.relay_key` as an `x-relay-key` header
+if you set one. The rest depends on the kind of alert. For each, these are all the
 fields (see `push/delivery.py`, `push/live_activities.py`,
 `push/doorbell.py`):
 
@@ -134,8 +135,9 @@ them elsewhere:
 - **UniFi Protect console** (`unifi_protect.console_url`), only if enabled.
 - **External sources**, such as a wildlife camera on your network
   (`external_sources`), only if enabled.
-- **The push relay** (`push.relay_base_url`), only when `push.transport` is
-  `relay`.
+- **The push relay** (`push.relay_base_url`), only when push is enabled and
+  `push.transport` is `relay`, or `auto` (the default) once a device has
+  supplied a relay credential or `relay_key` is set.
 - **Model download for face recognition.** If you install the `enrich` extra,
   the face-model library (insightface) downloads its model pack, roughly
   300 MB, the first time into `face_enrich.model_dir`. After that it works
@@ -156,8 +158,9 @@ contacts the relay or Apple, and runs fine without them: scrub, triage,
 encounters, People and the web pages do not depend on push.
 
 If you want to try the push features without sending anything outside,
-set `push.enabled: true` and keep `push.transport: mock` (also the default).
-Alerts are then built and logged but never sent anywhere.
+set `push.enabled: true` and `push.transport: mock`. Alerts are then built and
+logged but never sent anywhere. (The default, `auto`, sends nothing until a
+device supplies a relay credential, so choose `mock` to guarantee it.)
 
 ## Running your own relay
 
@@ -165,4 +168,4 @@ The relay is a small open-source Cloudflare Worker. Because Apple ties push
 signing to the team that owns the app, a relay can only deliver to an app
 built by that same team, so this is mainly for forks of the app. Point
 `push.relay_base_url` at your own deployment and set `push.relay_key` to the
-`RELAY_KEY` secret you chose there.
+`RELAY_KEY` secret you chose there; `push.transport: auto` then uses it.

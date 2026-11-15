@@ -59,6 +59,13 @@ rename. That image is frozen at 0.3; the current image is
 `ghcr.io/helicopterrun/marcellus`. Marcellus is not published to PyPI: install
 with Docker or `install.sh`.
 
+### Face recognition in Docker
+
+The default image omits the optional face-recognition packages. For People and
+identity clustering, use the `-full` image (`ghcr.io/helicopterrun/marcellus:0.4-full`,
+amd64 only; the model downloads on first use). See
+[Docker image variants](docs/deployment.md#docker-image-variants).
+
 ### Verify the image
 
 Release images (`ghcr.io/helicopterrun/marcellus`) are multi-arch (amd64 and
