@@ -124,8 +124,12 @@ goes out ungrouped rather than late.
 The `push:` config section:
 
 - `enabled` (default `false`) and `transport` — push is off until you flip
-  `enabled`; `transport` picks `relay` for real APNs delivery via the push
-  relay, `mock` for development.
+  `enabled`. `transport` is `auto` (the default), `relay` or `mock`. `auto` uses
+  the push relay as soon as it can authenticate (a `relay_key` is set, or a
+  registered device has supplied a relay credential, see below) and only logs
+  what it would send until then; it re-checks on every send, so no restart is
+  needed. `relay` always uses the relay, and `mock` never sends anything
+  (development).
 - `relay_base_url` — where the relay lives.
 - `mqtt_host` — hostname or IP of Frigate's MQTT broker; the sidecar must be
   able to reach it or no events arrive at all.
@@ -159,15 +163,19 @@ The `push:` config section:
   backward-compatible YAML.
 - `delivery_la_stale_s` — Live Activity stale-date offset from now (default
   900s).
-- `relay_key` — auth key sent as the `x-relay-key` header on every relay
-  request. It defaults to empty, and with `transport: relay` an empty key is
-  logged as a critical error at startup because every request would go
-  unauthenticated. The key is a shared secret chosen by whoever runs the
-  relay (it must equal the relay's `RELAY_KEY` setting). These docs do not describe
-  any way to obtain a key for the developer's hosted relay, so a fresh install
-  should assume it cannot send real pushes until it has one; `mock` transport
-  (logs, sends nothing) or a relay you run yourself needs no outside key. See
-  [What leaves your network](/guide/privacy).
+- `relay_key` — optional shared secret sent as the `x-relay-key` header on
+  relay requests; it must equal the relay's `RELAY_KEY` setting. You need it
+  only for a relay you run yourself, or for app versions that predate relay
+  credentials (below). With the hosted relay and a current app, leave it empty:
+  startup logs a warning (not an error) and each device authenticates with its
+  own credential. See [What leaves your network](/guide/privacy).
+- **Relay credentials.** The Elsinore app proves to the relay that it is a
+  genuine install, receives a credential for that install, and hands it to this
+  server when it registers. The credential is stored only in this server's
+  database; it is never returned by the API and never written to logs.
+  `GET /v1/capabilities` advertises support as `push.relay_credentials: true`.
+  A device with neither a credential nor a `relay_key` is skipped rather than
+  sent unauthenticated.
 - `external_base_url` — phone-reachable base URL for this sidecar instance,
   used to build card-contract media URLs. Empty (default) omits `media`
   entirely.
@@ -264,6 +272,12 @@ last error).
 ## If it goes wrong
 
 Check `/healthz` (`mqtt` component) first — no MQTT means no events at all.
-Then confirm `transport` isn't still `mock`. Use [Replay](/replay) to
+Then confirm `transport` isn't `mock`, or `auto` still waiting: with `auto`,
+`GET /v1/push/status` reports `transport_effective` and, while nothing can be
+sent, `transport_note`: "no device has supplied a relay credential yet". Update
+the app (credentials need a current version) or set `relay_key`. In the same
+status, `relay.last_auth_issue` reads "relay rejected credentials" when the
+relay answered 401 (the credential or key is wrong or revoked), or "no relay
+credential" for a device that has none and no `relay_key` is set. Use [Replay](/replay) to
 exercise the whole path end-to-end with canned scenarios; its dry-run mode
 shows what the ladder *would* send without notifying.

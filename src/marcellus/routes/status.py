@@ -195,7 +195,13 @@ def _push_status(app_state: Any, settings: Any) -> dict[str, Any]:
         try:
             from marcellus.push import store
 
-            push["device_count"] = len(store.list_devices(conn))
+            devices = store.list_devices(conn)
+            push["device_count"] = len(devices)
+            from marcellus.push.transport import effective_transport
+
+            push["transport_effective"], push["transport_note"] = effective_transport(
+                settings.push.transport, settings.push.relay_key, devices
+            )
         finally:
             conn.close()
     subscriber = getattr(app_state, "push_subscriber", None)

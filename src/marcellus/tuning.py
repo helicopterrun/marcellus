@@ -176,7 +176,7 @@ _LIVE_SECTION_EXCEPT = {"face_enrich": {"interval_s", "model_dir", "enabled"}}
 
 _ENUM_CHOICES: dict[str, tuple[str, ...]] = {
     "scrub.format": ("jpeg", "webp"),
-    "push.transport": ("mock", "relay"),
+    "push.transport": ("auto", "mock", "relay"),
     "push.dwell_source": ("events", "reviews"),
     "log_level": ("DEBUG", "INFO", "WARNING", "ERROR"),
 }
@@ -224,7 +224,9 @@ _HELP_OVERRIDES: dict[str, str] = {
         "use_learned_gaps is on."
     ),
     "scrub.format": "Sprite-sheet cell image format.",
-    "push.transport": "Push transport: mock (log only) or relay (real APNs via the relay).",
+    "push.transport": (
+        "Push transport: auto (relay once a device has a credential), mock (log only) or relay."
+    ),
     "push.dwell_source": "Where a situation's loiter check gets its clock: events or reviews.",
     "encounters.continuation_w_topo": "Suggested-continuations weight: shared/config adjacency.",
     "encounters.continuation_w_time": (

@@ -141,13 +141,36 @@ copy uses SQLite's own online backup API, not a raw file copy):
 Prune old backups yourself (e.g. `find backups/ -mtime +30 -delete` in the
 same crontab) — `fsc backup`/`restore` don't manage retention.
 
+## Docker image variants
+
+| Tag | Extras | Architectures |
+|---|---|---|
+| `X.Y`, `vX.Y.Z`, `latest` | `http2` | amd64, arm64 |
+| `X.Y-full`, `vX.Y.Z-full`, `latest-full` | `http2`, `annotation`, `enrich` | amd64 only |
+
+The `-full` image is built from the same Dockerfile with
+`--build-arg EXTRAS=http2,annotation,enrich`; it enables People / face
+recognition (`face_enrich`) and annotation-offset analysis. It is amd64 only
+because insightface publishes no wheels and is compiled during the build,
+which would run under slow QEMU emulation in CI (a native arm64 build works;
+arm64 users can build it themselves: `docker build --build-arg EXTRAS=http2,annotation,enrich .`). Expect
+the image to be several hundred MB larger than the slim one (onnxruntime,
+OpenCV, insightface). The ~300 MB face model pack is not in the image; it is
+downloaded on first use into `face_enrich.model_dir`. In Docker that default
+(`/opt/marcellus/data/models`) is not writable, so set
+`face_enrich.model_dir: /data/models` so the cache sits on the data volume and
+is not re-downloaded when the container is re-created. To use it, set
+`SIDECAR_IMAGE=ghcr.io/helicopterrun/marcellus:X.Y-full` in `.env`
+(docker-compose.yml shows the line).
+
 ## Releases
 
 Tagging `vX.Y.Z` (matching `__version__` in `src/marcellus/__init__.py`)
 runs `.github/workflows/release.yml`: multi-arch image to
-`ghcr.io/helicopterrun/marcellus` (`latest`, `X.Y`, `vX.Y.Z`) plus an
-sdist/wheel attached to the GitHub Release. Images are signed keylessly with
-cosign (verify command in the README). `install.sh` and `docker-compose.yml`
+`ghcr.io/helicopterrun/marcellus` (`latest`, `X.Y`, `vX.Y.Z`), a second
+amd64-only image with face recognition (`latest-full`, `X.Y-full`,
+`vX.Y.Z-full`), plus an sdist/wheel attached to the GitHub Release. Both images
+are signed keylessly with cosign (verify command in the README). `install.sh` and `docker-compose.yml`
 pin the `X.Y` train; bump both when you cut a new minor.
 
 ### High-res cross-camera face capture (optional)

@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from marcellus import db
 from marcellus.push import card_store, decision_trace, library, policy_settings, store
 from marcellus.push import receipts as receipts_store
-from marcellus.push.transport import RELAY_HEALTH
+from marcellus.push.transport import RELAY_HEALTH, effective_transport
 
 logger = logging.getLogger(__name__)
 
@@ -918,8 +918,14 @@ async def get_push_status(request: Request) -> dict[str, Any]:
         policy_settings.household_zone(devices),
     )
 
+    effective, transport_note = effective_transport(
+        settings.push.transport, settings.push.relay_key, devices
+    )
     return {
         "now": _datetime.datetime.now(_datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "transport": settings.push.transport,
+        "transport_effective": effective,
+        "transport_note": transport_note,
         "frigate_available": bool(subscriber.frigate_online) if subscriber else False,
         "mqtt_connected": bool(subscriber.connected) if subscriber else False,
         "last_review_at": _last_review_iso(),

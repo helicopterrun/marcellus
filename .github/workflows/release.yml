@@ -4,6 +4,8 @@ name: release
 #   - a multi-arch container image to ghcr.io/helicopterrun/marcellus
 #     (tags: vX.Y.Z, X.Y, latest)
 #     signed keyless with cosign (see README: Verify the image)
+#   - a second image with face recognition (amd64 only) in the same
+#     repository: tags vX.Y.Z-full, X.Y-full, latest-full, signed the same way
 #   - an sdist + wheel attached to a GitHub Release (the bare-metal install
 #     path pulls the wheel so `install.sh` never needs a git checkout)
 #
@@ -82,6 +84,41 @@ jobs:
         env:
           IMAGE: ghcr.io/${{ github.repository }}
           DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      # The `-full` image adds the annotation and enrich extras (face
+      # recognition). amd64 only: insightface has no wheels (it compiles
+      # from source), which is too slow under arm64 emulation.
+      - name: Image metadata (full)
+        id: meta_full
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+            suffix=-full
+          tags: |
+            type=semver,pattern=v{{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push full image (amd64)
+        id: build_full
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          build-args: EXTRAS=http2,annotation,enrich
+          tags: ${{ steps.meta_full.outputs.tags }}
+          labels: ${{ steps.meta_full.outputs.labels }}
+          cache-from: type=gha,scope=full
+          cache-to: type=gha,mode=max,scope=full
+
+      - name: Sign the full image (keyless, by digest)
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          DIGEST: ${{ steps.build_full.outputs.digest }}
         run: cosign sign --yes "${IMAGE}@${DIGEST}"
 
       - name: Create GitHub Release

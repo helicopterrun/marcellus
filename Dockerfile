@@ -19,7 +19,20 @@ COPY src/ ./src/
 
 # http2: one long-lived HTTP/2 connection to the push relay instead of the
 # HTTP/1.1 keep-alive fallback (push/transport.py logs a warning without it).
-RUN pip install '.[http2]'
+# The default image is slim. The `-full` image passes
+# EXTRAS=http2,annotation,enrich (annotation analysis, face recognition).
+# insightface (in `enrich`) publishes no wheels, so its build needs a C/C++
+# toolchain; it is installed for the pip step only and removed again.
+ARG EXTRAS=http2
+RUN case ",$EXTRAS," in \
+      *,enrich,*) \
+        apt-get update \
+        && apt-get install -y --no-install-recommends build-essential \
+        && pip install ".[$EXTRAS]" \
+        && apt-get purge -y --auto-remove build-essential \
+        && rm -rf /var/lib/apt/lists/* ;; \
+      *) pip install ".[$EXTRAS]" ;; \
+    esac
 
 ENV MARCELLUS_CONFIG=/etc/marcellus/sidecar.yml
 

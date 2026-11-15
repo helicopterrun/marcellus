@@ -1147,12 +1147,12 @@ class PushSection(BaseModel):
     """
 
     enabled: bool = False
-    # "mock" logs what would be sent and always succeeds -- the only transport
-    # available without real APNs credentials, and the default so a fresh
-    # deployment doesn't accidentally try to reach a relay that isn't there.
-    # "relay" posts the minimal {device_token, environment, handle, server_id,
-    # severity} payload to `relay_base_url` (spec §4).
-    transport: str = "mock"
+    # "auto" (default) behaves as "relay" once `relay_key` is set or a
+    # registered device has supplied a relay credential, and as "mock" until
+    # then (decided per send, no restart). "mock" logs what would be sent and
+    # always succeeds. "relay" posts the minimal {device_token, environment,
+    # handle, server_id, severity} payload to `relay_base_url` (spec §4).
+    transport: str = "auto"
     # Short opaque id of *this* sidecar instance, carried in the APNs payload
     # so a device with more than one server registered can route the NSE's
     # handle-redeem fetch to the right base URL (spec §2). Generated at
@@ -1352,8 +1352,8 @@ class PushSection(BaseModel):
     @classmethod
     def _known_transport(cls, v: str) -> str:
         t = v.strip().lower()
-        if t not in ("mock", "relay"):
-            raise ValueError(f"push.transport must be 'mock' or 'relay', got {v!r}")
+        if t not in ("auto", "mock", "relay"):
+            raise ValueError(f"push.transport must be 'auto', 'mock' or 'relay', got {v!r}")
         return t
 
 
