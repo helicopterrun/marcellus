@@ -5,7 +5,7 @@ All notable changes to Marcellus (formerly frigate-sidecar). Format follows
 [Semantic Versioning](https://semver.org/) loosely (pre-1.0: minor releases
 may change behaviour). Numbers are pull requests.
 
-## [0.4.0] - Unreleased
+## [0.4.0] - 2026-11-15
 
 About 330 commits since 0.3.0. Written for operators upgrading from 0.3.0.
 
