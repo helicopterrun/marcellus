@@ -19,5 +19,8 @@
     "last_ok_at": "2026-08-05T17:56:50Z",
     "last_status_code": 200
   },
+  "transport": "auto",
+  "transport_effective": "mock",
+  "transport_note": "no device has supplied a relay credential yet; nothing is being sent (set push.relay_key for a self-run relay, or update the app)",
   "unifi_protect": null
 }
