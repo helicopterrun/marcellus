@@ -50,9 +50,6 @@ def _json_or(value: Any, default: Any) -> Any:
 
 
 def _row_to_device(row: sqlite3.Row) -> Device:
-    from marcellus.push.situations import parse_situations
-
-    situations = parse_situations(_json_or(_col(row, "situations"), []))
     slots_raw = _json_or(_col(row, "doorbell_slots"), None)
     doorbell_slots: tuple[str, str, str] | None = None
     if isinstance(slots_raw, list) and len(slots_raw) == 3:
@@ -74,13 +71,9 @@ def _row_to_device(row: sqlite3.Row) -> Device:
         cameras=tuple(json.loads(row["cameras"])),
         labels=tuple(json.loads(row["labels"])),
         min_severity=row["min_severity"],
-        # The stored `schema_version` is what the client claimed; what decides
-        # the evaluation path is `situations`, and a row with rules on it is a
-        # v2 row whatever the client called itself.
-        schema_version=2 if situations else int(_col(row, "schema_version", 1) or 1),
+        schema_version=int(_col(row, "schema_version", 1) or 1),
         timezone=str(_col(row, "timezone", "") or ""),
         location=location,
-        situations=situations,
         live_activity_token=str(_col(row, "live_activity_token", "") or ""),
         push_to_start_token=str(_col(row, "push_to_start_token", "") or ""),
         la_capable=bool(
@@ -126,7 +119,6 @@ def upsert_device(
     schema_version: int = 1,
     timezone_name: str = "",
     location: dict[str, float] | None = None,
-    situations: list[dict[str, Any]] | None = None,
     live_activity_token: str = "",
     morning_digest: dict[str, Any] | None = None,
     llm: dict[str, Any] | None = None,
@@ -151,16 +143,16 @@ def upsert_device(
         "INSERT INTO push_devices "
         "(apns_token, device_id, bundle_id, environment, app_version, cameras, labels, "
         " min_severity, registered_at, updated_at, schema_version, timezone, location, "
-        " situations, live_activity_token, morning_digest, llm, push_to_start_token, "
+        " live_activity_token, morning_digest, llm, push_to_start_token, "
         " la_capable, frequent_pushes_enabled, doorbell_rings, doorbell_slots, "
         " relay_credential) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(apns_token) DO UPDATE SET "
         "bundle_id=excluded.bundle_id, environment=excluded.environment, "
         "app_version=excluded.app_version, cameras=excluded.cameras, labels=excluded.labels, "
         "min_severity=excluded.min_severity, updated_at=excluded.updated_at, "
         "schema_version=excluded.schema_version, timezone=excluded.timezone, "
-        "location=excluded.location, situations=excluded.situations, "
+        "location=excluded.location, "
         "live_activity_token=excluded.live_activity_token, "
         "morning_digest=excluded.morning_digest, llm=excluded.llm, "
         "la_capable=excluded.la_capable, "
@@ -190,7 +182,6 @@ def upsert_device(
             int(schema_version),
             timezone_name,
             json.dumps(location) if location else None,
-            json.dumps(situations or []),
             live_activity_token,
             json.dumps(morning_digest) if morning_digest is not None else None,
             json.dumps(llm) if llm is not None else None,

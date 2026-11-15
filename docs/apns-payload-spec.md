@@ -17,6 +17,13 @@ device can receive any mix of the three, distinguished by top-level shape
 envelope. (The situations family is retired — its builder remains only for
 the wire-shape record.)
 
+Retired situations-era fields that no live sender emits any more (only the
+unused `push/payload.py` builder still shapes them): `situation_id`,
+`aps.category` `situation.<id>`, and the `mute-situation` action. Still on the
+wire from live code: the relay route `/v1/relay/situation` (carries every
+card payload), `attributes-type` in `push/live_activities.py`, and the
+`device:elsinore` collapse id used for the device-level Live Activity.
+
 This payload family covers ordinary alert or silent pushes. Nothing here
 starts, updates, or ends a Live Activity (`push/activity.py`).
 

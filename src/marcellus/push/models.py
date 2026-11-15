@@ -8,10 +8,6 @@ connection to be exercised.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    from marcellus.push.situations import Situation
 
 SEVERITIES = ("detection", "alert")  # low -> high, matches Frigate's own field
 
@@ -99,17 +95,15 @@ class Device:
     min_severity: str = "detection"  # ladder v3 §5.4 (was "alert")
 
     # -- v2 registration (plan §8) --
-    # 1 = the v1 camera+label+severity subscription; 2 = the situation shape.
-    # Derived from the row, not trusted from the client: what actually decides
-    # the evaluation path is whether `situations` is non-empty, and the two
-    # must never disagree.
+    # As the client claimed it; informational (the evaluation path is the card
+    # pipeline whatever the value). The retired `situations` rules are no
+    # longer read or stored.
     schema_version: int = 1
     timezone: str = ""  # IANA name; "" = fall back to the sidecar's clock
     location: tuple[float, float] | None = None  # (lat, lon); Phase 5
-    situations: tuple[Situation, ...] = field(default_factory=tuple)
     live_activity_token: str = ""  # superseded by push_to_start_token; unread
     #: Phase 2: one per app install, creates Live Activities. Empty means this
-    #: device can't run them, and its Present-tier situations fall back to
+    #: device can't run them, and its Present-tier cards fall back to
     #: alert pushes ("the app works without Phase 2").
     push_to_start_token: str = ""
     la_capable: bool = True
@@ -128,10 +122,3 @@ class Device:
     def can_live_activity(self) -> bool:
         """Whether Phase 2's Live Activity path is available to this device."""
         return bool(self.push_to_start_token) and self.la_capable
-
-    @property
-    def uses_situations(self) -> bool:
-        """The one switch between the two evaluation paths (plan §8's
-        backward-compatibility rule): empty or absent situations keeps this
-        device on today's alert-firing behaviour, unchanged."""
-        return bool(self.situations)

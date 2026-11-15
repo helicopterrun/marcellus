@@ -9,10 +9,9 @@ without a running app or a real MQTT connection.
 The situations push pipeline (v1 camera+label dispatch and situation-only
 evaluation) was retired in Phase 5 §1: the card/attention-ladder pipeline in
 `delivery_wire.py` is the only alert path now. Device registrations carrying
-`situations` are still accepted and stored (older app builds keep working),
-and the situation *test* endpoint (`POST /v1/push/test/{situation_id}`,
-`send_situation_test` below) still fires the legacy wire shape on demand,
-but no review or object message ever emits a situation push.
+`situations` are still accepted (older app builds keep working) but are
+ignored and no longer stored; no review or object message emits a situation
+push, and the situation *test* endpoint is a 404 stub.
 """
 
 from __future__ import annotations
@@ -35,7 +34,6 @@ from marcellus.push.decision import (
     parse_review_message,
 )
 from marcellus.push.models import Device, ReviewEvent
-from marcellus.push.payload import build_payload
 from marcellus.push.situations import (
     STAGE_ENDING,
     Match,
@@ -504,11 +502,7 @@ class PushEngine:
                     finally:
                         conn.close()
                     continue
-                situation = next(
-                    (s for s in device.situations if s.id == row["situation_id"]), None
-                )
-                if situation is None:
-                    situation = Situation(id=row["situation_id"], name=row["situation_id"])
+                situation = Situation(id=row["situation_id"], name=row["situation_id"])
                 self._ending.add(device.apns_token)
                 to_end.append((device, situation, row))
 
@@ -647,75 +641,5 @@ class PushEngine:
         elif not result.ok:
             logger.warning(
                 "push: test send failed for device %s: %s", device.device_id, result.error
-            )
-        return result
-
-    async def send_situation_test(
-        self, device: Device, situation: Situation, *, camera: str = ""
-    ) -> TransportResult:
-        """Fire one situation-shaped push at `device` through the real pipeline.
-
-        Deliberately the *whole* path -- handle minting, thumbnail pre-warm,
-        payload shape, collapse id, sound -- because what the app's Settings
-        button is verifying is that a real situation push would arrive looking
-        the way it should, not merely that APNs is reachable (spec §1's plain
-        test push already answers that).
-
-        Snooze and the rate limit are bypassed, and the send is not recorded
-        against the hourly ceiling: pressing "test" is the user asking for
-        this one, and it must not spend the budget a real alert might need
-        ten minutes later.
-        """
-        camera = camera or (situation.cameras[0] if situation.cameras else "")
-        camera = camera or (device.cameras[0] if device.cameras else "")
-        track_id = f"test-{int(time.time())}"
-
-        conn = self._conn()
-        try:
-            handle = store.mint_handle(
-                conn,
-                camera=camera,
-                event_id="",
-                review_id=f"test-{situation.id}",
-                ttl_s=self.situation_handle_ttl_s,
-                situation_id=situation.id,
-                track_id=track_id,
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        match = Match(
-            situation=situation,
-            track_id=track_id,
-            dwell_s=situation.loiter_seconds,
-            label=situation.labels[0] if situation.labels else "person",
-            zone=situation.zones[0] if situation.zones else "",
-        )
-        warm = asyncio.create_task(
-            # No event id: a test has no tracked object, so the pre-warm falls
-            # through to the camera's latest frame -- which is also the most
-            # honest preview of what this situation would look like.
-            self.prewarm_thumbnail(handle, camera=camera, event_id="")
-        )
-        try:
-            payload = build_payload(match, handle=handle, server_id=self.server_id)
-            result = await self.transport.send_situation(
-                device, payload=payload, collapse_id=match.collapse_id
-            )
-        finally:
-            with __import__("contextlib").suppress(Exception):
-                await warm
-
-        if result.unregistered:
-            logger.info(
-                "push: pruning device %s after situation test send (%s)",
-                device.device_id, result.error,
-            )
-            self._prune([device.apns_token])
-        elif not result.ok:
-            logger.warning(
-                "push: situation test send failed for device %s: %s",
-                device.device_id, result.error,
             )
         return result

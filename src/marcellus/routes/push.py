@@ -21,7 +21,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from marcellus import db
 from marcellus.push import card_store, decision_trace, library, policy_settings, store
 from marcellus.push import receipts as receipts_store
-from marcellus.push.situations import Situation
 from marcellus.push.transport import RELAY_HEALTH
 
 logger = logging.getLogger(__name__)
@@ -75,8 +74,9 @@ class DeviceRegistration(BaseModel):
 
     Every v1 field keeps its meaning and its default, so a phone running an
     older app build PUTs exactly what it PUT before and is stored exactly as
-    it was stored before. Everything added below is optional; an omitted
-    `situations` is what keeps that device on the v1 firing path.
+    it was stored before. Everything added below is optional. The retired
+    `situations` key (sent as `[]` by every app build for a long while) is
+    still accepted so old builds keep registering, and is ignored.
 
     Unknown fields are ignored rather than rejected -- the app ships on its
     own cadence and a newer build must not 422 against an older sidecar. They
@@ -103,7 +103,6 @@ class DeviceRegistration(BaseModel):
     schema_version: int = 1
     timezone: str = ""  # IANA name, e.g. "America/Los_Angeles"
     location: DeviceLocation | None = None
-    situations: list[dict[str, Any]] = Field(default_factory=list)
     # None means "the client didn't mention snoozes", which must leave the
     # ones it set earlier alone -- see `store.replace_snoozes`. An explicit
     # [] is a request to clear them.
@@ -112,7 +111,7 @@ class DeviceRegistration(BaseModel):
     # -- Phase 2 --
     # One per app install, rotates on reinstall; creates Live Activities.
     # Absent means this device isn't ready for them, and its Present-tier
-    # situations fall back to alert pushes.
+    # cards fall back to alert pushes.
     push_to_start_token: str = ""
 
     # Accepted, persisted, and deliberately unread (Phase 4's digest and LLM).
@@ -236,14 +235,14 @@ async def register_device(
     entitlement refresh) overwrites this device's own filter state rather
     than accumulating duplicate rows that would double-fire alerts.
 
-    The response echoes how the sidecar will actually evaluate this device:
-    `schema_version: 1` (today's camera+label+severity firing) or `2`
-    (situation-only), plus how many of the submitted situations parsed. A
-    situation the sidecar silently discarded -- no `id`, say -- would
-    otherwise look enabled in the app and never fire.
+    The response echoes the client's `schema_version` and whether Live
+    Activities are available to the device. `situations_accepted` is retired
+    and always 0 (the field stays so older app builds can still decode it).
     """
     settings = request.app.state.settings
-    extras = sorted(body.model_extra or ())
+    # `situations` is the retired pre-card rule list: old builds still send it,
+    # it is ignored silently (not logged as an unknown field either).
+    extras = sorted(k for k in (body.model_extra or ()) if k != "situations")
     if extras:
         logger.info(
             "push: registration for %s carried field(s) this sidecar does not "
@@ -251,9 +250,7 @@ async def register_device(
             store.device_id_for_token(apns_token),
             ", ".join(extras),
         )
-    situations = [s for s in body.situations if isinstance(s, dict)]
-    parsed = [s for s in (Situation.from_dict(s) for s in situations) if s is not None]
-    schema_version = 2 if parsed else body.schema_version
+    schema_version = body.schema_version
 
     slots_provided = "doorbell_slots" in (body.model_fields_set or set())
     if slots_provided and body.doorbell_slots is not None and len(body.doorbell_slots) != 3:
@@ -292,7 +289,6 @@ async def register_device(
             schema_version=schema_version,
             timezone_name=body.timezone,
             location=body.location.model_dump() if body.location else None,
-            situations=situations,
             live_activity_token=body.live_activity_token,
             morning_digest=body.morning_digest,
             llm=body.llm,
@@ -313,31 +309,12 @@ async def register_device(
 
     previous, device_id, stored = await db.with_sidecar(settings.sidecar.db_path, _persist)
 
-    # Recorded for back-compat visibility only: the situations pipeline is
-    # retired (Phase 5 §1, card pipeline is the sole alert path), but which
-    # mode a device *registered* under still matters for tracing older app
-    # builds, so the row keeps its situations and this line keeps logging.
-    uses_situations = bool(parsed)
     logger.info(
-        "push: registration apns_token=%s schema_version=%s uses_situations=%s "
-        "relay_credential=%s "
-        "(situations stored for back-compat; card pipeline is the alert path)",
+        "push: registration apns_token=%s schema_version=%s relay_credential=%s",
         apns_token[:8],
         schema_version,
-        uses_situations,
         "present" if body.relay_credential else "absent",
     )
-    if previous is not None and previous.uses_situations != uses_situations:
-        # The edge that actually matters: a device silently flipping mode
-        # (e.g. an app reinstall wiping stored situations) looks identical to
-        # a healthy re-registration from the outside. This is the line that
-        # would have caught it in seconds instead of a four-hour trace.
-        logger.info(
-            "push: registration apns_token=%s transitioned uses_situations %s -> %s",
-            apns_token[:8],
-            previous.uses_situations,
-            uses_situations,
-        )
 
     # Echo back what the sidecar will actually do with this device, including
     # whether Live Activities are available to it -- the app-side token flow is
@@ -347,7 +324,8 @@ async def register_device(
         "registered": True,
         "device_id": device_id,
         "schema_version": schema_version,
-        "situations_accepted": len(parsed),
+        # Retired: kept at 0 so an older app build that decodes it still can.
+        "situations_accepted": 0,
         "la_capable": bool(stored.la_capable) if stored else True,
         "live_activities": bool(stored and stored.can_live_activity),
         "doorbell_rings": bool(stored.doorbell_rings) if stored else True,
@@ -586,18 +564,10 @@ async def test_situation_push(
     body: SituationTestRequest,
     request: Request,
 ) -> dict[str, Any]:
-    """Fire one push for `situation_id` at the calling device (plan §8).
+    """Retired: situations no longer exist server-side, so no device has one.
 
-    The device is named in the body rather than inferred from the session:
-    the sidecar's auth is the shared Frigate session, which identifies a
-    *user*, and this endpoint is per-*device* -- there is nothing on the
-    request that could tell two of a user's phones apart.
-
-    Runs the whole real path (handle, thumbnail pre-warm, payload, collapse
-    id, sound), because what the app's Settings button is verifying is that a
-    real situation push arrives looking the way it should. Snooze and the
-    rate-limit ceiling are bypassed and the send isn't charged against the
-    hourly budget -- the user asked for this one.
+    Kept as a route so an old app build's Settings test button gets a clean
+    404 `situation_not_found` instead of falling through to the Frigate proxy.
     """
     settings = request.app.state.settings
     device = await db.with_sidecar(
@@ -608,40 +578,13 @@ async def test_situation_push(
             status_code=404,
             detail={"error": _ERR_DEVICE_NOT_FOUND, "message": "token not registered"},
         )
-
-    situation = next((s for s in device.situations if s.id == situation_id), None)
-    if situation is None:
-        # Falling back to the starter library would test a rule the device
-        # isn't actually registered with, which is the one thing this button
-        # must not quietly do.
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": _ERR_SITUATION_NOT_FOUND,
-                "message": f"device has no situation {situation_id!r}",
-            },
-        )
-
-    engine = getattr(request.app.state, "push_engine", None)
-    if engine is None:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": _ERR_PUSH_DISABLED,
-                "message": "push is not enabled on this server (push.enabled=false)",
-            },
-        )
-
-    result = await engine.send_situation_test(device, situation)
-    if not result.ok:
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "error": _ERR_TEST_SEND_FAILED,
-                "message": result.error or "push transport rejected the send",
-            },
-        )
-    return {"sent": True, "situation_id": situation_id}
+    raise HTTPException(
+        status_code=404,
+        detail={
+            "error": _ERR_SITUATION_NOT_FOUND,
+            "message": f"device has no situation {situation_id!r} (situations are retired)",
+        },
+    )
 
 
 @router.post("/activity/token")

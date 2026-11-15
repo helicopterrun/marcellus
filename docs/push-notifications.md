@@ -413,15 +413,18 @@ drops the row when the app ends the activity locally.
 The situations pipeline (situation-only evaluation and the v1
 camera/label/severity dispatch that preceded it) is retired: the
 card/attention-ladder pipeline above (`push/delivery_wire.py`) is the only
-alert path, and no review or object message emits a situation push. What
-survives, for back-compat with older app builds: registrations carrying a
-`situations` array are still accepted and stored (`push/situations.py`
-keeps the parser/model), the starter library
-(`GET /v1/push/situations/library`) still serves, and
-`POST /v1/push/test/{situation_id}` still fires one legacy-shaped push on
-demand. The situation and Live Activity payload builders
-(`push/payload.py`, `push/activity.py`) remain as the wire-shape record
-(see `docs/apns-payload-spec.md`).
+alert path, and no review or object message emits a situation push. The
+server no longer reads or stores situations: registrations carrying a
+`situations` array (older app builds) are still accepted and the key is
+ignored; new builds omit it. The `push_devices.situations` column is dead
+(left in place; SQLite on CI cannot drop columns). What survives, for
+back-compat: the starter library (`GET /v1/push/situations/library`) still
+serves, `POST /v1/push/test/{situation_id}` always answers 404
+`situation_not_found`, `situations_accepted` in the registration response is
+always 0, and the relay route `/v1/relay/situation` is kept (it carries every
+card payload now; the name is an external contract). The situation and Live
+Activity payload builders (`push/payload.py`, `push/activity.py`) remain,
+unused, as the wire-shape record (see `docs/apns-payload-spec.md`).
 
 ## The settings document
 
@@ -571,8 +574,9 @@ except `GET /v1/push/thumbnail/{handle}`, protected by the handle itself
 being opaque, unguessable, and short-lived — the NSE holds no session.
 
 - `PUT` / `DELETE /v1/push/devices/{apns_token}` — idempotent registration
-  keyed on the token; the response echoes the `schema_version` the sidecar
-  will evaluate under, `situations_accepted`, and Live Activity readiness.
+  keyed on the token; the response echoes the client's `schema_version`,
+  `situations_accepted` (retired, always 0), and Live Activity readiness.
+  The retired `situations` key is accepted and ignored.
   Unknown body fields are accepted, dropped, and logged by name. Omitting
   `snoozes` leaves existing ones alone; explicit `[]` clears them. The
   optional `relay_credential` is stored per device and never returned (see
@@ -613,9 +617,9 @@ being opaque, unguessable, and short-lived — the NSE holds no session.
   PUT); kept one release. Scopes: `global`, `situation:<id>`,
   `camera:<name>` (per-device — snoozing the iPad must not quiet the
   iPhone). Expiry is a timestamp, not a scheduled job.
-- `POST /v1/push/test/{situation_id}` — fire one legacy situation-shaped
-  push at the named device (the pipeline itself is retired; this test
-  button still works for devices registered with situations).
+- `POST /v1/push/test/{situation_id}` — **retired**: always 404
+  `situation_not_found` (kept so an old app build's test button gets a clean
+  answer rather than the Frigate proxy).
 - `POST /v1/push/activity/token`, `DELETE /v1/push/activity/token/{id}` —
   Live Activity token upload / local-end teardown (see above).
 - `GET /v1/push/thumbnail/{handle}`, `GET /v1/push/handle/{handle}` —
