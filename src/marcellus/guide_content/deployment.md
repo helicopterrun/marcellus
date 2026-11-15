@@ -69,7 +69,7 @@ Optional features are Python "extras" — install only what you use:
 | `unifi_protect` | UniFi Protect doorbell rings |
 
 The Docker image and `install.sh` install only `http2`. For the other extras,
-add them yourself (`pip install "marcellus[enrich]"` in the venv) or build your
+add them yourself (`pip install "marcellus[enrich] @ git+https://github.com/helicopterrun/marcellus"` in the venv) or build your
 own image.
 
 ## Upgrading
@@ -84,6 +84,10 @@ From source:
    misses new ones entirely.
 3. Restart the service.
 4. Open [`/healthz`](/healthz) and confirm every component reports healthy.
+
+v0.3.0 was published as `ghcr.io/helicopterrun/frigate-sidecar` before the
+rename. That image is frozen at 0.3; the current image is
+`ghcr.io/helicopterrun/marcellus`.
 
 Releases are tagged `vX.Y.Z`; the Docker image is published multi-arch
 (amd64 and arm64) with `latest`, `X.Y` and `vX.Y.Z` tags, and

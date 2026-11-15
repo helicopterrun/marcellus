@@ -905,7 +905,7 @@ def analysis_annotation_offset(
 ) -> None:
     """Measured detect.annotation_offset (ms) per camera via template matching.
 
-    Requires the `[annotation]` extra: `pip install "marcellus[annotation]"`.
+    Requires the `[annotation]` extra: `pip install ".[annotation]"`.
     """
     from marcellus.analysis import annotation_offset
 

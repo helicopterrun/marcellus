@@ -8,8 +8,10 @@ order: 1
 
 First launch walks through:
 
-1. **Server** — the sidecar's URL and your Frigate credentials. The app
-   talks to Frigate *through* the sidecar, so one address covers everything.
+1. **Server** — the address of your Frigate (or of Marcellus) and your Frigate
+   credentials. Elsinore works with Frigate alone. Marcellus is optional: when
+   the app is pointed at it, one address covers everything, because the app
+   talks to Frigate *through* Marcellus.
 2. **Zones** — pick which zones matter to you (feeds the zone routing
    policy shared with the sidecar).
 3. **Notifications** — grant permission and choose a starting alert level;
@@ -26,7 +28,9 @@ the broken link outright.
 
 ## Requirements
 
-- The phone must reach the sidecar's address (same network, VPN, or however
+- The phone must reach the address you gave it (same network, VPN, or however
   you've published it).
+- Alerts, Live Activities, Encounters, the scrub reel and People need
+  Marcellus. Elsinore works with Frigate alone without them.
 - Push requires the sidecar's `push` transport configured for the relay, which in turn needs a relay key (see [Push notifications](/guide/push-notifications) and [What leaves your network](/guide/privacy)).
 - Widgets and Live Activities need notification permission granted.

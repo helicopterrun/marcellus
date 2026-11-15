@@ -77,8 +77,8 @@ EOF
   "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
   # [http2]: long-lived HTTP/2 relay connection instead of the HTTP/1.1
   # keep-alive fallback (push/transport.py warns at startup without it).
-  "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade "marcellus[http2]" 2>/dev/null || \
-    "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade "marcellus[http2] @ git+https://github.com/$REPO"
+  # Marcellus is not published to PyPI; install from the repository.
+  "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade "marcellus[http2] @ git+https://github.com/$REPO"
 
   mkdir -p /etc/marcellus
   if [ ! -f /etc/marcellus/sidecar.yml ]; then

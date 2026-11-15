@@ -138,11 +138,39 @@ def camera_names(config_path: str | Path) -> list[str]:
     return sorted(configured_camera_names(config_path) or ())
 
 
-def load_camera_zones(config_path: str | Path) -> dict[str, list[dict[str, Any]]]:
+#: Zone names Frigate has switched off everywhere (`enabled: false`, 0.18+).
+#: Refreshed by every successful `load_camera_zones` call, so code that only
+#: has a zone *name* (push routing, event ingestion) can ask `is_disabled`.
+_disabled_zone_names: frozenset[str] = frozenset()
+
+
+def is_disabled(zone: str) -> bool:
+    """True when `zone` is disabled on every camera that defines it."""
+    return zone in _disabled_zone_names
+
+
+def drop_disabled(names: tuple[str, ...]) -> tuple[str, ...]:
+    """`names` without disabled zones. Frigate stops reporting a zone it has
+    disabled, but a segment written just before the change can still list it."""
+    if not _disabled_zone_names:
+        return names
+    return tuple(n for n in names if n not in _disabled_zone_names)
+
+
+def load_camera_zones(
+    config_path: str | Path, *, include_disabled: bool = False
+) -> dict[str, list[dict[str, Any]]]:
     """Return `{camera: [{name, coords, color, objects, inertia, loitering_time}, ...]}`.
 
     Reads Frigate's config.yml. Missing file or unparseable file -> {} (no crash).
     Cameras without zones are absent -- list cameras with `camera_names`.
+
+    This is the one place zones are read from Frigate's config, so zones with
+    `enabled: false` (0.18+; absent on 0.17, where every zone is enabled) are
+    dropped here for every consumer: zone hits, the zone map, push settings,
+    encounter adjacency. Stored per-zone settings are untouched in the sidecar
+    DB, so re-enabling a zone restores them. `include_disabled=True` keeps them
+    (each entry carries `enabled`).
     """
     p = Path(config_path)
     if not p.exists():
@@ -158,6 +186,8 @@ def load_camera_zones(config_path: str | Path) -> dict[str, list[dict[str, Any]]
         return {}
 
     out: dict[str, list[dict[str, Any]]] = {}
+    enabled_names: set[str] = set()
+    disabled_names: set[str] = set()
     for cam_name, cam in (cfg.get("cameras") or {}).items():
         if not isinstance(cam, dict):
             continue
@@ -166,6 +196,10 @@ def load_camera_zones(config_path: str | Path) -> dict[str, list[dict[str, Any]]
             zd = z or {}
             pts = _parse_coords(zd.get("coordinates"))
             if not pts:
+                continue
+            is_enabled = zd.get("enabled", True) is not False
+            (enabled_names if is_enabled else disabled_names).add(str(zname))
+            if not is_enabled and not include_disabled:
                 continue
             objs = zd.get("objects")
             if isinstance(objs, str):
@@ -182,11 +216,12 @@ def load_camera_zones(config_path: str | Path) -> dict[str, list[dict[str, Any]]
                     # over humanizing the rule-shaped zone key.
                     "friendly_name": zd.get("friendly_name"),
                     # Frigate 0.18 added `enabled` (default true; 0.17 has no
-                    # such key, so absent means enabled). Carried, not
-                    # filtered: overlays and routing still list the zone.
-                    "enabled": zd.get("enabled", True) is not False,
+                    # such key, so absent means enabled).
+                    "enabled": is_enabled,
                 }
             )
         if cam_zones:
             out[cam_name] = cam_zones
+    global _disabled_zone_names
+    _disabled_zone_names = frozenset(disabled_names - enabled_names)
     return out

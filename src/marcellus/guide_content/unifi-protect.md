@@ -14,7 +14,7 @@ door, not a detection to route through Ignore/Quiet/Glance/Urgent.
 1. In UniFi OS (the console's web UI, not Protect itself), go to **Settings
    → Control Plane → Integrations → Create API Key**. Copy the key.
 2. Set `unifi_protect.enabled: true`, `unifi_protect.console_url` (the
-   console's base URL, e.g. `https://192.168.1.1`), and `unifi_protect.api_key`
+   console's base URL, e.g. `https://192.0.2.1`), and `unifi_protect.api_key`
    (or the `MARCELLUS_UNIFI_PROTECT__API_KEY` environment variable -- never
    commit the key to the config file).
 3. Restart the sidecar. On startup it validates the key against the
@@ -27,7 +27,7 @@ door, not a detection to route through Ignore/Quiet/Glance/Urgent.
    ```yaml
    unifi_protect:
      enabled: true
-     console_url: "https://192.168.1.1"
+     console_url: "https://192.0.2.1"
      cameras:
        "6183a1b200f1234500001234": "front_door"
    ```

@@ -31,8 +31,8 @@ hostnames and personal names.
 
 `ssh nvr "cd /opt/marcellus && git fetch && git reset --hard
 origin/main && pip install -q '.[http2,annotation,enrich]' && systemctl
-restart marcellus && curl -s http://192.168.50.207:5001/healthz"`
-(Prod binds `sidecar.bind_host`/`bind_port` = 192.168.50.207:5001, not
+restart marcellus && curl -s http://<bind-host>:5001/healthz"`
+(Prod binds `sidecar.bind_host`/`bind_port` = <bind-host>:5001, not
 localhost -- a localhost curl returns an empty body, not an error.)
 The pip-install step is mandatory (deps/extras drift otherwise).
 Ship flow: branch → PR → CI green → squash-merge → deploy → live-verify.
