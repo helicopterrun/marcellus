@@ -22,7 +22,7 @@ may change behaviour). Numbers are pull requests.
   the old `frigate-sidecar` image is frozen at 0.3; LAN addresses in tracked
   files replaced with documentation placeholders.
 
-## [0.4.0] - Unreleased
+## [0.4.0] - 2026-11-15
 
 About 330 commits since 0.3.0. Written for operators upgrading from 0.3.0.
 
