@@ -84,7 +84,7 @@ def _require() -> tuple[Any, Any]:
     except ImportError as exc:
         raise WildlifeUnavailable(
             "onnxruntime / numpy not installed. "
-            'Install with `pip install "marcellus[wildlife]"`.'
+            'Install with `pip install ".[wildlife]"`.'
         ) from exc
     return np, ort
 

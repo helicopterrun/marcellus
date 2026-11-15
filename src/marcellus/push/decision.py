@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 from marcellus.push.models import SEVERITIES, Device, ReviewEvent, TrackedObject
+from marcellus.zones import drop_disabled
 
 _SEVERITY_RANK = {name: rank for rank, name in enumerate(SEVERITIES)}
 
@@ -91,7 +92,7 @@ def parse_review_message(payload: dict[str, Any]) -> ReviewEvent | None:
         labels=labels,
         msg_type=str(msg_type),
         event_id=event_id,
-        zones=_strings(data.get("zones")),
+        zones=drop_disabled(_strings(data.get("zones"))),
         track_ids=track_ids,
         audio=_strings(data.get("audio")),
         sub_labels=_strings(data.get("sub_labels")),

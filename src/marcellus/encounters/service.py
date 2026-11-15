@@ -25,6 +25,7 @@ from marcellus.encounters.transitions import (
     transition_config_from_settings,
 )
 from marcellus.push.models import ReviewEvent
+from marcellus.zones import drop_disabled
 
 logger = logging.getLogger(__name__)
 
@@ -343,7 +344,7 @@ class EncounterService:
             start_time=start_time,
             end_time=end_time,
             labels=labels,
-            zones=_strings(data.get("zones")),
+            zones=drop_disabled(_strings(data.get("zones"))),
             event_ids=_strings(data.get("detections")),
             sub_labels=sub_labels,
             severity=str(row["severity"]),

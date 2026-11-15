@@ -42,6 +42,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from marcellus.push import ladder_policy as policy
+from marcellus.zones import is_disabled
 
 SUPPRESSED = "suppressed"
 
@@ -110,7 +111,7 @@ def base_level(subject: str, place: str, zone: str) -> tuple[str, bool]:
     zone's table cell.
     """
     place = policy.canonical_place(place)
-    override = policy.ZONE_OVERRIDES.get(zone, {}).get(subject)
+    override = None if is_disabled(zone) else policy.ZONE_OVERRIDES.get(zone, {}).get(subject)
     if override is not None:
         return policy.canonical_level(override), True
     if (subject, place) in policy.OFF_CELLS:
@@ -179,7 +180,11 @@ def _evaluate(snapshot: Snapshot) -> LadderResult:
         subject = "person" if "person" in policy.TABLE else "stranger"
         modifiers.append("reclass_dangerous_animal")
 
-    override = policy.ZONE_OVERRIDES.get(snapshot.zone, {}).get(subject)
+    override = (
+        None
+        if is_disabled(snapshot.zone)
+        else policy.ZONE_OVERRIDES.get(snapshot.zone, {}).get(subject)
+    )
     if override is not None:
         return LadderResult(
             policy.canonical_level(override), "zone_override", tuple(modifiers),

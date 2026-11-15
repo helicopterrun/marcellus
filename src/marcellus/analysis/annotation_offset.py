@@ -3,7 +3,7 @@
 This module is heavier than the rest: it imports cv2 + numpy + httpx and
 issues many HTTP calls per event. Install the optional extra:
 
-    pip install "marcellus[annotation]"
+    pip install ".[annotation]"
 
 The CLI / HTTP entry points raise `AnnotationOffsetUnavailable` if the
 extra isn't present so users get a clean error rather than a stack trace.
@@ -35,7 +35,7 @@ def _require_deps() -> tuple[Any, Any]:
         import numpy as np
     except ImportError as exc:
         raise AnnotationOffsetUnavailable(
-            "cv2 / numpy not installed. Install with `pip install \"marcellus[annotation]\"`."
+            "cv2 / numpy not installed. Install with `pip install \".[annotation]\"`."
         ) from exc
     return cv2, np
 

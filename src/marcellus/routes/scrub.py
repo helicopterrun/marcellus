@@ -648,7 +648,7 @@ async def _fetch_and_aggregate_motion(
         if ts is None or val is None:
             continue
         points.append((float(ts), float(val)))
-    return aggregate_motion(points, start, end, scale), unavailable
+    return aggregate_motion(points, start, end, scale, fetch_scale), unavailable
 
 
 def _motion_flight(app_state: Any) -> MotionFlight:

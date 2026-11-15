@@ -1415,7 +1415,7 @@ class UnifiProtectSection(BaseModel):
 
     enabled: bool = False
     # Base URL of the UniFi OS console hosting Protect, e.g.
-    # "https://192.168.1.1" (no trailing /proxy/protect/...).
+    # "https://192.0.2.1" (no trailing /proxy/protect/...).
     console_url: str = ""
     # UniFi OS "Integration" API key (Settings -> Control Plane ->
     # Integrations -> Create API Key). Env-overridable
@@ -1488,7 +1488,7 @@ class BernardoSourceConfig(BaseModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
     name: str = "Wildlife camera"
     enabled: bool = True
-    # Device API origin, e.g. "http://192.168.1.37:8000".
+    # Device API origin, e.g. "http://192.0.2.37:8000".
     base_url: str
     # The device's MQTT base topic (its own Settings -> MQTT page).
     mqtt_base_topic: str = "bernardo"

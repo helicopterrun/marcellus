@@ -189,7 +189,7 @@ recognition on those cameras first so the sidecar is the only writer.
 
 Setup:
 
-1. `pip install "marcellus[enrich]"` (adds insightface + onnxruntime).
+1. `pip install "marcellus[enrich] @ git+https://github.com/helicopterrun/marcellus"` (adds insightface + onnxruntime).
 2. Set `face_enrich.enabled: true` and `cameras:` in `sidecar.yml`. The model
    pack (~300 MB) downloads into `model_dir` on the first cycle — keep it
    under `/opt/marcellus` (ProtectSystem=strict) and expect the first
@@ -205,6 +205,7 @@ The project (package, CLI, systemd units, and default paths) was renamed from
 `frigate-sidecar` to `marcellus`. Existing deployments keep working across the
 upgrade without a forced cutover:
 
+- **Docker image:** v0.3.0 was published as `ghcr.io/helicopterrun/frigate-sidecar` before the rename. That image is frozen at 0.3 and gets no further releases; the current image is `ghcr.io/helicopterrun/marcellus`.
 - **Package/CLI:** the distribution and import name is now `marcellus`; `fsc`
   still works unchanged, and `marcellus` is now also a valid command name.
 - **Env vars:** the prefix changed from `FRIGATE_SIDECAR_` to `MARCELLUS_`.

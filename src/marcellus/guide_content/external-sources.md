@@ -38,7 +38,7 @@ Off by default (`enabled`), with its own switch independent of `push.enabled`.
 1. On the device, open **Settings → MQTT** and point it at the broker
    Frigate uses. A dedicated broker user for the device is recommended, so it
    can be revoked without touching Frigate or Marcellus.
-2. Note the device's API origin (e.g. `http://192.168.1.37:8000`) and its MQTT
+2. Note the device's API origin (e.g. `http://192.0.2.37:8000`) and its MQTT
    base topic (default `bernardo`).
 3. Add the source to the config and restart the sidecar:
 
@@ -47,7 +47,7 @@ Off by default (`enabled`), with its own switch independent of `push.enabled`.
      enabled: true
      sources:
        - id: bernardo
-         base_url: "http://192.168.1.37:8000"
+         base_url: "http://192.0.2.37:8000"
    ```
 
    Marcellus is read-only against the device and never needs its write token.
@@ -76,7 +76,7 @@ Off by default (`enabled`), with its own switch independent of `push.enabled`.
 - `id` -- required; lowercase letters, digits and `_`, starting with a letter, max 32. It is the journal key, the `{source_id}` URL segment and the `source:<id>` health name. Never rename once set.
 - `name` -- default `Wildlife camera`; the display name shown in the app.
 - `enabled` -- default `true`; set `false` to keep the entry but stop ingesting and serving it.
-- `base_url` -- required; the device API origin, e.g. `http://192.168.1.37:8000`.
+- `base_url` -- required; the device API origin, e.g. `http://192.0.2.37:8000`.
 - `mqtt_base_topic` -- default `bernardo`; the device's MQTT base topic (its own Settings → MQTT page).
 - `poll_limit` -- default `50` (1..500); rows fetched per poll, newest first.
 - `max_connections` -- default `4` (1..16); concurrent upstream connections for polling plus media relay. The Pi is small; keep this low.

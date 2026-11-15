@@ -5,13 +5,15 @@ order: 1
 routes: ["/guide"]
 ---
 
-This guide covers the two halves of the Elsinore camera system:
+Elsinore works with [Frigate](https://frigate.video) alone. Marcellus is
+optional: it unlocks alerts and Live Activities, Encounters, the scrub reel and
+People. This guide covers both:
 
-- **Marcellus** -- the web app you're reading this in. It sits beside a
-  [Frigate](https://frigate.video) NVR and adds review tooling, analytics,
-  smooth timeline scrubbing, face recognition, and push notifications.
-- **Elsinore** -- the native iOS companion app: live grid, scrub reel,
-  review feed, widgets, and Live Activities on your phone.
+- **Marcellus** -- the web app you're reading this in. It sits beside your
+  Frigate NVR and adds review tooling, analytics, smooth timeline scrubbing,
+  face recognition, and push notifications.
+- **Elsinore** -- the native iOS companion app: live grid, review feed,
+  widgets, and (with Marcellus) the scrub reel and Live Activities on your phone.
 
 Right now this sidecar has been up **{{stat:uptime}}** and Frigate has logged
 **{{stat:events_today}}** events in the last 24 hours.

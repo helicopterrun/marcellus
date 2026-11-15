@@ -101,7 +101,7 @@ face_capture:
   retention_days: 30
 
 # Face enrichment (B3): embeddings + temporal aggregation + identity clusters.
-# Needs `pip install "marcellus[enrich]"` (insightface/onnxruntime, CPU
+# Needs `pip install ".[enrich]"` from a checkout (insightface/onnxruntime, CPU
 # only). For each ended person event on an enrolled camera, samples full-res
 # recording frames, embeds the best faces, and matches identity clusters at
 # /enrich/clusters — naming a cluster makes later matches write the event's
@@ -283,7 +283,7 @@ push:
 # external_sources:
 #   enabled: true
 #   # mqtt_enabled: true
-#   # mqtt_host: 192.168.1.10
+#   # mqtt_host: 192.0.2.10
 #   # mqtt_port: 1883
 #   # mqtt_username: bernardo-sources
 #   # mqtt_password: set via MARCELLUS_EXTERNAL_SOURCES__MQTT_PASSWORD
@@ -294,7 +294,7 @@ push:
 #   # state_stale_s: 180.0
 #   sources:
 #     - id: bernardo          # never rename once set
-#       base_url: "http://192.168.1.37:8000"
+#       base_url: "http://192.0.2.37:8000"
 #       # name: Wildlife camera
 #       # enabled: true
 #       # mqtt_base_topic: bernardo

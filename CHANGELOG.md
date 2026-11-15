@@ -5,6 +5,23 @@ All notable changes to Marcellus (formerly frigate-sidecar). Format follows
 [Semantic Versioning](https://semver.org/) loosely (pre-1.0: minor releases
 may change behaviour). Numbers are pull requests.
 
+## [Unreleased]
+
+### Changed
+
+- **Frigate 0.18 behaviour decisions.** A motion bucket Frigate leaves out is now
+  counted as zero motion, so coarse `/v1/motion` and `/v1/reel` traces read the
+  same on 0.17 and 0.18 (0.17 output can shift slightly at window edges).
+  Zones with `enabled: false` are ignored everywhere: zone hits, push routing,
+  the zone map, encounter adjacency and the zone lists the app and settings page
+  show; stored per-zone settings are kept for when a zone is re-enabled. A
+  fractional `/v1/motion` `scale` is rounded to a whole number (minimum 1)
+  before calling Frigate instead of surfacing as motion unavailable.
+- Docs: Elsinore works with Frigate alone and Marcellus is optional; Marcellus is
+  not published to PyPI (`install.sh` now installs from the repository only);
+  the old `frigate-sidecar` image is frozen at 0.3; LAN addresses in tracked
+  files replaced with documentation placeholders.
+
 ## [0.4.0] - 2026-11-15
 
 About 330 commits since 0.3.0. Written for operators upgrading from 0.3.0.

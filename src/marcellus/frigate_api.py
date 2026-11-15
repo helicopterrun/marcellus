@@ -134,8 +134,9 @@ async def async_activity_motion(
     whole upstream round-trip.
     """
     url = f"{base_url.rstrip('/')}/api/review/activity/motion"
+    # Frigate's `scale` is an int; a float renders as "3.0", which it may reject.
     params: dict[str, str | float] = {
-        "cameras": camera, "after": start, "before": end, "scale": scale,
+        "cameras": camera, "after": start, "before": end, "scale": int(round(scale)) or 1,
     }
     try:
         r = await client.get(url, params=params, timeout=timeout)
@@ -358,7 +359,8 @@ class FrigateClient:
         """
         url = f"{self.base_url}/api/review/activity/motion"
         params: dict[str, str | float] = {
-            "cameras": camera, "after": start, "before": end, "scale": scale,
+            "cameras": camera, "after": start, "before": end,
+            "scale": int(round(scale)) or 1,  # Frigate's `scale` is an int
         }
         try:
             r = self._client.get(url, params=params)

@@ -783,7 +783,7 @@ class _Engine:
         except ImportError as exc:
             raise EnrichUnavailable(
                 "insightface / onnxruntime / cv2 not installed. "
-                'Install with `pip install "marcellus[enrich]"`.'
+                'Install with `pip install ".[enrich]"`.'
             ) from exc
         self._app = FaceAnalysis(
             name="buffalo_l",
@@ -895,7 +895,7 @@ def check_available() -> None:
     except ImportError as exc:
         raise EnrichUnavailable(
             "insightface / onnxruntime / cv2 not installed. "
-            'Install with `pip install "marcellus[enrich]"`.'
+            'Install with `pip install ".[enrich]"`.'
         ) from exc
 
 

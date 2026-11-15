@@ -74,6 +74,16 @@ def sidecar_db_path(tmp_path: Path) -> Iterator[Path]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_disabled_zone_cache():
+    """`zones.load_camera_zones` refreshes a module-level disabled-zone set."""
+    from marcellus import zones
+
+    zones._disabled_zone_names = frozenset()
+    yield
+    zones._disabled_zone_names = frozenset()
+
+
+@pytest.fixture(autouse=True)
 def _reset_ladder_policy() -> Iterator[None]:
     """Elsinore Phase 4 (`push/policy_settings.py`) made `ladder_policy.TABLE`
     and `ladder_policy.ZONE_OVERRIDES` mutable, process-wide globals so the

@@ -9,7 +9,7 @@ Replay a window live (publishes to the broker; BOTH sidecar instances will
 consume it — only the one holding the phone's registration pushes):
     python tools/replay_capture.py --from "2026-08-14 10:15" --to "2026-08-14 10:20" \
         [--camera garden] [--speed 4] [--capture PATH] \
-        --mqtt-host 192.168.50.111 --mqtt-username frigate
+        --mqtt-host nvr.example.lan --mqtt-username frigate
 
 MQTT password comes from MARCELLUS_PUSH__MQTT_PASSWORD. Timestamps are
 local time ("YYYY-MM-DD HH:MM[:SS]") or raw epoch floats.

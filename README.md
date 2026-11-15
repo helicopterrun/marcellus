@@ -20,11 +20,15 @@ It adds:
   whether it becomes an APNs card, a Live Activity, or just a logged decision.
   Off by default.
 
+Elsinore works with Frigate alone; Marcellus is optional and unlocks alerts and
+Live Activities, Encounters, the scrub reel and People.
+
 Runs as a single Docker container next to Frigate, bind-mounting Frigate's
 `config.yml` and `frigate.db` read-only and writing its own SQLite DB.
 
 Actively developed and running in production alongside one Frigate 0.17
-deployment, with the Elsinore iOS app as its main client. It is still a
+deployment, with the Elsinore iOS app as its main client (Marcellus is optional
+for Elsinore). It is still a
 single-deployment project at heart, so expect portability rough edges.
 
 ### Tested Frigate versions
@@ -32,7 +36,7 @@ single-deployment project at heart, so expect portability rough edges.
 | Frigate | Fixture tests (CI) | Verified on a live server |
 |---|---|---|
 | 0.17.2 | yes | yes |
-| 0.18.2 | yes | not yet |
+| 0.18.2 | yes | read-only checks only (no production run) |
 
 Marcellus reads Frigate's database and API directly. CI runs its read paths and
 API calls against schema and route fixtures generated from each release's
@@ -49,6 +53,11 @@ Uses Docker when available, otherwise a venv plus systemd unit, and prompts for
 your Frigate URLs and paths. Re-run it to upgrade. Requirements, manual Docker
 Compose and systemd installs, and upgrade notes are in the
 [deployment guide](https://helicopterrun.github.io/marcellus/guide/deployment/).
+
+Note: v0.3.0 was published as `ghcr.io/helicopterrun/frigate-sidecar` before the
+rename. That image is frozen at 0.3; the current image is
+`ghcr.io/helicopterrun/marcellus`. Marcellus is not published to PyPI: install
+with Docker or `install.sh`.
 
 ### Verify the image
 

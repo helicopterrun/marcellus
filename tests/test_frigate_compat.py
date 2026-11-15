@@ -583,28 +583,9 @@ async def test_motion_trace_at_fetch_scale(version: str) -> None:
     assert await _aggregate(version, start, start + 900, 300) == [100.0, 0.0, 50.0]
 
 
-@pytest.mark.parametrize(
-    "motion_version",
-    [
-        "v0.17.2",
-        pytest.param(
-            "v0.18.2",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason=(
-                    "0.18 drops zero-motion gap buckets from /api/review/activity/motion, "
-                    "and aggregate_motion averages only the points it gets, so a /v1/motion "
-                    "bucket wider than 300 s reads higher than on 0.17 (75 vs 50 here). "
-                    "Fix needs a decision: treat missing fetch buckets as zero motion "
-                    "(see docs/frigate-compatibility.md)."
-                ),
-            ),
-        ),
-    ],
-)
-async def test_coarse_motion_trace_is_version_independent(motion_version: str) -> None:
+async def test_coarse_motion_trace_is_version_independent(version: str) -> None:
     start = 1_780_000_200.0
-    assert await _aggregate(motion_version, start, start + 900, 900) == [50.0]
+    assert await _aggregate(version, start, start + 900, 900) == [50.0]
 
 
 # -- HTTP: exports (proxied for the app) --------------------------------------
@@ -745,7 +726,10 @@ def test_zone_config_shapes(version: str, tmp_path: Path) -> None:
         ]
     cfg.write_text("\n".join(lines) + "\n")
     zones = load_camera_zones(cfg)[CAMERA]
+    # A disabled zone (0.18) is dropped at load; it is kept only on request.
+    assert {z["name"] for z in zones} == {"walkway", "porch"}
+    everything = load_camera_zones(cfg, include_disabled=True)[CAMERA]
     expected = {"walkway", "porch"} | ({"garden"} if version >= "v0.18" else set())
-    assert {z["name"] for z in zones} == expected
+    assert {z["name"] for z in everything} == expected
     # A box whose bottom-centre (0.45, 0.8) sits inside every polygon.
     assert zones_containing_box(zones, [0.40, 0.50, 0.10, 0.30]) == {"walkway", "porch"}

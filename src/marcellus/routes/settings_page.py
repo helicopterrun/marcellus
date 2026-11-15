@@ -16,6 +16,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from marcellus import __version__, db
+from marcellus import zones as zones_mod
 from marcellus.push import policy_settings, store
 from marcellus.routes import scrub as scrub_routes
 from marcellus.routes.tuning import _sections as _tuning_sections
@@ -144,7 +145,7 @@ def _ladder_matrix() -> dict[str, Any]:
             "label": _level_label(lvl),
         }
         for zone, per_subject in zone_overrides.items()
-        if isinstance(per_subject, dict)
+        if isinstance(per_subject, dict) and not zones_mod.is_disabled(zone)
         for subj, lvl in per_subject.items()
     ]
     return {
