@@ -161,7 +161,7 @@ CREATE TABLE IF NOT EXISTS push_devices (
     schema_version INTEGER NOT NULL DEFAULT 1,
     timezone     TEXT NOT NULL DEFAULT '',
     location     TEXT,                        -- JSON {"lat":…,"lon":…}; NULL = not shared
-    situations   TEXT NOT NULL DEFAULT '[]',  -- DEAD: retired, never read or written; kept (no DROP COLUMN)
+    situations   TEXT NOT NULL DEFAULT '[]',  -- DEAD: retired, unread; no DROP COLUMN
     -- Accepted and persisted, deliberately unread this phase (Phase 2/4).
     live_activity_token TEXT NOT NULL DEFAULT '',
     morning_digest TEXT,                      -- JSON
