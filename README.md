@@ -36,7 +36,7 @@ single-deployment project at heart, so expect portability rough edges.
 | Frigate | Fixture tests (CI) | Verified on a live server |
 |---|---|---|
 | 0.17.2 | yes | yes |
-| 0.18.2 | yes | not yet |
+| 0.18.2 | yes | read-only checks only (no production run) |
 
 Marcellus reads Frigate's database and API directly. CI runs its read paths and
 API calls against schema and route fixtures generated from each release's

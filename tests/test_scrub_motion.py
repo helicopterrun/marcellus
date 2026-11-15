@@ -56,3 +56,36 @@ def test_missing_fetch_buckets_count_as_zero_motion() -> None:
     assert aggregate_motion(points, start, start + 900, 900.0) == [75.0]
     # Fully-empty answer stays zero.
     assert aggregate_motion([], start, start + 900, 900.0, 300.0) == [0.0]
+
+
+def test_comma_joined_camera_field_is_ignored_by_parsing() -> None:
+    """Frigate returns `camera: "a,b"` for multi-camera queries; only
+    start_time and motion are read."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import httpx
+
+    from marcellus.routes import scrub as scrub_routes
+
+    rows = [
+        {"start_time": 1000.0, "motion": 40.0, "camera": "a,b"},
+        {"start_time": 1300.0, "motion": 0, "camera": "a,b"},
+    ]
+
+    async def run() -> list[float]:
+        transport = httpx.MockTransport(lambda r: httpx.Response(200, json=rows))
+        async with httpx.AsyncClient(transport=transport) as http:
+            request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+                http_client=http,
+                settings=SimpleNamespace(
+                    frigate=SimpleNamespace(base_url="http://frigate.test:5000")
+                ),
+            )))
+            values, _ = await scrub_routes._fetch_and_aggregate_motion(
+                request, "a", 1000.0, 1900.0, 900.0  # type: ignore[arg-type]
+            )
+            return values
+
+    # present 40 and explicit 0, missing third bucket counts as 0 -> mean 13.33
+    assert round(asyncio.run(run())[0], 2) == 13.33

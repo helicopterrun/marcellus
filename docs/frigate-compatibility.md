@@ -12,7 +12,7 @@ and which Frigate releases they are checked against.
 | Frigate | Fixture tests (CI) | Live server |
 |---|---|---|
 | 0.17.2 | yes | yes, the reference deployment |
-| 0.18.2 | yes | no |
+| 0.18.2 | yes | read-only checks only |
 
 **Fixture tests** run in the normal `pytest` job (`tests/test_frigate_compat.py`),
 once per version, against fixtures generated from that release's upstream
@@ -32,7 +32,7 @@ source by `tools/frigate_schema_fixture.py`:
 
 **Live server** means a running Frigate of that version has served a
 production Marcellus. Only 0.17 has done so. A 0.18 deployment is covered by the
-fixtures and the source review below, but has not been run live.
+fixtures and the source review below, but has not served a production Marcellus. 0.18.2 has also been checked read-only against a live server: the schema of `event`, `reviewsegment`, `recordings`, `export`, `exportcase`, `timeline`, `user` and `previews` matched the fixture; export create answered 202; `DELETE /api/export/{id}` is gone; and the go2rtc HLS playlist path under `/api/go2rtc` is gone. Write paths were not exercised live.
 
 To add a release, run the generator for the new tag (its docstring has the
 command), add the tag to `FRIGATE_VERSIONS` in the test module, and update
@@ -52,7 +52,7 @@ notes, at tags `v0.17.2` and `v0.18.2`.
 | `recordings` table | Migration 035 adds `motion_heatmap TEXT NULL`. | Compatible (column unread) |
 | `export` / `exportcase` | Migration 034 adds `export.export_case_id`, and migration 033 adds the new `exportcase` table. | Not read |
 | `PUT /api/config/set` | Body gains an optional `skip_save`. Writes now hold a file lock and return **503** while it is held. Validation errors return 400 with a message. | Compatible. Any non-200 already raises `FrigateAPIError` |
-| `GET /api/review/activity/motion` | Zero-motion gap buckets are now **dropped**. In 0.17 they were returned as `motion: 0, camera: ""`. | **Fixed**: a fetch bucket with no point now counts as zero motion (see "Resolved decisions") |
+| `GET /api/review/activity/motion` | Zero-motion gap buckets are now **dropped**. In 0.17 they were returned as `motion: 0, camera: ""`. | **Fixed**: a fetch bucket with no point now counts as zero motion (see "Resolved decisions"). Measured on 0.18.2: buckets with no recordings are omitted, buckets with recordings and no motion still come back as `motion: 0` (used as is), `camera` is a comma-joined list with `cameras=all` (unread), and a fractional `scale` returns 422 `int_parsing` |
 | `GET /api/stats` | Non-admin callers get per-camera filtering and `cmdline` stripped. | Compatible: the sidecar calls the internal port, which is treated as admin |
 | `GET /api/events/{id}/snapshot.jpg` | Rendered from the clean WebP. Omitted query params now default to the camera's `snapshots` config, and the response adds an `X-Frame-Time` header. | Compatible (sends only `bbox` and `height`) |
 | `POST /api/events/{id}/plus`, `PUT …/false_positive` | Plus calls moved to a thread pool. The 400 text is now "Unable to find clean snapshot". | Compatible |
@@ -62,7 +62,7 @@ notes, at tags `v0.17.2` and `v0.18.2`.
 | `frigate/available` (MQTT) | On a clean shutdown 0.18 publishes a retained **`stopped`**. | **Was broken, now fixed**: it was read as online |
 | `config.yml` zones | Zones gain `enabled` (default true). `coordinates` may be a string or a list in both releases. | **Fixed**: list-form coordinates were dropped, and disabled zones were still used (now dropped everywhere) |
 | `config.yml` masks, genai, `snapshots.clean_copy`, `record.sync_recordings` / `export.timelapse_args` | The 0.18 config migrator rewrites or removes these keys. | Not read |
-| Exports (`/api/export…`) | `DELETE /api/export/{id}` is **removed**; use `POST /api/exports/delete {"ids": [...]}`. `POST /api/export/{camera}/start/{s}/end/{e}` drops `playback` (ignored, so timelapse needs the new `/export/custom/…` endpoint), returns **202** with `status: "queued"`, and can return 503 when the queue is full. `GET /api/exports` rows gain `export_case_id`. | The sidecar never calls these; it proxies them unchanged for clients. Client callers must adapt |
+| Exports (`/api/export…`) | `DELETE /api/export/{id}` is **removed**; use `POST /api/exports/delete {"ids": [...]}`. `POST /api/export/{camera}/start/{s}/end/{e}` drops `playback` (ignored, so timelapse needs the new `/export/custom/…` endpoint), returns **202** with `status: "queued"`, and can return 503 when the queue is full. `GET /api/exports` rows are id, camera, name, date, video_path, thumb_path, in_progress and `export_case` (null when unset; measured live on 0.18.2, not `export_case_id`). | The sidecar never calls these; it proxies them unchanged for clients. Client callers must adapt |
 
 ## Resolved decisions
 
