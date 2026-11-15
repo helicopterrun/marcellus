@@ -184,6 +184,6 @@ def test_capabilities_reports_push_disabled_by_default(client: TestClient) -> No
     assert r.status_code == 200
     body = r.json()["push"]
     assert body["enabled"] is False
-    assert body["transport"] == "mock"
+    assert body["transport"] == "auto"
     # attention_subjects rides along regardless of enabled state.
     assert "package" in body["attention_subjects"]

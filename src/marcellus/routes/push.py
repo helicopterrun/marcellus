@@ -21,12 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from marcellus import db
 from marcellus.push import card_store, decision_trace, library, policy_settings, store
 from marcellus.push import receipts as receipts_store
-<<<<<<< HEAD
-from marcellus.push.transport import RELAY_HEALTH
-=======
-from marcellus.push.situations import Situation
 from marcellus.push.transport import RELAY_HEALTH, effective_transport
->>>>>>> 05ef6ff (Default push transport auto, -full Docker image with face recognition, relay credential guide)
 
 logger = logging.getLogger(__name__)
 
