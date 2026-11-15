@@ -12,7 +12,6 @@ an app, or a broker:
 
 * `Situation` -- the §8 schema object, parsed and defaulted.
 * `TrackStore` -- per-track state, the only way to derive loiter (see below).
-* `evaluate_device` -- which of a device's situations a review message fires.
 
 **Why loiter needs state.** `frigate/reviews` carries no per-zone dwell
 duration on the wire (plan §8, "Per-track state"); a review message says
@@ -634,38 +633,3 @@ def _first_match(wanted: tuple[str, ...], present: tuple[str, ...]) -> str | Non
         if value in wanted:
             return value
     return None
-
-
-def evaluate_device(
-    device: Device,
-    event: ReviewEvent,
-    tracks: TrackStore,
-    *,
-    now: float,
-    tiers: tuple[str, ...] = ("interrupt",),
-) -> list[Match]:
-    """Every situation of `device` that fires an *alert* for `event`.
-
-    A review item can carry several tracked objects; each is evaluated
-    separately so two people arriving 30s apart become two notifications
-    rather than one collapsed blur (they have distinct track ids, hence
-    distinct collapse ids).
-
-    `tiers` defaults to interrupt-only, which is the alert path. Present-tier
-    situations are normally driven by the Live Activity state machine instead
-    -- but a device with no push-to-start token has no activity to drive, and
-    the engine passes `("interrupt", "present")` to fall those back onto this
-    path (Phase 2 handoff item 9, "the app works without Phase 2").
-    """
-    found: list[Match] = []
-    track_ids = event.track_ids or (event.review_id,)
-    for situation in device.situations:
-        if situation.tier not in tiers:
-            continue
-        for track_id in track_ids:
-            if tracks.has_fired(event.camera, track_id, device.apns_token, situation.id):
-                continue
-            hit = matches(situation, device, event, track_id, tracks, now=now)
-            if hit is not None:
-                found.append(hit)
-    return found

@@ -88,14 +88,9 @@ def test_v2_registration_accepts_the_full_section_8_record(client: TestClient) -
     )
     assert r.status_code == 200
     assert r.json()["schema_version"] == 2
-    assert r.json()["situations_accepted"] == 1
+    # Retired: the old `situations` key is accepted and ignored.
+    assert r.json()["situations_accepted"] == 0
 
-
-def test_registration_reports_situations_it_could_not_parse(client: TestClient) -> None:
-    """A rule the sidecar silently discarded would look enabled in the app
-    and never fire."""
-    r = _register(client, situations=[AT_THE_DOOR, {"name": "no id here"}])
-    assert r.json()["situations_accepted"] == 1
 
 
 def test_unknown_fields_do_not_422(client: TestClient) -> None:
@@ -149,7 +144,8 @@ def test_starter_library_round_trips_into_a_registration(client: TestClient) -> 
     the app enables a starter with one tap and edits its zones."""
     starters = client.get("/v1/push/situations/library").json()
     r = _register(client, situations=starters)
-    assert r.json()["situations_accepted"] == len(starters)
+    assert r.status_code == 200
+    assert r.json()["situations_accepted"] == 0
 
 
 def test_starter_sounds_all_exist_in_the_catalog(client: TestClient) -> None:
@@ -221,35 +217,10 @@ def test_unsnoozing_something_never_snoozed_is_still_200(client: TestClient) -> 
 # -- per-situation test push -------------------------------------------------
 
 
-def test_situation_test_push_fires_the_real_shape(client: TestClient) -> None:
-    _register(client, situations=[AT_THE_DOOR])
-    r = client.post("/v1/push/test/at-the-door", json={"apns_token": TOKEN})
-    assert r.status_code == 200
-    assert r.json() == {"sent": True, "situation_id": "at-the-door"}
-
-    transport = client.app.state.push_engine.transport
-    payload = transport.sent[-1]["payload"]
-    assert payload["situation_id"] == "at-the-door"
-    assert payload["aps"]["category"] == "situation.at-the-door"
-    assert payload["handle"].startswith("h_")
 
 
-def test_situation_test_does_not_spend_the_hourly_budget(
-    client: TestClient, sidecar_db_path: Path
-) -> None:
-    _register(client, situations=[AT_THE_DOOR])
-    for _ in range(3):
-        client.post("/v1/push/test/at-the-door", json={"apns_token": TOKEN})
-    conn = db.open_sidecar(sidecar_db_path)
-    assert store.count_sends_since(
-        conn, apns_token=TOKEN, situation_id="at-the-door", since=0
-    ) == 0
-    conn.close()
-
-
-def test_situation_test_for_unregistered_situation_is_404(client: TestClient) -> None:
-    """Falling back to the starter library would test a rule the device isn't
-    registered with."""
+def test_situation_test_is_a_retired_404(client: TestClient) -> None:
+    """Situations are retired: no device has one, so the test button 404s."""
     _register(client, situations=[AT_THE_DOOR])
     r = client.post("/v1/push/test/near-my-car", json={"apns_token": TOKEN})
     assert r.status_code == 404
@@ -260,22 +231,6 @@ def test_situation_test_for_unknown_device_is_404(client: TestClient) -> None:
     r = client.post("/v1/push/test/at-the-door", json={"apns_token": "nope"})
     assert r.status_code == 404
     assert r.json()["detail"]["error"] == "device_not_found"
-
-
-def test_situation_test_with_push_disabled_is_503(
-    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path
-) -> None:
-    """503, never 404: the released client reads a 404 on the test path as
-    "this server is too old", which would be the wrong story entirely."""
-    app = create_app(_settings(frigate_db_path, sidecar_db_path, tmp_path))
-    plain = TestClient(app)  # no push_engine on app.state
-    plain.put(
-        f"/v1/push/devices/{TOKEN}",
-        json={"bundle_id": "com.x", "environment": "sandbox", "situations": [AT_THE_DOOR]},
-    )
-    r = plain.post("/v1/push/test/at-the-door", json={"apns_token": TOKEN})
-    assert r.status_code == 503
-    assert r.json()["detail"]["error"] == "push_disabled"
 
 
 # -- thumbnail ---------------------------------------------------------------
@@ -357,7 +312,7 @@ def test_unknown_registration_fields_are_logged_not_swallowed(
     assert "\"a\": 1" not in caplog.text
 
 
-def test_registration_with_empty_situations_logs_v1_mode(
+def test_registration_logs_schema_version_at_info(
     client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A `schema_version=2` registration with no situations is legitimate
@@ -369,40 +324,13 @@ def test_registration_with_empty_situations_logs_v1_mode(
         r = _register(client, schema_version=2, cameras=["doorbell"])
     assert r.status_code == 200
     assert f"apns_token={TOKEN[:8]}" in caplog.text
-    assert "uses_situations=False" in caplog.text
+    assert "schema_version=2" in caplog.text
     for record in caplog.records:
         assert record.levelno == logging.INFO
     # Never a full token.
     assert TOKEN not in caplog.text
 
 
-def test_registration_with_situations_logs_situation_mode(
-    client: TestClient, caplog: pytest.LogCaptureFixture
-) -> None:
-    import logging
-
-    with caplog.at_level(logging.INFO, logger="marcellus.routes.push"):
-        r = _register(client, schema_version=2, situations=[AT_THE_DOOR])
-    assert r.status_code == 200
-    assert f"apns_token={TOKEN[:8]}" in caplog.text
-    assert "uses_situations=True" in caplog.text
-    assert TOKEN not in caplog.text
-
-
-def test_reregistration_flipping_situations_logs_the_transition(
-    client: TestClient, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The edge that actually matters: a device silently moving from
-    situation matching to v1 (or back) must be traceable without a live
-    repro -- this is the line Thread A's four-hour trace needed."""
-    import logging
-
-    _register(client, schema_version=2, situations=[AT_THE_DOOR])
-    with caplog.at_level(logging.INFO, logger="marcellus.routes.push"):
-        r = _register(client, schema_version=2, situations=[])
-    assert r.status_code == 200
-    assert "transitioned uses_situations True -> False" in caplog.text
-    assert TOKEN not in caplog.text
 
 
 def test_at_the_door_is_a_present_tier_starter_that_escalates(client: TestClient) -> None:
@@ -428,3 +356,18 @@ def test_every_present_starter_declares_how_it_escalates_or_stays_quiet(
     assert {k for k, v in lib.items() if v["tier"] == "present"} == {
         "at-the-door", "package-delivery", "unknown-vehicle-parked",
     }
+
+
+def test_registration_without_situations_key_still_works(client: TestClient) -> None:
+    """New app builds do not send `situations` at all."""
+    r = _register(client, cameras=["doorbell"])
+    assert r.status_code == 200
+    assert r.json()["registered"] is True
+
+
+def test_situations_are_not_stored(client: TestClient, sidecar_db_path: Path) -> None:
+    _register(client, situations=[AT_THE_DOOR])
+    conn = db.open_sidecar(sidecar_db_path)
+    row = conn.execute("SELECT situations FROM push_devices").fetchone()
+    conn.close()
+    assert row["situations"] == "[]"

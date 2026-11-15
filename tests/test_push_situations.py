@@ -9,26 +9,18 @@ annoying, and the situation model exists to make the silent cases silent.
 from __future__ import annotations
 
 from marcellus.push.decision import parse_object_message, parse_review_message
-from marcellus.push.models import Device, ReviewEvent
+from marcellus.push.models import ReviewEvent
 from marcellus.push.situations import (
     COLLAPSE_ID_MAX_BYTES,
     Match,
     Situation,
     TrackStore,
     build_collapse_id,
-    evaluate_device,
     in_time_window,
     parse_situations,
 )
 
 NOW = 1_785_000_000.0
-
-
-def _device(*situations: Situation, timezone: str = "") -> Device:
-    return Device(
-        apns_token="tok1", device_id="d_1", bundle_id="com.x", environment="sandbox",
-        situations=situations, timezone=timezone, schema_version=2,
-    )
 
 
 def _event(**kw) -> ReviewEvent:
@@ -95,112 +87,6 @@ def test_unknown_tier_falls_back_to_interrupt() -> None:
 
 
 # -- what fires and what doesn't --------------------------------------------
-
-
-def test_person_dwelling_past_threshold_fires_once() -> None:
-    device = _device(AT_THE_DOOR)
-    tracks = _tracks_in_zone("doorbell", "t1", "porch", since=NOW)
-    event = _event()
-
-    assert evaluate_device(device, event, tracks, now=NOW + 4) == []
-    hits = evaluate_device(device, event, tracks, now=NOW + 6)
-    assert len(hits) == 1
-    assert hits[0].situation.id == "at-the-door"
-    assert hits[0].collapse_id == "at-the-door:t1"
-    assert 5.9 < hits[0].dwell_s < 6.1
-
-    # Handoff item 9: the same dwell must not fire twice.
-    tracks.mark_fired("doorbell", "t1", device.apns_token, "at-the-door")
-    assert evaluate_device(device, event, tracks, now=NOW + 9) == []
-
-
-def test_motion_on_a_camera_no_situation_covers_is_silent() -> None:
-    device = _device(AT_THE_DOOR)
-    tracks = _tracks_in_zone("garden", "t1", "lawn", since=NOW - 60)
-    event = _event(camera="garden", zones=("lawn",))
-    assert evaluate_device(device, event, tracks, now=NOW) == []
-
-
-def test_person_outside_the_zone_is_silent() -> None:
-    """Matches camera and label, never enters the zone -- the sidewalk case."""
-    device = _device(AT_THE_DOOR)
-    tracks = _tracks_in_zone("doorbell", "t1", "sidewalk", since=NOW - 60)
-    event = _event(zones=("sidewalk",))
-    assert evaluate_device(device, event, tracks, now=NOW) == []
-
-
-def test_person_who_left_the_zone_is_silent_even_though_review_still_lists_it() -> None:
-    """The walk-through: in the porch zone briefly, gone before the threshold.
-
-    `review.data.zones` is cumulative and still says "porch" -- it is the live
-    occupancy from `frigate/events` that knows better.
-    """
-    device = _device(AT_THE_DOOR)
-    tracks = TrackStore()
-    tracks.observe_object("doorbell", "t1", ("porch",), now=NOW)
-    tracks.observe_object("doorbell", "t1", (), now=NOW + 2)  # stepped out
-    event = _event()  # review still reports zones=("porch",)
-    assert evaluate_device(device, event, tracks, now=NOW + 10) == []
-
-
-def test_re_entering_the_zone_restarts_the_dwell() -> None:
-    device = _device(AT_THE_DOOR)
-    tracks = TrackStore()
-    tracks.observe_object("doorbell", "t1", ("porch",), now=NOW)
-    tracks.observe_object("doorbell", "t1", (), now=NOW + 4)
-    tracks.observe_object("doorbell", "t1", ("porch",), now=NOW + 6)
-    event = _event()
-    # 4s of the first visit plus 3s of the second is not 5s of standing there.
-    assert evaluate_device(device, event, tracks, now=NOW + 9) == []
-    assert evaluate_device(device, event, tracks, now=NOW + 12) != []
-
-
-def test_two_people_are_two_notifications() -> None:
-    device = _device(AT_THE_DOOR)
-    tracks = TrackStore()
-    tracks.observe_object("doorbell", "t1", ("porch",), now=NOW)
-    tracks.observe_object("doorbell", "t2", ("porch",), now=NOW)
-    event = _event(track_ids=("t1", "t2"))
-    hits = evaluate_device(device, event, tracks, now=NOW + 6)
-    assert {h.track_id for h in hits} == {"t1", "t2"}
-    # Distinct collapse ids, so iOS shows two things and not one replaced twice.
-    assert len({h.collapse_id for h in hits}) == 2
-
-
-def test_wrong_label_is_silent() -> None:
-    device = _device(AT_THE_DOOR)
-    tracks = _tracks_in_zone("doorbell", "t1", "porch", since=NOW - 60)
-    assert evaluate_device(device, _event(labels=("cat",)), tracks, now=NOW) == []
-
-
-def test_audio_event_fires_without_waiting_for_dwell() -> None:
-    """Plan §1: at-the-door is "person in the porch zone OR doorbell audio"."""
-    device = _device(AT_THE_DOOR)
-    tracks = TrackStore()  # nobody has dwelled anywhere
-    event = _event(zones=(), audio=("doorbell",))
-    hits = evaluate_device(device, event, tracks, now=NOW)
-    assert len(hits) == 1 and hits[0].audio == "doorbell"
-
-
-def test_present_and_ambient_tiers_do_not_push_in_phase_1() -> None:
-    """Their delivery surfaces are Live Activities and widgets -- Phase 2/3."""
-    present = Situation(id="package", name="Package", tier="present", labels=("person",))
-    ambient = Situation(id="quiet", name="Quiet", tier="ambient", labels=("person",))
-    device = _device(present, ambient)
-    tracks = _tracks_in_zone("doorbell", "t1", "porch", since=NOW - 60)
-    assert evaluate_device(device, _event(), tracks, now=NOW) == []
-
-
-def test_zoneless_situation_uses_camera_level_dwell() -> None:
-    anywhere = Situation(id="any", name="Any", cameras=("doorbell",), loiter_seconds=3.0)
-    device = _device(anywhere)
-    tracks = TrackStore()
-    tracks.observe_object("doorbell", "t1", (), now=NOW)
-    assert evaluate_device(device, _event(zones=()), tracks, now=NOW + 1) == []
-    assert evaluate_device(device, _event(zones=()), tracks, now=NOW + 4) != []
-
-
-# -- time of day -------------------------------------------------------------
 
 
 def test_time_window_wraps_across_midnight() -> None:

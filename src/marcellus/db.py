@@ -157,14 +157,11 @@ CREATE TABLE IF NOT EXISTS push_devices (
     min_severity TEXT NOT NULL DEFAULT 'alert' CHECK(min_severity IN ('alert','detection')),
     registered_at TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
-    -- v2 registration shape (notification-experience plan §8). An empty or
-    -- absent `situations` keeps the device on the v1 camera+label+severity
-    -- path unchanged; a non-empty one switches it to situation-only
-    -- evaluation. `schema_version` makes which of the two unambiguous.
+    -- v2 registration shape (notification-experience plan §8).
     schema_version INTEGER NOT NULL DEFAULT 1,
     timezone     TEXT NOT NULL DEFAULT '',
     location     TEXT,                        -- JSON {"lat":…,"lon":…}; NULL = not shared
-    situations   TEXT NOT NULL DEFAULT '[]',  -- JSON list of situation objects
+    situations   TEXT NOT NULL DEFAULT '[]',  -- DEAD: retired, never read or written; kept (no DROP COLUMN)
     -- Accepted and persisted, deliberately unread this phase (Phase 2/4).
     live_activity_token TEXT NOT NULL DEFAULT '',
     morning_digest TEXT,                      -- JSON
@@ -976,7 +973,7 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("schema_version", "INTEGER NOT NULL DEFAULT 1"),
         ("timezone", "TEXT NOT NULL DEFAULT ''"),
         ("location", "TEXT"),  # JSON {"lat":…, "lon":…}; NULL = not shared
-        ("situations", "TEXT NOT NULL DEFAULT '[]'"),  # JSON list
+        ("situations", "TEXT NOT NULL DEFAULT '[]'"),  # DEAD: retired, unread/unwritten
         ("live_activity_token", "TEXT NOT NULL DEFAULT ''"),  # Phase 2
         ("morning_digest", "TEXT"),  # JSON; Phase 4
         ("llm", "TEXT"),  # JSON; Phase 4
