@@ -9,6 +9,7 @@ may change behaviour). Numbers are pull requests.
 
 ### Changed
 
+- Guide: new getting-started page "Docker or systemd?" and a "Set up push" page covering the MQTT broker settings and Frigate sign-in.
 - **Frigate 0.18 behaviour decisions.** A motion bucket Frigate leaves out is now
   counted as zero motion, so coarse `/v1/motion` and `/v1/reel` traces read the
   same on 0.17 and 0.18 (0.17 output can shift slightly at window edges).
