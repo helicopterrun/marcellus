@@ -20,8 +20,14 @@ warning logged at startup (see `docs/deployment.md`).
 - Use https:// for port 8971 and decide on frigate.verify_tls (below)
 - Point frigate.db_path at Frigate's frigate.db
 - Start the service and open the Status page
+- Run `fsc doctor` and fix every line marked as failed
 - Check /healthz shows every component "ok" or "disabled"
 ```
+
+Not sure it is right? Run `fsc doctor`: it checks the Frigate addresses, the
+database and recordings paths, ffmpeg, the scrub cache, push and the running
+service, and prints a one-line fix for anything wrong. See
+[Check your install](/guide/check-your-install).
 
 ## Configuration
 
@@ -194,7 +200,9 @@ error vocabulary are in the Reference section's scrub-cache and proxy spec.
 
 ## If it goes wrong
 
-`/healthz` is the first stop — it reports each subsystem (database, MQTT,
+Run `fsc doctor` first ([Check your install](/guide/check-your-install)): it
+tells you in plain lines what is wrong and what to change. After that,
+`/healthz` is the next stop — it reports each subsystem (database, MQTT,
 scrub cache, face enrichment) with a one-word status. The
 [Troubleshooting](/guide/troubleshooting) chapter maps common symptoms to
 their usual causes.

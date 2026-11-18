@@ -24,6 +24,9 @@ In Docker, run it inside the container, for example
   `--bind-port`, `--non-interactive`, `--force`), then sanity-check Frigate
   reachability, the DB path, and the recordings path. `--output`/`-o`
   chooses where the file is written; it defaults to `config/sidecar.yml`.
+- `fsc doctor` -- check the install and print a one-line fix for anything
+  wrong (`--json`, `--timeout`, `--mqtt-wait`, `--config`, `--no-color`);
+  exits 1 if anything failed. See [Check your install](/guide/check-your-install).
 - `fsc version` -- print the installed version.
 - `fsc backup <dest>` -- back up the sidecar DB, session secret, and resolved
   config to a directory or `.tar.gz` (not scrub cache or face models).

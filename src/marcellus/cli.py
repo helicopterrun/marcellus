@@ -279,6 +279,42 @@ def _check_signin_port(url: str, *, interactive: bool) -> tuple[str, bool, list[
 
 
 @app.command()
+def doctor(
+    config: str | None = typer.Option(
+        None, "--config", "-c", help="Config file to check (default: the one `serve` would use)."
+    ),
+    output_json: bool = typer.Option(
+        False, "--json", help="Print the results as a JSON list of {id, status, detail, fix}."
+    ),
+    timeout: float = typer.Option(
+        5.0, "--timeout", min=0.5, help="Seconds each check may take (default 5)."
+    ),
+    mqtt_wait: float = typer.Option(
+        20.0,
+        "--mqtt-wait",
+        min=0.0,
+        help="Seconds to wait for a message from Frigate on the MQTT broker (default 20).",
+    ),
+    no_color: bool = typer.Option(False, "--no-color", help="Plain output, no colours."),
+) -> None:
+    """Check the install: one line per check, and a one-line fix for anything wrong.
+
+    Read-only. Exits 0 when nothing failed (warnings are fine), 1 otherwise.
+    """
+    from marcellus import doctor as doctor_mod
+
+    raise typer.Exit(
+        code=doctor_mod.run_cli(
+            config,
+            output_json=output_json,
+            timeout=timeout,
+            mqtt_wait=mqtt_wait,
+            color=False if no_color else None,
+        )
+    )
+
+
+@app.command()
 def version() -> None:
     """Print the installed version."""
     typer.echo(__version__)

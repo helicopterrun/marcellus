@@ -217,6 +217,14 @@ async def validate_frigate_session(
 ANONYMOUS_ERROR_TTL_S = 5.0
 
 
+def config_says_signin_off(body: object) -> bool:
+    """True when a Frigate `/api/config` body has `auth.enabled` exactly
+    `false`. A missing key, `true`, or a body that is not a Frigate config all
+    mean no (shared with `marcellus doctor`)."""
+    auth_section = body.get("auth") if isinstance(body, dict) else None
+    return isinstance(auth_section, dict) and auth_section.get("enabled") is False
+
+
 async def frigate_allows_anonymous(app: FastAPI) -> bool:
     """True only when Frigate itself admits callers that carry no session.
 
@@ -299,8 +307,7 @@ async def _check_anonymous_access(app: FastAPI, settings: Settings) -> tuple[boo
         body = resp.json()
     except ValueError:
         return False, ANONYMOUS_ERROR_TTL_S
-    auth_section = body.get("auth") if isinstance(body, dict) else None
-    if not isinstance(auth_section, dict) or auth_section.get("enabled") is not False:
+    if not config_says_signin_off(body):
         return False, ttl_s
     try:
         bare = await client.send(version_req)

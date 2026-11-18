@@ -1608,7 +1608,7 @@ class Settings(BaseSettings):
         would pass -- so it's worth a loud line in the log even though a
         Frigate install with auth disabled is a legitimate configuration.
         """
-        if self.frigate.base_url.rstrip("/") == self.frigate.proxy_base_url.rstrip("/"):
+        if origins_identical(self.frigate.base_url, self.frigate.proxy_base_url):
             logger.warning(
                 "frigate.base_url and frigate.proxy_base_url are identical (%s) -- if that "
                 "origin does not require a Frigate session, the sidecar's own auth check "
@@ -1616,6 +1616,12 @@ class Settings(BaseSettings):
                 self.frigate.base_url,
             )
         return self
+
+
+def origins_identical(base_url: str, proxy_base_url: str) -> bool:
+    """True when `frigate.base_url` and `frigate.proxy_base_url` are the same
+    origin (the startup warning above, and `marcellus doctor`)."""
+    return base_url.rstrip("/") == proxy_base_url.rstrip("/")
 
 
 class _StaticYamlSource(PydanticBaseSettingsSource):
@@ -1645,6 +1651,12 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"{path}: top-level YAML must be a mapping")
     return data
+
+
+def discover_config_path(explicit: str | os.PathLike[str] | None = None) -> Path | None:
+    """The YAML file `load_settings` reads: `explicit`, else `MARCELLUS_CONFIG`,
+    else the first of `DEFAULT_CONFIG_PATHS` that exists, else None."""
+    return _discover_yaml_path(explicit)
 
 
 def _discover_yaml_path(explicit: str | os.PathLike[str] | None) -> Path | None:

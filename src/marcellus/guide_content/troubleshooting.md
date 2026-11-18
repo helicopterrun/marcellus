@@ -7,6 +7,11 @@ routes: ["/debug", "/toybox", "/login", "/login/diagnosis"]
 
 ## First stops
 
+- `fsc doctor` ([Check your install](/guide/check-your-install)) -- run this
+  first. It checks the Frigate addresses, certificates, the database and
+  recordings paths, ffmpeg, the scrub cache, push and the service, and
+  prints a one-line fix for anything wrong, so you rarely need to read the
+  `/healthz` JSON yourself.
 - [`/healthz`](/healthz) -- one line per component, and the status table
   below. Workers report **staleness**, so a wedged loop shows up even while
   the process lives. Any check going bad returns HTTP 503 instead of 200,

@@ -7,6 +7,16 @@ may change behaviour). Numbers are pull requests.
 
 ## [Unreleased]
 
+### Added
+
+- `marcellus doctor` (also `fsc doctor`): a read-only checklist of the config,
+  both Frigate addresses (including the untrusted-certificate and
+  http-to-an-https-port diagnoses), Frigate's database and recordings paths,
+  the scrub cache, ffmpeg, MQTT (it waits for a real message from Frigate),
+  the push relay and the running service. One line per check, a one-line fix
+  for anything wrong, exit code 1 on a failure; `--json` gives a stable list
+  for scripts. A new guide page, "Check your install", explains it.
+
 ## [0.5.0] - 2026-11-18
 
 ### Upgrade notes
