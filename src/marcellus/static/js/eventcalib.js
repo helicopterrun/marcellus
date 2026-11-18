@@ -19,8 +19,11 @@
   var state = null;
 
   function frameUrl(camera, ts) {
+    // segment_clock=1: the server adds the recording segment's own sub-second
+    // start error, so the dialled offset is the constant the sidecar applies
+    // on top of that correction (a no-op when the correction is off).
     return "/analysis/annotation-offset/frame/" + encodeURIComponent(camera)
-      + "?ts=" + ts.toFixed(3);
+      + "?ts=" + ts.toFixed(3) + "&segment_clock=1";
   }
 
   function snapshotUrl(id) {

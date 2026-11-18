@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from marcellus import db
-from marcellus.analysis.clock_offset import event_clock_offset_s
+from marcellus.analysis.clock_offset import event_clock_shift
 from marcellus.config import Settings
 from marcellus.encounters import notability, store
 from marcellus.encounters.adjacency import Adjacency
@@ -331,10 +331,12 @@ class EncounterService:
 
     def _atom_from_review_row(self, row: sqlite3.Row) -> Atom:
         camera = str(row["camera"])
-        offset_s = event_clock_offset_s(self.settings, camera)
+        # The same shift the scrub reel applies (constant + segment clock),
+        # so a linked encounter and the reel bar it opens agree.
+        shift = event_clock_shift(self.settings, camera)
         data = _review_data(row["data"])
-        start_time = float(row["start_time"]) + offset_s
-        end_time = float(row["end_time"]) + offset_s if row["end_time"] is not None else None
+        start_time = shift.shift(float(row["start_time"]))
+        end_time = shift.shift(float(row["end_time"])) if row["end_time"] is not None else None
         raw_sub_labels = _strings(data.get("sub_labels"))
         labels, qualifiers = normalise_labels(_strings(data.get("objects")))
         sub_labels = raw_sub_labels + tuple(q for q in qualifiers if q not in raw_sub_labels)

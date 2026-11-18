@@ -57,6 +57,25 @@ the sidecar's own knobs in one place.
   Frigate's next start: calibrate as many cameras as you like, then press
   **Restart Frigate to apply** once (~30 s of blind cameras). Worth doing once at setup and again if
   a camera is replaced or its streams reconfigured.
+
+  The offset is not the whole story. Frigate names each ten-second recording
+  segment after the whole second its file was opened, so the footage inside
+  starts up to a second later, and that fraction creeps through the second
+  as the camera's clock drifts against the server's (on the reference
+  install, one sweep every few hours). With `scrub.segment_clock_correction`
+  on (the default) the sidecar works the fraction out for every segment from
+  Frigate's recordings table — wherever a segment's name rolled over to the
+  next second, its neighbours pin it to about a tenth of a second — and
+  shifts each event by the camera's offset **plus** `0.5 s − fraction`.
+  Measured on the reference install, the spread of per-event alignment fell
+  from 0.24–0.35 s to 0.03–0.09 s (standard deviation). Where no segment can
+  vouch for the fraction (a recording gap, a camera whose clock never drifts,
+  no recordings at all) the extra term is zero and the offset applies alone.
+  The offset keeps its meaning — the shift that is right on average — so
+  values measured before this correction still apply; **Measure cameras** and
+  the calibrator now measure with the correction in place, so a fresh
+  measurement removes whatever small bias the old value had. The estimate
+  per segment is readable at `/analysis/segment-clock?camera=…&ts=…`.
 - **Faces** — a read-only view of the face pipeline configuration.
 - **Tuning** (`/settings#tuning`) — every runtime knob (`GET`/`PUT
   /v1/tuning`), grouped by config section, editable in place. A knob whose
