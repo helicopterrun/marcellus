@@ -74,8 +74,9 @@ through Frigate itself, so the settings must point at the right Frigate ports:
 If Frigate has sign-in turned on (the normal case), leave
 `sidecar.require_frigate_auth` at its default of `true`, then open
 `http://<host>:5001/login` and sign in with a Frigate account. If your Frigate
-has sign-in turned off, set `sidecar.require_frigate_auth: false`, otherwise
-nobody can log in. See [First run](/guide/first-run) for the full list.
+has sign-in turned off, there is nothing to set: Marcellus asks Frigate and
+lets the app in without a login. See [First run](/guide/first-run) for the
+details and what that means for who can reach Marcellus.
 
 ## 5. Connect your phone
 
