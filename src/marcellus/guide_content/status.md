@@ -1,7 +1,7 @@
 ---
 title: Status & live view
 section: getting-started
-order: 4
+order: 5
 routes: ["/", "/cameras", "/live/{camera}"]
 config: ["recording_watch"]
 ---
