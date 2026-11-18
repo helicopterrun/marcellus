@@ -9,6 +9,7 @@ may change behaviour). Numbers are pull requests.
 
 ### Changed
 
+- Installer: re-running `install.sh` on a bare-metal host that still has a pre-rename `frigate-sidecar` install now stops with migration steps instead of creating a second user and unit beside it; nothing is moved or deleted (`ALLOW_LEGACY_COEXIST=1` overrides).
 - **Frigate 0.18 behaviour decisions.** A motion bucket Frigate leaves out is now
   counted as zero motion, so coarse `/v1/motion` and `/v1/reel` traces read the
   same on 0.17 and 0.18 (0.17 output can shift slightly at window edges).

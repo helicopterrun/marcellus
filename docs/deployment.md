@@ -242,13 +242,15 @@ upgrade without a forced cutover:
 - **systemd:** the units, system user, and install/config directories are now
   `marcellus`/`/opt/marcellus`/`/etc/marcellus` instead of
   `frigate-sidecar`/`/opt/frigate-sidecar`/`/etc/frigate-sidecar`. Re-running
-  `install.sh` on an existing bare-metal box creates the new user/paths
-  alongside the old ones rather than migrating them automatically — move your
-  data (`systemctl stop frigate-sidecar`, copy `/opt/frigate-sidecar` to
-  `/opt/marcellus` and `/etc/frigate-sidecar` to `/etc/marcellus`, `chown -R
-  marcellus:`, `systemctl enable --now marcellus`, then remove the old unit
-  and user) or keep running the old unit indefinitely — nothing forces the
-  move.
+  `install.sh` on an existing bare-metal box now detects the old unit or
+  directories and stops with instructions before changing anything (set
+  `ALLOW_LEGACY_COEXIST=1` to install beside the old one anyway). It does not
+  migrate for you: stop the old unit, copy `/opt/frigate-sidecar` to
+  `/opt/marcellus` and `/etc/frigate-sidecar` to `/etc/marcellus`, remove the
+  copied `venv` (the installer rebuilds it), point any path in the copied
+  `sidecar.yml` that still names `/opt/frigate-sidecar` at `/opt/marcellus`,
+  move the old unit file aside, then re-run the installer. Your old
+  directories are never deleted by it.
 - **DB filename:** the sidecar DB is now `marcellus.db` (was
   `frigate-sidecar.db`). `fsc restore` accepts a backup made under either
   name.
