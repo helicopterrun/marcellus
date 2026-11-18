@@ -155,6 +155,11 @@ recording_watch:
 scrub:
   enabled: false
   cameras: []              # [] = all cameras; else an opt-in list
+  # Correct event times for each recording segment's sub-second start error
+  # (Frigate names segments after whole seconds; the footage starts 0-1 s
+  # later). Applies to the reel, highlights and encounters even with
+  # enabled: false. false = the plain per-camera offset, as before.
+  segment_clock_correction: true
   # MUST be a separate filesystem from frigate.recordings_path -- the
   # recordings volume was measured at 99% full / 27 GB free on the reference
   # deployment and cannot absorb the cache too (§8.3, hard requirement).

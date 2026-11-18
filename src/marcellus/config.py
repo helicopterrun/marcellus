@@ -600,6 +600,14 @@ class ScrubSection(BaseModel):
 
     enabled: bool = False
     cameras: list[str] = Field(default_factory=list)  # [] = all cameras
+    # Correct event, review and path times for each recording segment's own
+    # sub-second start error (`analysis/segment_clock.py`): Frigate names a
+    # segment after the whole second its file opened, so the footage starts
+    # 0-1 s later and a constant per-camera offset leaves a sawtooth. Measured
+    # on the reference deployment, per-event alignment spread fell from
+    # 0.24-0.35 s to 0.03-0.09 s (standard deviation). Applies whether or not
+    # sheet generation is enabled. Off = exactly the constant offset, as before.
+    segment_clock_correction: bool = True
     cache_dir: Path = Path("/data/scrub")  # MUST be a separate filesystem from
     # frigate.recordings_path -- verified at startup, see routes/scrub.py.
     # Floor on free space (bytes) on the cache filesystem below which the
