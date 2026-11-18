@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from marcellus import __version__, fmt, frigate_api
+from marcellus import __version__, db, fmt, frigate_api
 from marcellus.auth import FrigateAuthMiddleware
 from marcellus.config import Settings, load_settings
 from marcellus.db import FrigateDBMissingError
@@ -442,7 +442,8 @@ async def _activity_sweep_loop(app: FastAPI) -> None:
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("push: activity sweep failed")
+            # Runs again next interval; a busy lock is one line, not a traceback.
+            db.log_db_failure(logger, "push: activity sweep failed")
 
 
 _PROXY_WATCHDOG_INTERVAL_S = 10.0

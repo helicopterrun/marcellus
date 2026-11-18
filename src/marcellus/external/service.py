@@ -400,7 +400,7 @@ class ExternalSourceService:
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("external sources: persisting state failed")
+            db.log_db_failure(logger, "external sources: persisting state failed")
 
     # ----------------------------------------------------------------- health
 

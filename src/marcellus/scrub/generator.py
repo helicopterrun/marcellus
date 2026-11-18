@@ -42,6 +42,26 @@ from marcellus.scrub.stats import CycleStats
 
 logger = logging.getLogger(__name__)
 
+#: Busy wait for the generation cycle's connection. The cycle runs on its own
+#: thread and event loop (`server.run_in_worker_loop`), so waiting out another
+#: writer's commit costs only this cycle's time; failing instead throws away the
+#: camera's decode work for the tick. The request-path default stays at 3 s.
+SCRUB_BUSY_TIMEOUT_MS = 10_000
+
+
+def _camera_failed(
+    conn: sqlite3.Connection, what: str, camera: str, totals: dict[str, dict[str, Any]]
+) -> None:
+    """A per-camera pass raised: free the shared connection, log, carry on.
+
+    The rollback is what keeps one failure from becoming the rest of the cycle's
+    (`db.rollback_quietly`); a busy lock logs one line, anything else its
+    traceback. Call from inside the `except` block.
+    """
+    db.rollback_quietly(conn)
+    db.log_db_failure(logger, "scrub: %s failed for camera %s", what, camera)
+    totals[camera]["error"] = True
+
 # GOP-vs-interval tolerance for choosing keyframe-only decode over full-decode
 # fps fallback (§5.2): if the measured GOP is within this factor of the target
 # interval, keyframe skipping alone gives a close-enough native cadence to
@@ -1321,10 +1341,14 @@ async def _generate_tiers(
                         try:
                             accepted = await dw.feed(on_grid)
                         except Exception:
-                            logger.warning(
+                            # Same connection as the drive tier: end the failed
+                            # write's transaction or the next write fails too.
+                            db.rollback_quietly(dw.conn)
+                            db.log_db_failure(
+                                logger,
                                 "scrub: feeding derived %gs tier for %s from the live edge "
                                 "failed; Pass 3 will carry on from what it stored",
-                                dw.interval_s, camera, exc_info=True,
+                                dw.interval_s, camera, level=logging.WARNING,
                             )
                             live_derived.remove(dw)
                             continue
@@ -1337,9 +1361,10 @@ async def _generate_tiers(
         try:
             await dw.flush()
         except Exception:
-            logger.warning(
-                "scrub: flushing derived %gs tier for %s failed", dw.interval_s, camera,
-                exc_info=True,
+            db.rollback_quietly(dw.conn)
+            db.log_db_failure(
+                logger, "scrub: flushing derived %gs tier for %s failed", dw.interval_s, camera,
+                level=logging.WARNING,
             )
     if fed is not None:
         # Anything this far behind the tier's frontier can never match the query
@@ -2430,7 +2455,10 @@ async def generate_cycle(
     profile = profile if profile is not None else SourceProfile()
     profile.stats = stats = CycleStats()
 
-    conn = db.open_joined(settings.frigate.db_path, settings.sidecar.db_path)
+    conn = db.open_joined(
+        settings.frigate.db_path, settings.sidecar.db_path,
+        busy_timeout_ms=SCRUB_BUSY_TIMEOUT_MS,
+    )
     try:
         cameras = list(scrub.cameras) or [
             r["camera"] for r in conn.execute("SELECT DISTINCT camera FROM recordings").fetchall()
@@ -2537,8 +2565,7 @@ async def generate_cycle(
                     min_segments=1 if served_le == 1 else 0,
                 ))
             except Exception:
-                logger.exception("scrub: live edge failed for camera %s", camera)
-                totals[camera]["error"] = True
+                _camera_failed(conn, "live edge", camera, totals)
         profile.live_edge_cursor = start_le + served_le
         stats.pass1_s = _time.monotonic() - pass1_started
         if served_le < len(cameras):
@@ -2589,8 +2616,7 @@ async def generate_cycle(
                     now=now, profile=profile, sem=sem, deadline=backfill_deadline_own,
                 ))
             except Exception:
-                logger.exception("scrub: backfill failed for camera %s", camera)
-                totals[camera]["error"] = True
+                _camera_failed(conn, "backfill", camera, totals)
         profile.backfill_cursor = start + served
         stats.pass2_s = _time.monotonic() - pass2_started
 
@@ -2663,10 +2689,7 @@ async def generate_cycle(
                     stats=stats,
                 )
             except Exception:
-                logger.exception(
-                    "scrub: aged/derived-tier generation failed for camera %s", camera
-                )
-                totals[camera]["error"] = True
+                _camera_failed(conn, "aged/derived-tier generation", camera, totals)
         profile.decimation_cursor = start_d + served_d
         stats.pass3_s = _time.monotonic() - pass3_started
 
@@ -2801,8 +2824,11 @@ def sweep_superseded_versions(
         params,
     ).fetchall()
 
-    removed = 0
-    failures: list[tuple[Path, OSError]] = []
+    # Decide first, then delete the rows in one short transaction, then unlink.
+    # Deleting row by row with each file's stat and unlink in between held the
+    # write lock for the whole sweep (1,300-3,000 versions an hour on
+    # production), and every other writer's busy wait ran against it.
+    victims: list[tuple[Path, tuple[Any, ...]]] = []
     for row in rows:
         path = cache_dir / row["path"]
         if path.exists():
@@ -2814,17 +2840,24 @@ def sweep_superseded_versions(
                 superseded_for = float("inf")
             if superseded_for < grace_s:
                 continue
-        conn.execute(
-            "DELETE FROM scrub_sheets WHERE camera = ? AND start_ts = ? AND interval_s = ? "
-            "AND count = ?",
-            (row["camera"], row["start_ts"], row["interval_s"], row["count"]),
+        victims.append(
+            (path, (row["camera"], row["start_ts"], row["interval_s"], row["count"]))
         )
+    if not victims:
+        return 0
+    conn.executemany(
+        "DELETE FROM scrub_sheets WHERE camera = ? AND start_ts = ? AND interval_s = ? "
+        "AND count = ?",
+        [key for _, key in victims],
+    )
+    conn.commit()
+    # Files go only once their rows are committed, the order the other retire
+    # paths use: a row whose delete failed must not be left pointing at nothing.
+    failures: list[tuple[Path, OSError]] = []
+    for path, _ in victims:
         _unlink_reporting_failures(path, failures)
-        removed += 1
-    if removed:
-        conn.commit()
     _log_unlink_failures("sweep_superseded_versions", failures)
-    return removed
+    return len(victims)
 
 
 def prune(

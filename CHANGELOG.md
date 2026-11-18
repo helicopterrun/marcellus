@@ -7,6 +7,20 @@ may change behaviour). Numbers are pull requests.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`database is locked` in scrub generation and the push sweep.** One lock
+  failure in a generation cycle no longer fails every later camera: Python left
+  the failed write's transaction open, so each later write on the cycle's
+  connection failed at once on a stale snapshot. The connection is now rolled
+  back after a failure. Sidecar connections use `synchronous = NORMAL` (WAL
+  stays), so a commit no longer holds the write lock through an fsync; the
+  generation cycle waits up to 10 s for a lock instead of 3 s; the hourly
+  superseded-sheet sweep deletes its rows in one short transaction and removes
+  files afterwards. A busy lock in scrub generation, the push activity sweep,
+  the MQTT consumer or external-source state now logs one warning line instead
+  of a traceback.
+
 ### Changed
 
 - **Frigate 0.18 behaviour decisions.** A motion bucket Frigate leaves out is now
