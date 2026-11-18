@@ -7,46 +7,42 @@ may change behaviour). Numbers are pull requests.
 
 ## [Unreleased]
 
-### Fixed
+## [0.5.0] - 2026-11-18
 
-- **A default Frigate could not be reached at all.** Frigate serves its
-  signed-in port (8971) over HTTPS with a self-signed certificate by default.
-  The sidecar checks certificates and had no way to trust that one, so with a
-  stock Frigate every login check failed (everything answered 401), proxied
-  calls answered 502 with `CERTIFICATE_VERIFY_FAILED`, and nothing said why;
-  only turning TLS off in Frigate worked. The new `frigate.verify_tls` setting
-  (below) fixes it, and the cause is now named: one WARNING log line (repeated
-  at most hourly while it lasts), `checks.frigate_diagnosis` on `/healthz`
-  (`tls_untrusted`), and the login page. The mirror-image mistake, `http://`
-  pointed at that HTTPS port (Frigate answers 400), is diagnosed as
-  `https_required`. The watchdog no longer counts a certificate failure as a
-  hung Frigate.
+### Upgrade notes
 
-- **WebSocket proxy no longer logs a traceback when a client closes a live stream.** A client leaving while upstream frames were still arriving left an unretrieved task exception (`Unexpected ASGI message 'websocket.send'` or `ConnectionClosedOK`). Either side closing now ends the relay quietly, cancels the other pump and closes the upstream socket; a genuine error logs one warning line.
-- **`database is locked` in scrub generation and the push sweep.** One lock
-  failure in a generation cycle no longer fails every later camera: Python left
-  the failed write's transaction open, so each later write on the cycle's
-  connection failed at once on a stale snapshot. The connection is now rolled
-  back after a failure. Sidecar connections use `synchronous = NORMAL` (WAL
-  stays), so a commit no longer holds the write lock through an fsync; the
-  generation cycle waits up to 10 s for a lock instead of 3 s; the hourly
-  superseded-sheet sweep deletes its rows in one short transaction and removes
-  files afterwards. A busy lock in scrub generation, the push activity sweep,
-  the MQTT consumer or external-source state now logs one warning line instead
-  of a traceback.
-- **One camera with thousands of aged-tier holes no longer stops scrub
-  decimation for every camera after it.** Pass 3 built that camera's span list
-  by comparing every hole with every finer-tier bucket (millions of pairs, longer
-  than the whole pass), logged `tried=0`, did not count the turn and so started
-  the next cycle with the same camera; no later camera got its 5 s tier
-  decimated or its stale 1 s buckets retired. The span list is now built in one
-  sweep, each camera's turn gets a share of the pass instead of all of it, every
-  turn counts and always decimates at least one source sheet, and time the
-  other cameras leave goes to the ones that ran out. Backfill's subtraction of
-  finer-tier coverage got the same sweep. The cycle log line now ends with
-  `pass3 cursor a->b turns=n/N second_round=k out_of_time=<camera>(turns tried
-  spans)`, and each aged-tier line reports `setup_s` and `turn_s`. What gets
-  generated or retired is unchanged.
+Written for operators upgrading from 0.4.0. Everything in the 0.4.0 notes
+below still applies unchanged, including the push transport and relay
+credential behaviour (the new default `push.transport: auto` only changes what
+happens when no transport was set; an explicit `relay` or `mock` is untouched).
+
+- **Database durability trade.** Every sidecar database connection now sets
+  `synchronous = NORMAL` (WAL mode stays). Commits no longer fsync while holding
+  the write lock, which removes the `database is locked` stalls seen on a disk
+  shared with Frigate's recordings. The database stays consistent across a crash
+  or power cut, but the last few transactions before one may be rolled back.
+  Nothing to configure; no schema change.
+- **`frigate.verify_tls`** is a new setting, default `true`: certificate checks
+  stay strict and existing installs behave exactly as before. A stock Frigate
+  serves its sign-in port (8971) with a self-signed certificate; if the sidecar
+  cannot reach it, `/healthz` now says `tls_untrusted` and you can set
+  `verify_tls: false` (affects Frigate's two origins only).
+- **Frigate with sign-in turned off is now admitted automatically.** When
+  Frigate reports `auth.enabled: false` and serves a request with no
+  credential, the sidecar's own routes also accept requests without a session
+  (no more `sidecar.require_frigate_auth: false` for that case). That means
+  anything that can reach the sidecar's `bind_host`/`bind_port` can use it,
+  exactly as it could use Frigate; keep it on a trusted network or behind a
+  proxy. Frigate with sign-in on, `proxy.auth_secret` set, or a login-requiring
+  reverse proxy keeps the session requirement.
+- **Installer:** re-running `install.sh` on a bare-metal host with a pre-rename
+  `frigate-sidecar` install now stops with migration steps instead of creating a
+  second user and unit beside it (see "Upgrading from frigate-sidecar" in
+  `docs/deployment.md`). `ALLOW_LEGACY_COEXIST=1` keeps the old behaviour.
+- **Docker:** `install.sh` and `docker-compose.yml` now pin `:0.5`. The new
+  `-full` image (`:0.5-full`, amd64 only, face recognition) is available;
+  the default image is unchanged.
+
 ### Added
 
 - **`frigate.verify_tls`** (default `true`). Set it to `false` to accept
@@ -91,6 +87,47 @@ may change behaviour). Numbers are pull requests.
 - Push: new default `push.transport: auto` uses the relay once a `relay_key` is set or a device supplies a relay credential (checked per send, no restart), and sends nothing until then; explicit `relay` / `mock` are unchanged. The example config no longer ships a placeholder relay URL.
 - Docker: releases also publish `X.Y-full` / `vX.Y.Z-full` / `latest-full` images (amd64) with the `annotation` and `enrich` extras for face recognition.
 - Guide: relay credentials, optional `relay_key`, and the `auto` transport.
+- Push: the situations wire is retired on the server (#172). Registration no longer reads or stores a `situations` list (older app builds may still send one; it is ignored), and `/v1/push/test/{id}` answers 404. The `push_devices.situations` column stays, unused.
+
+### Fixed
+
+- **A default Frigate could not be reached at all.** Frigate serves its
+  signed-in port (8971) over HTTPS with a self-signed certificate by default.
+  The sidecar checks certificates and had no way to trust that one, so with a
+  stock Frigate every login check failed (everything answered 401), proxied
+  calls answered 502 with `CERTIFICATE_VERIFY_FAILED`, and nothing said why;
+  only turning TLS off in Frigate worked. The new `frigate.verify_tls` setting
+  (below) fixes it, and the cause is now named: one WARNING log line (repeated
+  at most hourly while it lasts), `checks.frigate_diagnosis` on `/healthz`
+  (`tls_untrusted`), and the login page. The mirror-image mistake, `http://`
+  pointed at that HTTPS port (Frigate answers 400), is diagnosed as
+  `https_required`. The watchdog no longer counts a certificate failure as a
+  hung Frigate.
+- **WebSocket proxy no longer logs a traceback when a client closes a live stream.** A client leaving while upstream frames were still arriving left an unretrieved task exception (`Unexpected ASGI message 'websocket.send'` or `ConnectionClosedOK`). Either side closing now ends the relay quietly, cancels the other pump and closes the upstream socket; a genuine error logs one warning line.
+- **`database is locked` in scrub generation and the push sweep.** One lock
+  failure in a generation cycle no longer fails every later camera: Python left
+  the failed write's transaction open, so each later write on the cycle's
+  connection failed at once on a stale snapshot. The connection is now rolled
+  back after a failure. Sidecar connections use `synchronous = NORMAL` (WAL
+  stays), so a commit no longer holds the write lock through an fsync; the
+  generation cycle waits up to 10 s for a lock instead of 3 s; the hourly
+  superseded-sheet sweep deletes its rows in one short transaction and removes
+  files afterwards. A busy lock in scrub generation, the push activity sweep,
+  the MQTT consumer or external-source state now logs one warning line instead
+  of a traceback.
+- **One camera with thousands of aged-tier holes no longer stops scrub
+  decimation for every camera after it.** Pass 3 built that camera's span list
+  by comparing every hole with every finer-tier bucket (millions of pairs, longer
+  than the whole pass), logged `tried=0`, did not count the turn and so started
+  the next cycle with the same camera; no later camera got its 5 s tier
+  decimated or its stale 1 s buckets retired. The span list is now built in one
+  sweep, each camera's turn gets a share of the pass instead of all of it, every
+  turn counts and always decimates at least one source sheet, and time the
+  other cameras leave goes to the ones that ran out. Backfill's subtraction of
+  finer-tier coverage got the same sweep. The cycle log line now ends with
+  `pass3 cursor a->b turns=n/N second_round=k out_of_time=<camera>(turns tried
+  spans)`, and each aged-tier line reports `setup_s` and `turn_s`. What gets
+  generated or retired is unchanged.
 
 ## [0.4.0] - 2026-11-15
 
