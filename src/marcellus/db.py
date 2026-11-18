@@ -12,8 +12,11 @@ can JOIN across them in a single query.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import logging
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -1138,7 +1141,31 @@ def _enable_wal(conn: sqlite3.Connection) -> None:
             time.sleep(0.02)
 
 
-def open_sidecar(path: str | Path) -> sqlite3.Connection:
+#: Default busy wait for a sidecar connection. Request handlers and the push
+#: pipeline call sqlite synchronously on the event loop, so this is also how
+#: long one contended write can stall it; keep it short there.
+SIDECAR_BUSY_TIMEOUT_MS = 3000
+
+
+def _set_sidecar_pragmas(conn: sqlite3.Connection, schema: str = "main") -> None:
+    """Per-connection settings every sidecar handle needs.
+
+    `synchronous = NORMAL`: in WAL mode the default (FULL) fsyncs the WAL on
+    every commit while the connection still holds the write lock, so each
+    commit holds out every other writer for one fsync. On a disk shared with
+    Frigate's recordings that fsync is normally 7-25 ms, but under I/O pressure
+    it took seconds (one scrub commit measured 89 s), and every other writer's
+    3 s busy wait ran out behind it. With NORMAL, commits only write to the
+    WAL and checkpoints do the fsync, outside the write lock. The database
+    stays consistent across a crash or power cut; the last transactions before
+    one may roll back, which is SQLite's documented trade for WAL + NORMAL.
+    """
+    conn.execute(f"PRAGMA {schema}.synchronous = NORMAL")
+
+
+def open_sidecar(
+    path: str | Path, *, busy_timeout_ms: int = SIDECAR_BUSY_TIMEOUT_MS
+) -> sqlite3.Connection:
     """Open the sidecar DB read/write, creating directory + schema if needed."""
     p = Path(path)
     key = str(p.resolve())
@@ -1146,8 +1173,9 @@ def open_sidecar(path: str | Path) -> sqlite3.Connection:
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(p, timeout=5.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 3000")
+    conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
     _enable_wal(conn)
+    _set_sidecar_pragmas(conn)
     if needs_schema:
         with _SCHEMA_LOCK:
             if key not in _SCHEMA_APPLIED or not p.exists():
@@ -1182,12 +1210,15 @@ def open_joined(
     frigate_path: str | Path,
     sidecar_path: str | Path,
     sidecar_alias: str = "sidecar",
+    *,
+    busy_timeout_ms: int | None = None,
 ) -> sqlite3.Connection:
     """Open Frigate read-only with the sidecar ATTACHed under `sidecar_alias`.
 
     Ensures the sidecar exists (with schema) before attaching. The attached
     sidecar is opened in the default mode by SQLite (rw), so writes are
-    allowed against it through the joined handle.
+    allowed against it through the joined handle. `busy_timeout_ms` overrides
+    the connection's busy wait (it covers both files); omit it for the default.
     """
     sp = Path(sidecar_path)
     if not sp.exists():
@@ -1195,10 +1226,65 @@ def open_joined(
         open_sidecar(sp).close()
 
     conn = open_frigate_ro(frigate_path)
+    if busy_timeout_ms is not None:
+        conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
     # ATTACH uses a separate connection internally; the read-only PRAGMA on
     # `main` doesn't propagate to the attached DB.
     conn.execute(f"ATTACH DATABASE ? AS {sidecar_alias}", (str(sp),))
+    _set_sidecar_pragmas(conn, sidecar_alias)
     return conn
+
+
+def is_lock_error(exc: BaseException) -> bool:
+    """`database is locked` / `database table is locked` (SQLITE_BUSY and its
+    extended codes, SQLITE_LOCKED). Python 3.10 has no `sqlite_errorcode`, so
+    the message is the only signal on the deployment's interpreter."""
+    return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
+
+
+def rollback_quietly(conn: sqlite3.Connection) -> None:
+    """End whatever transaction a failed statement left open on `conn`.
+
+    Python's sqlite3 opens a deferred transaction before every INSERT/UPDATE/
+    DELETE and leaves it open when the statement fails. A connection that is
+    kept and reused after a caught error is then still inside that transaction,
+    so its next read pins a snapshot until the next commit, and the write after
+    it fails at once with SQLITE_BUSY_SNAPSHOT (still "database is locked")
+    whenever any other connection committed in between -- the busy timeout is
+    never consulted for that. On production one 3 s lock wait in the scrub
+    generator turned into a failure for every later camera in the cycle: about
+    2,600 of 3,050 lock tracebacks in a week. Call this in every handler that
+    catches a database error and carries on with the same connection.
+    """
+    if not conn.in_transaction:
+        return
+    # A rollback that itself fails leaves nothing better to do here; the
+    # connection is closed at the end of its owner's scope regardless.
+    with contextlib.suppress(sqlite3.Error):
+        conn.rollback()
+
+
+def log_db_failure(
+    log: logging.Logger,
+    msg: str,
+    *args: object,
+    exc: BaseException | None = None,
+    level: int = logging.ERROR,
+) -> None:
+    """Log a caught failure: one line for a lock error, a traceback otherwise.
+
+    For call sites that retry on their next cycle anyway (scrub generation, the
+    push activity sweep, external-source state). A busy lock is an expected,
+    transient condition there and its traceback is always the same few frames,
+    so it gets one WARNING line; anything else is a real fault and keeps its
+    full traceback at `level`. Call from inside the `except` block.
+    """
+    if exc is None:
+        exc = sys.exc_info()[1]
+    if exc is not None and is_lock_error(exc):
+        log.warning(msg + " (sidecar DB busy: %s)", *args, exc)
+    else:
+        log.log(level, msg, *args, exc_info=exc if exc is not None else True)
 
 
 class DBLockedError(RuntimeError):

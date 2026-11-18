@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 
+from marcellus import db
 from marcellus.push.log_context import reset_push_context, set_push_context
 from marcellus.push.models import ReviewEvent
 from marcellus.push.stats import STATS
@@ -256,7 +257,9 @@ class MqttReviewSubscriber:
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    logger.exception("push: mqtt consumer handler failed for %s frame", item.kind)
+                    db.log_db_failure(
+                        logger, "push: mqtt consumer handler failed for %s frame", item.kind
+                    )
                     STATS.incr("mqtt.consumer.errors")
                 finally:
                     self._dispatching = False

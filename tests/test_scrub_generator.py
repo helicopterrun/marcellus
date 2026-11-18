@@ -9,6 +9,7 @@ math itself, tested in isolation.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sqlite3
 import tempfile
@@ -4319,4 +4320,145 @@ def test_dead_marks_expire_and_match_by_containment(
         assert span in tried  # ...so it is retried, and re-learned
         assert profile.dead_aged_spans["doorbell"] == {span: clock.t}
     finally:
+        conn.close()
+
+
+# ----- Sidecar lock contention (one failure must stay one failure) -----
+
+
+def _contended_cycle(
+    env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, dict[str, object]]:
+    """Run one cycle over doorbell + garden with another writer contending.
+
+    The first bucket write (doorbell's live edge) waits out its busy timeout
+    behind a writer holding the lock -- an ordinary lock failure. From then on
+    the other writer commits just before every bucket write, between the
+    cycle connection's reads and its write: what the push pipeline and HTTP
+    handlers do on production all the time.
+    """
+    conn = sqlite3.connect(env.frigate.db_path)
+    conn.executemany(
+        "INSERT INTO recordings VALUES (?, 'garden', ?, ?, ?, 10.0, 5.0)",
+        [
+            (f"g{i}", "/media/frigate/x.mp4", 1_800_000_000.0 + i * 10,
+             1_800_000_000.0 + (i + 1) * 10)
+            for i in range(8580, 8640)  # the last 10 minutes: live edge only
+        ],
+    )
+    conn.commit()
+    conn.close()
+    env = env.model_copy(
+        update={"scrub": env.scrub.model_copy(update={"cameras": ["doorbell", "garden"]})}
+    )
+    db.open_sidecar(env.sidecar.db_path).close()
+    other = sqlite3.connect(env.sidecar.db_path, timeout=2.0, isolation_level=None)
+    other.execute("CREATE TABLE IF NOT EXISTS lock_probe (x INTEGER)")
+    monkeypatch.setattr(generator, "SCRUB_BUSY_TIMEOUT_MS", 50)
+
+    real_upsert = db.upsert_scrub_bucket
+    calls = {"n": 0}
+
+    def _contended(conn: sqlite3.Connection, **kw: object) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            other.execute("BEGIN IMMEDIATE")
+            other.execute("INSERT INTO lock_probe VALUES (1)")
+            try:
+                real_upsert(conn, **kw)  # type: ignore[arg-type]
+            finally:
+                other.execute("COMMIT")
+            return
+        other.execute("INSERT INTO lock_probe VALUES (2)")
+        real_upsert(conn, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(db, "upsert_scrub_bucket", _contended)
+    try:
+        results = asyncio.run(generator.generate_cycle(env, now=1_800_000_000.0 + 86400.0))
+    finally:
+        other.close()
+    return {str(r["camera"]): r for r in results}
+
+
+def test_one_lock_failure_fails_one_camera_not_the_cycle(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Production, 2026-11: one 3 s lock wait in a cycle was followed by a
+    failure for every later camera and pass on the same connection -- ~2,600
+    of ~3,050 lock tracebacks a week. The failed camera's handler must end the
+    failed write's transaction so the next camera starts clean."""
+    with caplog.at_level(logging.INFO, logger="marcellus.scrub.generator"):
+        by_camera = _contended_cycle(long_history_env, monkeypatch)
+
+    assert by_camera["doorbell"].get("error") is True
+    assert not by_camera["garden"].get("error"), "the failure cascaded to the next camera"
+    assert by_camera["garden"]["new_frames"], "garden's live edge stored nothing"
+
+    busy = [r for r in caplog.records if "sidecar DB busy" in r.getMessage()]
+    assert len(busy) == 1, [r.getMessage() for r in busy]
+    assert busy[0].exc_info is None, "a busy lock logs one line, not a traceback"
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_without_the_rollback_the_lock_failure_cascades(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The control for the test above: same contention, rollback patched out,
+    and the next camera fails too -- the snapshot conflict, not a wait."""
+    monkeypatch.setattr(db, "rollback_quietly", lambda conn: None)
+    with caplog.at_level(logging.INFO, logger="marcellus.scrub.generator"):
+        by_camera = _contended_cycle(long_history_env, monkeypatch)
+
+    assert by_camera["doorbell"].get("error") is True
+    assert by_camera["garden"].get("error") is True
+
+
+def test_superseded_sweep_unlinks_outside_the_write_transaction(
+    env: Settings, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hourly sweep removes thousands of versions on production. Holding
+    the write lock across each file's stat and unlink held every other writer
+    out for the whole sweep; another connection must be able to write while
+    the files are being removed."""
+    conn = db.open_sidecar(env.sidecar.db_path)
+    now = 1_800_000_000.0
+    probe = sqlite3.connect(env.sidecar.db_path, timeout=0, isolation_level=None)
+    try:
+        probe.execute("CREATE TABLE IF NOT EXISTS lock_probe (x INTEGER)")
+        paths = {}
+        for count, complete in ((10, False), (40, False), (96, True)):
+            rel = f"doorbell/1/{grid.sheet_filename(now, 1.0, count, '.jpg')}"
+            paths[count] = env.scrub.cache_dir / rel
+            paths[count].parent.mkdir(parents=True, exist_ok=True)
+            _make_jpg(paths[count])
+            db.upsert_scrub_sheet(
+                conn, camera="doorbell", start_ts=now, interval_s=1.0, cols=4, rows=3,
+                cell_w=32, cell_h=18, count=count, path=rel, complete=complete,
+            )
+        conn.commit()
+        for count in paths:
+            os.utime(paths[count], (now - 10_000.0, now - 10_000.0))
+
+        real_unlink = generator._unlink_reporting_failures
+        unlinked: list[Path] = []
+
+        def _unlink_while_probing(path: Path, failures: list[tuple[Path, OSError]]) -> bool:
+            # timeout=0: raises "database is locked" if the sweep holds the lock.
+            probe.execute("INSERT INTO lock_probe VALUES (1)")
+            unlinked.append(path)
+            return real_unlink(path, failures)
+
+        monkeypatch.setattr(generator, "_unlink_reporting_failures", _unlink_while_probing)
+        removed = generator.sweep_superseded_versions(
+            conn, env.scrub.cache_dir, camera=None, grace_s=900.0, now=now,
+        )
+        assert removed == 2
+        assert sorted(unlinked) == sorted([paths[10], paths[40]])
+        assert not paths[10].exists() and not paths[40].exists() and paths[96].exists()
+        surviving = [r["count"] for r in conn.execute("SELECT count FROM scrub_sheets")]
+        assert surviving == [96]
+    finally:
+        probe.close()
         conn.close()
