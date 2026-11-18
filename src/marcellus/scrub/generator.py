@@ -1430,11 +1430,25 @@ def _subtract_covered(
 
     Remainders narrower than `min_width_s` are dropped, as `uncovered_spans`
     does: they can't hold a frame.
+
+    `covered` is sorted once and each hole only visits the rows that can touch
+    it (found by bisect). Re-sorting and walking every row for every hole cost
+    holes x rows: a camera with thousands of aged-tier holes and thousands of
+    finer-tier rows spent seconds here, inside backfill's turn, before its
+    per-segment deadline check is ever reached.
     """
+    rows = sorted(covered)
+    starts = [c_start for c_start, _ in rows]
+    # Running maximum of the row ends: every row before the first index whose
+    # running end passes `h_start` ends at or before the hole, so the loop
+    # below would skip it anyway.
+    reach = _running_max([c_end for _, c_end in rows])
     out: list[tuple[float, float]] = []
     for h_start, h_end in holes:
         cursor = h_start
-        for c_start, c_end in sorted(covered):
+        lo = bisect.bisect_right(reach, h_start)
+        hi = bisect.bisect_left(starts, h_end)
+        for c_start, c_end in rows[lo:hi]:
             if c_end <= cursor or c_start >= h_end:
                 continue
             if c_start - cursor >= min_width_s:
@@ -1445,6 +1459,89 @@ def _subtract_covered(
         if h_end - cursor >= min_width_s:
             out.append((cursor, h_end))
     return out
+
+
+def _intersect_spans(
+    holes: Sequence[tuple[float, float]],
+    rows: Sequence[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Every positive-width `(max(h_start, r_start), min(h_end, r_end))` over
+    all hole x row pairs, sorted -- what `generate_aged_tier` decimates.
+
+    The same list the nested comprehension over every pair produced, without
+    visiting pairs that cannot overlap: rows (sorted by start) join an active
+    set when they start before a hole's end and leave it once they end at or
+    before a hole's start, which no later hole can then reach either. The full
+    cross product was the whole of Pass 3's turn on production: 2,878 aged
+    holes x 15,000 finer rows is 43 million pairs -- about 3 s on a fast
+    desktop, and that box runs such loops ~8x slower -- against a ~17 s pass,
+    before a single span was tried. The sweep takes under a millisecond.
+    """
+    ordered = sorted(rows)
+    out: list[tuple[float, float]] = []
+    active: list[tuple[float, float]] = []
+    j = 0
+    for h_start, h_end in sorted(holes):
+        while j < len(ordered) and ordered[j][0] < h_end:
+            active.append(ordered[j])
+            j += 1
+        active = [r for r in active if r[1] > h_start]
+        for r_start, r_end in active:
+            lo, hi = max(h_start, r_start), min(h_end, r_end)
+            if hi > lo:
+                out.append((lo, hi))
+    out.sort()
+    return out
+
+
+def _running_max(values: Sequence[float]) -> list[float]:
+    out: list[float] = []
+    for v in values:
+        out.append(v if not out or v > out[-1] else out[-1])
+    return out
+
+
+def _overlaps_any(
+    key: tuple[float, float], starts: Sequence[float], reach: Sequence[float]
+) -> bool:
+    """Whether some span `(a, b)` has `a < key[1] and key[0] < b`, given the
+    spans' sorted starts and the running maximum of their ends."""
+    i = bisect.bisect_left(starts, key[1])
+    return i > 0 and reach[i - 1] > key[0]
+
+
+def _live_aged_spans(
+    spans: list[tuple[float, float]],
+    dead: dict[tuple[float, float], float],
+    mono: float,
+) -> list[tuple[float, float]]:
+    """Expire `dead` marks (TTL, or no longer overlapping any span) in place
+    and return the spans no remaining mark contains.
+
+    Equivalent to testing every span against every mark, by bisect over sorted
+    starts and running maxima of ends instead: a camera with thousands of
+    spans and as many marks would otherwise pay spans x marks here, the same
+    class of setup cost as the hole x row cross product.
+    """
+    span_starts = [a for a, _ in spans]
+    span_reach = _running_max([b for _, b in spans])
+    for key, marked_at in list(dead.items()):
+        if mono - marked_at >= _DEAD_SPAN_TTL_S or not _overlaps_any(
+            key, span_starts, span_reach
+        ):
+            del dead[key]
+    if not dead:
+        return list(spans)
+    marks = sorted(dead)
+    mark_starts = [d0 for d0, _ in marks]
+    mark_reach = _running_max([d1 for _, d1 in marks])
+    live: list[tuple[float, float]] = []
+    for sp in spans:
+        i = bisect.bisect_right(mark_starts, sp[0])
+        if i > 0 and mark_reach[i - 1] >= sp[1]:
+            continue  # some mark with d0 <= start also reaches past its end
+        live.append(sp)
+    return live
 
 
 async def _backfill_tier(
@@ -1910,6 +2007,15 @@ def _is_whole_multiple(numerator: float, denominator: float) -> bool:
     return abs(ratio - round(ratio)) < 1e-6 and round(ratio) >= 1
 
 
+@dataclass
+class _ScanResult:
+    """How a `_decimate_source` call ended, for callers that must tell "this
+    span holds nothing" from "the deadline stopped the scan"."""
+
+    #: Every source sheet in the window was looked at (no deadline stop).
+    complete: bool = False
+
+
 async def _decimate_source(
     sidecar_conn: sqlite3.Connection,
     cache_dir: Path,
@@ -1923,6 +2029,8 @@ async def _decimate_source(
     deadline: float | None = None,
     stats: CycleStats | None = None,
     read_errors: list[Path] | None = None,
+    min_sheets: int = 0,
+    scan: _ScanResult | None = None,
 ) -> list[grid.Frame]:
     """Select every Nth already-published cell of `finer_interval_s`'s sheets
     landing on `derived_interval_s`'s epoch grid, cropped to its own temp file.
@@ -1945,14 +2053,22 @@ async def _decimate_source(
     run for as long as opening and cropping every one of them takes, with no
     regard for the caller's own budget -- the same class of problem the
     per-segment backfill deadline check exists to fix, one level up.
+
+    `min_sheets` source sheets are opened regardless of the deadline (sheets
+    holding no wanted cell cost nothing and don't count). Pass 3 sets it for
+    the first span of a camera's turn, so a turn whose setup used up its
+    share still decimates something: without it such a camera logged
+    `tried=0` every cycle and never moved. `scan`, when given, records
+    whether every sheet was looked at.
     """
     ratio = round(derived_interval_s / finer_interval_s)
     sheets = db.list_scrub_sheets(
         sidecar_conn, camera, window_start, window_end, interval=finer_interval_s
     )
     frames: list[grid.Frame] = []
+    opened = 0
     for sheet in sheets:
-        if deadline is not None and time.monotonic() >= deadline:
+        if opened >= min_sheets and deadline is not None and time.monotonic() >= deadline:
             break
         img_path = cache_dir / sheet["path"]
         cols = sheet["cols"]
@@ -2000,6 +2116,7 @@ async def _decimate_source(
                     out_frames.append(grid.Frame(timestamp=cell_t, path=str(out)))
             return out_frames
 
+        opened += 1
         try:
             frames.extend(await asyncio.to_thread(_slice_sheet))
         except OSError as exc:
@@ -2009,6 +2126,9 @@ async def _decimate_source(
             if read_errors is not None:
                 read_errors.append(img_path)
             continue
+    else:
+        if scan is not None:
+            scan.complete = True
     frames.sort(key=lambda f: f.timestamp)
     return frames
 
@@ -2168,6 +2288,7 @@ async def generate_aged_tier(
     now: float,
     profile: SourceProfile,
     deadline: float | None = None,
+    min_sheets: int = 0,
 ) -> dict[str, Any]:
     """Produce aged-tier buckets/sheets by decimating the recent tier's
     already-published sheets, rather than decoding them with ffmpeg
@@ -2216,8 +2337,15 @@ async def generate_aged_tier(
     later non-contiguous span arrives (§5.2) -- which is where that decision
     belongs, since it is the only place that knows whether two spans are
     actually adjacent on the grid.
+
+    `min_sheets` > 0 makes the first live span run even if `deadline` has
+    already passed, opening that many source sheets (see `_decimate_source`):
+    Pass 3 sets it so every camera's turn moves its tier forward, however
+    little time setup left. The result reports `tried` and `spans` (live
+    spans) so the cycle can log a turn that ran out of time.
     """
     scrub = settings.scrub
+    setup_started = time.monotonic()
     gop_s = profile.gop_s.get(camera)
     if gop_s is None:
         # generate_cycle's Pass 1 always probes first, via generate_live_edge
@@ -2274,13 +2402,9 @@ async def generate_aged_tier(
     # Materialised and sorted up front rather than streamed from the nested
     # loop, because one writer now spans them all and `feed` drops anything
     # at or behind the newest slot it has stored: fed out of order, a span
-    # would be silently discarded instead of bucketed.
-    spans = sorted(
-        (max(h_start, r_start), min(h_end, r_end))
-        for h_start, h_end in holes
-        for r_start, r_end in recent_rows
-        if min(h_end, r_end) > max(h_start, r_start)
-    )
+    # would be silently discarded instead of bucketed. Built by a sweep, not a
+    # hole x row comprehension: see `_intersect_spans`.
+    spans = _intersect_spans(holes, [(r["start_ts"], r["end_ts"]) for r in recent_rows])
     if not spans:
         logger.info(
             "scrub: aged tier %s: %s but none overlap a %gs recent-tier bucket "
@@ -2299,15 +2423,7 @@ async def generate_aged_tier(
     # matches again. Marks expire after `_DEAD_SPAN_TTL_S`, and ones that no
     # longer overlap any span are dropped, so the map can't outgrow the window.
     dead = profile.dead_aged_spans.setdefault(camera, {})
-    mono = time.monotonic()
-    for key, marked_at in list(dead.items()):
-        if mono - marked_at >= _DEAD_SPAN_TTL_S or not any(
-            a < key[1] and key[0] < b for a, b in spans
-        ):
-            del dead[key]
-    live_spans = [
-        sp for sp in spans if not any(d0 <= sp[0] and sp[1] <= d1 for d0, d1 in dead)
-    ]
+    live_spans = _live_aged_spans(spans, dead, time.monotonic())
 
     # Window is the whole aged tier, not one span: this writer outlives each
     # of them, and `feed`'s own bounds check would otherwise throw away every
@@ -2329,30 +2445,37 @@ async def generate_aged_tier(
     new_frames = 0
     spans_tried = spans_with_frames = frames_in = accepted_total = 0
     deadline_hit = False
+    setup_s = time.monotonic() - setup_started
     with tempfile.TemporaryDirectory(prefix="age-", dir=_work_root(scrub.cache_dir)) as td:
         work_dir = Path(td)
         for span in live_spans:
             span_start, span_end = span
-            if deadline is not None and time.monotonic() >= deadline:
+            # The first span of a guaranteed turn runs regardless (see
+            # `min_sheets` above); every later one only with time left.
+            guaranteed = spans_tried == 0 and min_sheets > 0
+            if not guaranteed and deadline is not None and time.monotonic() >= deadline:
                 deadline_hit = True
                 break
             spans_tried += 1
             read_errors: list[Path] = []
+            scan = _ScanResult()
             frames = await _decimate_source(
                 sidecar_conn, scrub.cache_dir, camera,
                 finer_interval_s=recent_interval_s, derived_interval_s=aged_interval_s,
                 window_start=span_start, window_end=span_end, work_dir=work_dir,
                 deadline=deadline, stats=profile.stats, read_errors=read_errors,
+                min_sheets=min_sheets if guaranteed else 0, scan=scan,
             )
             if not frames:
                 # Empty because the deadline cut the source scan short, or
                 # because a sheet couldn't be read, says nothing about the
-                # span; only an unhurried, error-free empty one is dead.
-                if deadline is not None and time.monotonic() >= deadline:
+                # span; only a fully scanned, error-free empty one is dead.
+                past = deadline is not None and time.monotonic() >= deadline
+                if not read_errors and (scan.complete or not past):
+                    dead[span] = time.monotonic()
+                if past:
                     deadline_hit = True
                     break
-                if not read_errors:
-                    dead[span] = time.monotonic()
                 continue
             if not resumed:
                 writer.resume(span_start)
@@ -2372,24 +2495,31 @@ async def generate_aged_tier(
     # `accepted` == 0 means `feed` is rejecting what the source returns
     # (resume slot / window), `frames_in` == 0 means the source sheets are
     # missing or off the grid.
+    # `setup_s` is the time spent before the first span and `turn_s` what the
+    # deadline allowed from the start: setup_s close to turn_s is a camera
+    # whose turn goes on bookkeeping rather than decimation.
     logger.info(
         "scrub: aged tier %s: %s spans=%d dead=%d first=%.2f-%.2f tried=%d with_frames=%d "
         "source_frames=%d fed_accepted=%d resume_attached=%s resume_before=%s "
-        "resume_after=%s%s",
+        "resume_after=%s setup_s=%.2f turn_s=%s%s",
         camera, hole_desc, len(spans), len(spans) - len(live_spans),
         spans[0][0], spans[0][1], spans_tried, spans_with_frames, frames_in,
         accepted_total, attached,
         f"{resume_before:.2f}" if resume_before is not None else "-",
         f"{writer._generated_through:.2f}" if resumed else "-",
+        setup_s,
+        f"{deadline - setup_started:.2f}" if deadline is not None else "-",
         " deadline" if deadline_hit else "",
     )
-    # Starved = had live work but no time to try any of it. Pass 3 then
-    # doesn't count the camera as served, so it leads the next cycle instead
-    # of being rotated past with nothing done.
+    # Starved = had live work but no time to try any of it, which a turn with
+    # `min_sheets` > 0 can no longer be.
     return {
         "camera": camera,
         "new_frames": new_frames,
         "starved": deadline_hit and spans_tried == 0,
+        "deadline_hit": deadline_hit,
+        "tried": spans_tried,
+        "spans": len(live_spans),
     }
 
 
@@ -2651,34 +2781,46 @@ async def generate_cycle(
         # Start where the last cycle stopped, like the other two passes: a floor
         # of a few seconds covers only a camera or two, and restarting at
         # cameras[0] every cycle would let the tail starve.
+        #
+        # Each camera's turn gets a share of what is left -- the remaining time
+        # over the cameras still to go -- not the whole pass deadline, and every
+        # camera that got a turn counts as served whether or not it made
+        # progress. Before, one camera's setup could use the entire pass: on
+        # production a camera with 2,878 aged-tier holes spent every cycle
+        # building its span list, logged tried=0, was treated as "not served"
+        # and so led the next cycle too -- for days no camera after it in the
+        # rotation was decimated at all. A turn's unused share flows to the
+        # cameras after it, and a second round hands whatever is still left to
+        # the cameras whose turn ran out, so a camera with a backlog still gets
+        # the idle time the others don't need. (The "not served" rule existed
+        # because a camera reached after a hungry one had no time left at all
+        # and was rotated to the back; with shares no turn starts empty.)
         start_d = profile.decimation_cursor % len(cameras)
+        order_d = cameras[start_d:] + cameras[:start_d]
         served_d = 0
-        for camera in cameras[start_d:] + cameras[:start_d]:
-            if _time.monotonic() >= pass3_deadline:
-                break
-            served_d += 1
+        # camera -> (turns, spans tried, live spans at the last turn), for
+        # turns that ran out of time with work left; logged with the cycle.
+        out_of_time: dict[str, tuple[int, int, int]] = {}
+
+        async def _pass3_turn(camera: str, turn_deadline: float, min_sheets: int) -> bool:
+            """One camera's aged/derived/retire turn. True when it stopped on
+            its own `turn_deadline` with work left (worth a second round)."""
             try:
                 aged_started = _time.monotonic()
                 try:
                     aged_result = await generate_aged_tier(
                         settings, camera, frigate_conn=conn, sidecar_conn=conn,
-                        now=now, profile=profile, deadline=pass3_deadline,
+                        now=now, profile=profile, deadline=turn_deadline,
+                        min_sheets=min_sheets,
                     )
                 finally:
                     stats.pass3_aged_s += _time.monotonic() - aged_started
-                if aged_result.get("starved"):
-                    # The deadline passed during setup, before a single span:
-                    # not served. Counting it rotated such cameras to the back
-                    # every cycle (prod: gate-walkway / stairway-wide logging
-                    # tried=0 behind street), so the starved stayed starved.
-                    served_d -= 1
-                    break
                 totals[camera]["new_frames"] += aged_result["new_frames"]
                 derived_started = _time.monotonic()
                 try:
                     derived_result = await generate_derived(
                         settings, camera, frigate_conn=conn, sidecar_conn=conn,
-                        now=now, profile=profile, deadline=pass3_deadline,
+                        now=now, profile=profile, deadline=turn_deadline,
                     )
                 finally:
                     stats.pass3_derived_s += _time.monotonic() - derived_started
@@ -2690,8 +2832,55 @@ async def generate_cycle(
                 )
             except Exception:
                 _camera_failed(conn, "aged/derived-tier generation", camera, totals)
-        profile.decimation_cursor = start_d + served_d
+                return False
+            ran_out = _time.monotonic() >= turn_deadline
+            if ran_out and aged_result.get("deadline_hit"):
+                turns, tried, _spans = out_of_time.get(camera, (0, 0, 0))
+                out_of_time[camera] = (
+                    turns + 1, tried + aged_result.get("tried", 0),
+                    aged_result.get("spans", 0),
+                )
+            return ran_out
+
+        unfinished: list[str] = []
+        for i, camera in enumerate(order_d):
+            turn_started = _time.monotonic()
+            if turn_started >= pass3_deadline:
+                break
+            served_d += 1
+            turn_share = (pass3_deadline - turn_started) / (len(order_d) - i)
+            # `min_sheets=1`: a turn always decimates at least one source sheet
+            # even when setup used its whole share, so no camera can sit at
+            # tried=0 forever; the overrun is bounded by one sheet per turn.
+            if await _pass3_turn(camera, turn_started + turn_share, min_sheets=1):
+                unfinished.append(camera)
+        for j, camera in enumerate(unfinished):
+            turn_started = _time.monotonic()
+            if turn_started >= pass3_deadline:
+                break
+            turn_share = (pass3_deadline - turn_started) / (len(unfinished) - j)
+            await _pass3_turn(camera, turn_started + turn_share, min_sheets=0)
+        # Past every camera that had a turn, so the next cycle starts with the
+        # first one this cycle didn't reach. When all were reached, still move
+        # on by one, so the same camera isn't always first to take a share.
+        cursor_from = profile.decimation_cursor
+        profile.decimation_cursor = start_d + (served_d if served_d < len(cameras) else 1)
         stats.pass3_s = _time.monotonic() - pass3_started
+        # Which cameras ran out of time and how far they got, and that the
+        # cursor moved: a camera stuck at the head of the rotation shows up
+        # here as the same name with tried=0 and an unchanged cursor.
+        pass3_note = (
+            f"pass3 cursor {cursor_from % len(cameras)}->"
+            f"{profile.decimation_cursor % len(cameras)} "
+            f"turns={served_d}/{len(cameras)} second_round={len(unfinished)} out_of_time="
+            + (
+                ",".join(
+                    f"{cam}(turns={t} tried={n} spans={s})"
+                    for cam, (t, n, s) in out_of_time.items()
+                )
+                or "none"
+            )
+        )
 
         # One line per cycle. Whether the edge is being held is otherwise only
         # visible by querying the DB and inferring it from timestamps, and the
@@ -2738,10 +2927,10 @@ async def generate_cycle(
         )
         logger.info(
             "scrub: cycle %.0fs, %d cameras (%d backfilled), %d segments, %d frames; "
-            "coverage %s; worst live-edge lag %.0fs; %s",
+            "coverage %s; worst live-edge lag %.0fs; %s; %s",
             elapsed, len(cameras), served, live_total,
             sum(r["new_frames"] for r in totals.values()), tiers or "none", worst_lag,
-            stats.summary(),
+            stats.summary(), pass3_note,
         )
         if worst_lag > elapsed * 3 and elapsed > 0:
             logger.warning(
