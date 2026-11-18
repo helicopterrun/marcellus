@@ -728,6 +728,17 @@ def _event_clock_offset_s(settings: Any, camera: str) -> float:
     return clock_offset.event_clock_offset_s(settings, camera)
 
 
+def _event_clock_shift(settings: Any, camera: str) -> clock_offset.ClockShift:
+    """The full detect-to-picture shift for `camera`: the constant above plus
+    the recording segments' own sub-second clock error
+    (`analysis.clock_offset.ClockShift`)."""
+    return clock_offset.event_clock_shift(settings, camera)
+
+
+def _constant_shift(camera: str, offset_s: float) -> clock_offset.ClockShift:
+    return clock_offset.ClockShift(camera=camera, constant_s=offset_s)
+
+
 # Path-summary tuning (§4.5). Drift is capped so a thousands-of-points
 # trajectory ships as a handful of numbers; dwell is "stayed within
 # _DWELL_RADIUS (normalized frame units) for at least _DWELL_MIN_S".
@@ -740,7 +751,7 @@ _DWELL_MAX_SPANS = 4
 
 
 def _path_summary(
-    parsed: dict[str, Any], offset_s: float
+    parsed: dict[str, Any], offset_s: float | clock_offset.ClockShift
 ) -> dict[str, Any] | None:
     """`data.path_data` -> {"drift": [[t, x], ...], "dwell": [[t0, t1], ...]}.
 
@@ -748,6 +759,11 @@ def _path_summary(
     function of the stored path (deterministic -- the reel body is ETagged on
     content, so any instability here would bust the client cache every poll).
     """
+    shift = (
+        offset_s
+        if isinstance(offset_s, clock_offset.ClockShift)
+        else _constant_shift("", offset_s)
+    )
     points = db.parse_path_data(parsed.get("path_data"))
     if len(points) < _PATH_MIN_POINTS:
         return None
@@ -758,7 +774,7 @@ def _path_summary(
     sampled = points[::stride]
     if sampled[-1] != points[-1]:
         sampled.append(points[-1])  # always keep the exit position
-    drift = [[round(t + offset_s, 3), round(x, 4)] for x, _y, t in sampled]
+    drift = [[round(shift.shift(t), 3), round(x, 4)] for x, _y, t in sampled]
 
     dwell: list[list[float]] = []
     anchor_x, anchor_y, anchor_t = points[0]
@@ -768,13 +784,13 @@ def _path_summary(
             last_t = t
             continue
         if last_t - anchor_t >= _DWELL_MIN_S:
-            dwell.append([round(anchor_t + offset_s, 3), round(last_t + offset_s, 3)])
+            dwell.append([round(shift.shift(anchor_t), 3), round(shift.shift(last_t), 3)])
             if len(dwell) >= _DWELL_MAX_SPANS:
                 break
         anchor_x, anchor_y, anchor_t = x, y, t
         last_t = t
     if len(dwell) < _DWELL_MAX_SPANS and last_t - anchor_t >= _DWELL_MIN_S:
-        dwell.append([round(anchor_t + offset_s, 3), round(last_t + offset_s, 3)])
+        dwell.append([round(shift.shift(anchor_t), 3), round(shift.shift(last_t), 3)])
 
     return {"drift": drift, "dwell": dwell}
 
@@ -805,7 +821,8 @@ def _attach_continuations(
     win_start = min(e["start"] for e in events)
     win_end = max((e["end"] or e["start"]) for e in events) + _CONTINUES_WINDOW_S
     # Query bounds are detect-clock and per-camera offsets vary; widen by the
-    # apply endpoint's ±60 s offset cap so no candidate is clipped pre-shift.
+    # apply endpoint's ±60 s offset cap so no candidate is clipped pre-shift
+    # (the segment-clock term adds under a second on top).
     try:
         rows = conn.execute(
             "SELECT id, camera, label, start_time FROM event "
@@ -819,10 +836,14 @@ def _attach_continuations(
         return
 
     candidates = []
+    shifts: dict[str, clock_offset.ClockShift] = {}
     for row in rows:
-        cand_offset = _event_clock_offset_s(settings, row["camera"])
+        cam = row["camera"]
+        cand_shift = shifts.get(cam)
+        if cand_shift is None:
+            cand_shift = shifts[cam] = _event_clock_shift(settings, cam)
         candidates.append(
-            (row["start_time"] + cand_offset, row["camera"], row["id"], row["label"])
+            (cand_shift.shift(row["start_time"]), cam, row["id"], row["label"])
         )
     candidates.sort()
 
@@ -845,18 +866,33 @@ def _attach_continuations(
 
 
 def _events_json(
-    conn: Any, camera: str, start: float, end: float, offset_s: float = 0.0
+    conn: Any,
+    camera: str,
+    start: float,
+    end: float,
+    offset_s: float = 0.0,
+    shift: clock_offset.ClockShift | None = None,
 ) -> list[dict[str, Any]]:
+    if shift is None:
+        shift = _constant_shift(camera, offset_s)
+    offset_s = shift.constant_s
+    margin = shift.max_dev_s
     cols = {r[1] for r in conn.execute("PRAGMA table_info(event)")}
     # The window bounds arrive on the record clock; the DB stores detect-clock
-    # times, so the query shifts the bounds down and the results back up.
+    # times, so the query shifts the bounds down and the results back up. A
+    # time-dependent shift widens the query by its bound and filters after
+    # shifting; a constant one (margin 0) runs exactly the old query.
     rows = conn.execute(
         "SELECT * FROM event WHERE camera = ? AND start_time < ? "
         "AND (end_time IS NULL OR end_time > ?) ORDER BY start_time",
-        (camera, end - offset_s, start - offset_s),
+        (camera, end - offset_s + margin, start - offset_s - margin),
     ).fetchall()
     out = []
     for row in rows:
+        ev_start = shift.shift(row["start_time"])
+        ev_end = shift.shift(row["end_time"]) if row["end_time"] is not None else None
+        if margin and (ev_start >= end or (ev_end is not None and ev_end <= start)):
+            continue
         zones_raw = row["zones"] if "zones" in cols else None
         try:
             zones = json.loads(zones_raw) if zones_raw else []
@@ -877,10 +913,10 @@ def _events_json(
                 "id": row["id"],
                 "label": row["label"],
                 "zones": zones,
-                "start": row["start_time"] + offset_s,
+                "start": ev_start,
                 # events[].end is nullable and null means "still in progress"
                 # (§4.5) -- must not synthesize a placeholder timestamp.
-                "end": row["end_time"] + offset_s if row["end_time"] is not None else None,
+                "end": ev_end,
                 "score": score,
                 # Who, and whether there is anything to open. Column-gated the
                 # same way `zones` is: these are read straight off Frigate's
@@ -893,14 +929,19 @@ def _events_json(
                 ),
                 # Trajectory digest for the wheel's wiggle/dwell rendering;
                 # null when the blob is missing or too short to say anything.
-                "path": _path_summary(parsed, offset_s),
+                "path": _path_summary(parsed, shift),
             }
         )
     return out
 
 
 def _reviews_json(
-    conn: Any, camera: str, start: float, end: float, offset_s: float = 0.0
+    conn: Any,
+    camera: str,
+    start: float,
+    end: float,
+    offset_s: float = 0.0,
+    shift: clock_offset.ClockShift | None = None,
 ) -> list[dict[str, Any]]:
     """Frigate's own alert/detection decision for a window.
 
@@ -919,18 +960,26 @@ def _reviews_json(
     without it degrades to a reel with no severity spine instead of a broken
     endpoint -- the same forward/backward posture as the column gating above.
     """
+    if shift is None:
+        shift = _constant_shift(camera, offset_s)
+    offset_s = shift.constant_s
+    margin = shift.max_dev_s
     try:
         rows = conn.execute(
             "SELECT id, start_time, end_time, severity, data FROM reviewsegment "
             "WHERE camera = ? AND start_time < ? "
             "AND (end_time IS NULL OR end_time > ?) ORDER BY start_time",
-            (camera, end - offset_s, start - offset_s),
+            (camera, end - offset_s + margin, start - offset_s - margin),
         ).fetchall()
     except sqlite3.Error:
         return []
 
     out = []
     for row in rows:
+        rv_start = shift.shift(row["start_time"])
+        rv_end = shift.shift(row["end_time"]) if row["end_time"] is not None else None
+        if margin and (rv_start >= end or (rv_end is not None and rv_end <= start)):
+            continue
         try:
             data = json.loads(row["data"]) if row["data"] else {}
         except (json.JSONDecodeError, TypeError):
@@ -940,10 +989,10 @@ def _reviews_json(
         out.append(
             {
                 "id": row["id"],
-                "start": row["start_time"] + offset_s,
+                "start": rv_start,
                 # Nullable for the same reason events[].end is: a segment that
                 # has not closed has no end, and inventing one asserts an exit.
-                "end": row["end_time"] + offset_s if row["end_time"] is not None else None,
+                "end": rv_end,
                 "severity": row["severity"],
                 "objects": data.get("objects") or [],
                 "zones": data.get("zones") or [],
@@ -984,11 +1033,11 @@ async def compose_reel(
         conn = db.open_frigate_ro(settings.frigate.db_path)
         try:
             coverage_result = db.recording_coverage(conn, camera, start, end, now=time.time())
-            offset_s = _event_clock_offset_s(settings, camera)
-            events = _events_json(conn, camera, start, end, offset_s=offset_s)
+            shift = _event_clock_shift(settings, camera)
+            events = _events_json(conn, camera, start, end, shift=shift)
             _attach_continuations(conn, settings, camera, events)
             # Review segments come off the detect stream too -- same clock shift.
-            reviews = _reviews_json(conn, camera, start, end, offset_s=offset_s)
+            reviews = _reviews_json(conn, camera, start, end, shift=shift)
         finally:
             conn.close()
         return coverage_result, events, reviews
@@ -1132,24 +1181,34 @@ async def highlights(
             )
         # Same clock shift as /v1/reel: `before` is record-clock, rows are
         # detect-clock -- shift the bound down, the results back up.
-        offset_s = _event_clock_offset_s(settings, camera)
+        shift = _event_clock_shift(settings, camera)
+        margin = shift.max_dev_s
+        # A time-dependent shift can move an event across `before`: read a
+        # little past it, shift, filter, then cut to `limit`. With the
+        # correction off (margin 0) this is exactly the old query.
         rows = conn.execute(
             "SELECT * FROM event WHERE camera = ? AND start_time < ? "
             "ORDER BY start_time DESC LIMIT ?",
-            (camera, before - offset_s, limit),
+            (camera, before - shift.constant_s + margin, limit + (20 if margin else 0)),
         ).fetchall()
+        items = []
+        for r in rows:
+            h_start = shift.shift(r["start_time"])
+            if margin and h_start >= before:
+                continue
+            items.append(
+                {
+                    "start": h_start,
+                    "end": shift.shift(r["end_time"]) if r["end_time"] is not None else None,
+                    "reason": r["label"],
+                    "score": db.event_top_score(r),
+                }
+            )
+            if len(items) >= limit:
+                break
     finally:
         conn.close()
 
-    items = [
-        {
-            "start": r["start_time"] + offset_s,
-            "end": r["end_time"] + offset_s if r["end_time"] is not None else None,
-            "reason": r["label"],
-            "score": db.event_top_score(r),
-        }
-        for r in rows
-    ]
     # Clustering needs ascending order; the response is newest-first.
     items = _cluster_highlights(list(reversed(items)), cluster_s)
     items.reverse()

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import statistics
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,12 @@ from marcellus.db import (
     percentile,
     time_window_clause,
 )
+
+#: `(camera, record_time) -> seconds` added to a candidate frame time: the
+#: segment-clock term (`clock_offset.segment_term_s`). With it, the offset
+#: found is the constant `ClockShift` expects; without it (None), the raw
+#: offset at each event, which folds that event's segment error in.
+SegmentTerm = Callable[[str, float], float]
 
 
 class AnnotationOffsetUnavailable(RuntimeError):
@@ -133,6 +140,7 @@ def _measure_event(
     search_window_ms: int,
     step_ms: int,
     min_match_score: float,
+    segment_term: SegmentTerm | None = None,
 ) -> int | None:
     template = _fetch_image(
         client, f"/api/events/{event_id}/thumbnail.jpg", np_mod, cv2_mod
@@ -152,9 +160,12 @@ def _measure_event(
     n_used = {off: 0 for off in candidates}
     for (nx, ny, t_det) in samples:
         for off_ms in candidates:
+            ts = t_det + off_ms / 1000.0
+            if segment_term is not None:
+                ts += segment_term(camera, ts)
             frame = _fetch_image(
                 client,
-                f"/api/{camera}/recordings/{t_det + off_ms / 1000.0:.3f}/snapshot.jpg",
+                f"/api/{camera}/recordings/{ts:.3f}/snapshot.jpg",
                 np_mod,
                 cv2_mod,
             )
@@ -194,6 +205,7 @@ def analyze(
     step_ms: int = 250,
     min_match_score: float = 0.40,
     round_to_ms: int = 50,
+    segment_term: SegmentTerm | None = None,
 ) -> list[dict[str, Any]]:
     cv2_mod, np_mod = _require_deps()
     from marcellus import frigate_tls
@@ -238,6 +250,7 @@ def analyze(
                 off = _measure_event(
                     client, cv2_mod, np_mod, cam, ev["id"], ev["path"], ev.get("box"),
                     samples_per_event, search_window_ms, step_ms, min_match_score,
+                    segment_term,
                 )
                 if off is not None:
                     offsets.append(off)
@@ -251,6 +264,7 @@ def analyze(
                         "iqr_ms": None,
                         "suggested_offset_ms": None,
                         "confidence": "insufficient",
+                        "segment_clock_corrected": segment_term is not None,
                     }
                 )
                 continue
@@ -276,6 +290,9 @@ def analyze(
                     "iqr_ms": int(iqr),
                     "suggested_offset_ms": suggested,
                     "confidence": conf,
+                    # True: the offset is the constant for the corrected
+                    # shift (`constant + 0.5 - f`); False: a plain constant.
+                    "segment_clock_corrected": segment_term is not None,
                 }
             )
     return results

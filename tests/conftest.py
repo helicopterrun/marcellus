@@ -74,6 +74,17 @@ def sidecar_db_path(tmp_path: Path) -> Iterator[Path]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_segment_clock() -> Iterator[None]:
+    """`analysis.segment_clock` caches per Frigate DB path, process-wide; a
+    test that rewrites `recordings` must not see the previous test's blocks."""
+    from marcellus.analysis import segment_clock
+
+    segment_clock.reset()
+    yield
+    segment_clock.reset()
+
+
+@pytest.fixture(autouse=True)
 def _reset_disabled_zone_cache():
     """`zones.load_camera_zones` refreshes a module-level disabled-zone set."""
     from marcellus import zones
