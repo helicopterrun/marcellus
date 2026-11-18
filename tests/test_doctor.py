@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -909,7 +910,12 @@ def test_command_push_off_skips_mqtt_and_relay(
 
 
 def test_command_options_exist() -> None:
-    result = runner.invoke(app, ["doctor", "--help"])
+    # Rich colours the help where a terminal is detected (CI on 3.12 does), which
+    # splits "--json" with escape codes: ask for plain, wide output.
+    result = runner.invoke(
+        app, ["doctor", "--help"], env={"NO_COLOR": "1", "TERM": "dumb", "COLUMNS": "200"}
+    )
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
     for flag in ("--json", "--timeout", "--mqtt-wait", "--no-color", "--config"):
-        assert flag in result.output
+        assert flag in plain
     assert result.exit_code == 0
