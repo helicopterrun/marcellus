@@ -90,7 +90,11 @@ def test_sidecar_surface_requires_a_session(
     r = client.get(path)
     assert r.status_code == 401, path
     assert r.json()["error"] == "unauthorized"
-    assert not upstream_calls  # no cookie at all -> rejected without asking Frigate
+    # No cookie at all: the only upstream traffic is the sign-in-off check
+    # (Frigate's config on the sidecar's own origin), which finds no
+    # `auth.enabled: false` here and so never probes the proxy origin.
+    assert [(c.url.port, c.url.path) for c in upstream_calls] == [(5000, "/api/config")]
+    assert "cookie" not in upstream_calls[0].headers
 
 
 def test_mutating_endpoints_require_a_session(

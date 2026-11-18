@@ -112,6 +112,13 @@ When `require_frigate_auth` is on, every page needs a Frigate session. The
 the sidecar never sees or stores your password -- and can mint a
 stay-signed-in cookie.
 
+With sign-in turned off in Frigate (`auth.enabled: false`) there is nothing to
+sign in to: the sidecar notices from Frigate's own config and serves requests
+without a session, and its log says so. If an app saved as "no sign-in" still
+gets 401 from the sidecar, check that `frigate.base_url` reaches Frigate and
+that `frigate.proxy_base_url` answers `/api/version` without a cookie (a
+`proxy.auth_secret`, or a reverse proxy with its own login, keeps it closed).
+
 Repeated failed logins from the same IP get a **429** with a `Retry-After`
 header once they exceed the configured attempt window -- only failed
 attempts against the login endpoint itself count (a client's parallel

@@ -86,8 +86,44 @@ sidecar has no user database and never holds a password; it validates the
 cookie against `frigate.proxy_base_url` and caches the pass for
 `sidecar.auth_cache_ttl_s`. Because it serves event history, face crops and
 writes that reach back into Frigate (labels, Frigate+ submissions, face-library
-promotion), an open sidecar would be a way around Frigate's own auth. Set
-`sidecar.require_frigate_auth: false` only if your Frigate has auth disabled.
+promotion), an open sidecar would be a way around Frigate's own auth.
+`sidecar.require_frigate_auth: false` turns the check off entirely, whatever
+Frigate says; a Frigate with sign-in turned off no longer needs it (next
+section).
+
+### Frigate with sign-in turned off
+
+When Frigate has `auth.enabled: false` it serves anyone on its authenticated
+port without a session, and the Elsinore app saves such a server as "no
+sign-in" and sends no cookie. The sidecar then admits requests that carry no
+cookie as well, but only when Frigate itself says so. Both of these must hold:
+
+- Frigate's running config, read from `frigate.base_url`, has `auth.enabled`
+  set to exactly `false`.
+- A request with no credential to `frigate.proxy_base_url` (`GET
+  /api/version`) is answered with a 2xx. With sign-in on, or with
+  `proxy.auth_secret` set, or with a reverse proxy in front that asks for its
+  own login, Frigate refuses it and so does the sidecar.
+
+The answer is cached for `sidecar.auth_cache_ttl_s` (5 s if Frigate could not
+be reached), so turning sign-in back on in Frigate makes the sidecar ask for a
+session again within that window. The log says when the sidecar starts or
+stops admitting requests without a session.
+
+What an anonymous caller gets is the sidecar's whole surface, the same as any
+signed-in Frigate user gets today: the sidecar has no roles of its own, and its
+own writes to Frigate (labels, Frigate+ submissions, face-library promotion) go
+through `frigate.base_url`. Anything that can reach the sidecar's
+`bind_host`/`bind_port` (default `0.0.0.0:5001`, every interface) can use it.
+If your Frigate is reachable from fewer places than that, for example only on
+a Docker network or localhost, bind the sidecar just as narrowly or put it
+behind a firewall rule, because otherwise the sidecar is the more exposed of
+the two.
+
+Requests the sidecar forwards to Frigate (its catch-all proxy) are Frigate's
+to answer: on the authenticated port with sign-in off Frigate treats them as
+the `viewer` role (`proxy.default_role`), so admin-only Frigate routes answer
+403 there.
 
 Three deliberate exceptions:
 
