@@ -19,25 +19,55 @@ for push notifications.
 **Quick install (recommended):**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/helicopterrun/marcellus/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/helicopterrun/marcellus/v0.5.0/install.sh | sudo bash
 ```
 
 It uses Docker (image `ghcr.io/helicopterrun/marcellus`) when available,
-otherwise a venv plus a systemd unit. It prompts for the deployment-specific
-values (Frigate URLs and paths) and writes `sidecar.yml` for you. Re-run the
-same command to upgrade.
+otherwise a venv plus a systemd unit. Everything it installs comes from the one
+release named in the address (`v0.5.0`): the compose file, the image's minor
+train (`:0.5`), and, without Docker, that release's wheel (no git needed).
+Re-run the same command to upgrade; with a newer release's address it moves to
+that release.
+
+On Docker the script settles Frigate's folders **before** it starts anything,
+because a wrong host path would be mounted as an empty folder owned by root and
+nothing would complain. It looks for them (a running Frigate container's
+mounts, then common locations), shows what it found, and asks you to confirm or
+type each one when run in a terminal (`sudo bash install.sh`). It then writes
+them to `/opt/marcellus/.env`, checks each (exists, right kind, readable; an
+empty recordings folder only warns, since a new Frigate has none yet), starts
+the container, waits for it to report healthy and prints the address. Piped from
+`curl` it cannot ask: it proceeds only if it detected all three and they check
+out, otherwise it stops with nothing started and tells you what to pass:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/helicopterrun/marcellus/v0.5.0/install.sh \
+  | sudo FRIGATE_CONFIG=/opt/frigate/config.yml FRIGATE_DB_DIR=/opt/frigate/database \
+    FRIGATE_RECORDINGS=/opt/frigate/media/recordings bash
+```
+
+`FRIGATE_CONFIG` is Frigate's `config.yml` file, `FRIGATE_DB_DIR` the folder
+that contains `frigate.db`, `FRIGATE_RECORDINGS` Frigate's `recordings` folder.
+Values already in `.env` are kept on a re-run (and just re-checked).
+`MARCELLUS_VERSION=main` installs the development branch on purpose.
 
 **Manual, Docker Compose:**
 
 ```sh
 sudo mkdir -p /opt/marcellus && cd /opt/marcellus
-curl -fsSLO https://raw.githubusercontent.com/helicopterrun/marcellus/main/docker-compose.yml
-curl -fsSL  https://raw.githubusercontent.com/helicopterrun/marcellus/main/.env.example -o .env
+curl -fsSLO https://raw.githubusercontent.com/helicopterrun/marcellus/v0.5.0/docker-compose.yml
+curl -fsSL  https://raw.githubusercontent.com/helicopterrun/marcellus/v0.5.0/.env.example -o .env
 $EDITOR .env                                            # point the paths at YOUR Frigate
 mkdir -p data config && sudo chown -R 10001:10001 data  # container's non-root uid
 docker compose run --rm marcellus init -o /config/sidecar.yml
 docker compose up -d
 ```
+
+The `init` prompts here show paths **as the container sees them**, not your
+host paths: accept the defaults for the config file and database
+(`/opt/frigate/config.yml`, `/opt/frigate/database/frigate.db`), and for the
+recordings root enter the same host path you set as `FRIGATE_RECORDINGS` (it is
+mounted at the same path inside the container).
 
 Then open `http://<host>:5001`. To build the image locally instead of
 pulling, clone the repo and run `docker compose build`.
@@ -47,7 +77,8 @@ option (for example unprivileged LXCs):
 
 ```sh
 python3 -m venv /opt/marcellus/venv
-/opt/marcellus/venv/bin/pip install "marcellus @ git+https://github.com/helicopterrun/marcellus"
+/opt/marcellus/venv/bin/pip install \
+  "https://github.com/helicopterrun/marcellus/releases/download/v0.5.0/marcellus-0.5.0-py3-none-any.whl"
 sudo mkdir -p /opt/marcellus/data /etc/marcellus
 sudo /opt/marcellus/venv/bin/fsc init -o /etc/marcellus/sidecar.yml \
   --sidecar-db /opt/marcellus/data/marcellus.db

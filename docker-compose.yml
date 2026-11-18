@@ -1,6 +1,7 @@
-# Quickstart:
+# Quickstart (or let install.sh do all of this: it finds, checks and writes the
+# host paths BEFORE starting anything):
 #   cp .env.example .env && $EDITOR .env   # point the paths at YOUR Frigate
-#   docker compose run --rm marcellus init -o /config/sidecar.yml
+#   docker compose run --rm marcellus init -o /config/sidecar.yml   # prompts show IN-CONTAINER paths
 #   docker compose up -d
 #
 # Every host-specific path is an env var (read from .env) with a default

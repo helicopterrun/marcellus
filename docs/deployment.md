@@ -170,8 +170,23 @@ runs `.github/workflows/release.yml`: multi-arch image to
 `ghcr.io/helicopterrun/marcellus` (`latest`, `X.Y`, `vX.Y.Z`), a second
 amd64-only image with face recognition (`latest-full`, `X.Y-full`,
 `vX.Y.Z-full`), plus an sdist/wheel attached to the GitHub Release. Both images
-are signed keylessly with cosign (verify command in the README). `install.sh` and `docker-compose.yml`
-pin the `X.Y` train; bump both when you cut a new minor.
+are signed keylessly with cosign (verify command in the README).
+
+`install.sh` is pinned to one release by its `MARCELLUS_VERSION` default: the
+companion files come from that tag, the image is its `X.Y` train, and the
+bare-metal install downloads that release's `marcellus-X.Y.Z-py3-none-any.whl`
+from the GitHub release (no git on the host). The README and guide one-liners
+name the same tag. Release prep checklist (the `Prepare vX.Y.Z` commit):
+
+1. `__version__` in `src/marcellus/__init__.py` (and `fixtures/contract/`
+   version fields).
+2. **`MARCELLUS_VERSION` default in `install.sh`**: the installer must fetch the
+   release it ships with. `tests/test_install_script.py` fails if it differs
+   from `__version__`.
+3. The `X.Y` image pin in `docker-compose.yml`, the README, `SECURITY.md`.
+4. The `vX.Y.Z` in the install one-liners and manual commands in `README.md`
+   and `src/marcellus/guide_content/deployment.md` (the same test checks them).
+5. The changelog.
 
 ### High-res cross-camera face capture (optional)
 
