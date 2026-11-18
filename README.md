@@ -46,11 +46,18 @@ upstream source. What each release changed, and what Marcellus depends on, is in
 ## Quick install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/helicopterrun/marcellus/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/helicopterrun/marcellus/v0.5.0/install.sh | sudo bash
 ```
 
-Uses Docker when available, otherwise a venv plus systemd unit, and prompts for
-your Frigate URLs and paths. Re-run it to upgrade. Requirements, manual Docker
+The script, its compose file, the image (`:0.5`) and the bare-metal wheel all
+come from that one release (`v0.5.0`), not from `main`. It uses Docker when
+available, otherwise a venv plus systemd unit (no git needed). On Docker it
+finds Frigate's config, database and recordings folders (from a running Frigate
+container or common locations), checks them, and only then starts Marcellus;
+piped from `curl` it cannot ask, so it uses what it detected and otherwise
+stops and tells you which `FRIGATE_CONFIG`, `FRIGATE_DB_DIR` and
+`FRIGATE_RECORDINGS` to pass. To be asked instead, download `install.sh` and run
+`sudo bash install.sh`. Re-run it to upgrade. Requirements, manual Docker
 Compose and systemd installs, and upgrade notes are in the
 [deployment guide](https://helicopterrun.github.io/marcellus/guide/deployment/).
 Afterwards, `fsc doctor` checks the install and prints a one-line fix for

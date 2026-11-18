@@ -1,21 +1,37 @@
 #!/usr/bin/env bash
 # marcellus installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/helicopterrun/marcellus/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/helicopterrun/marcellus/v0.5.0/install.sh | sudo bash
 #
 # Docker present  -> compose deployment in $INSTALL_DIR (image from ghcr.io)
 # No Docker       -> bare-metal venv + systemd unit
 #
+# Docker path order: fetch files, work out Frigate's HOST paths (detect, then
+# confirm or take from the environment), write .env, validate, and only then
+# initialise the config and start the container. A wrong host path is never
+# mounted: Docker would silently create an empty root-owned directory there.
+#
+# Everything is pinned to ONE release, MARCELLUS_VERSION below: the script's own
+# companion files (docker-compose.yml, .env.example) come from that release's
+# tag, the image is that release's minor train, and the bare-metal install is
+# that release's wheel (no git needed). MARCELLUS_VERSION=main installs the
+# development branch on purpose (image :latest, pip from git).
+#
+# Options:  --non-interactive   never prompt (also implied without a tty)
+# Docker host paths (env override, else detected, else asked):
+#   FRIGATE_CONFIG       Frigate's config.yml (file)
+#   FRIGATE_DB_DIR       directory containing frigate.db
+#   FRIGATE_RECORDINGS   Frigate's recordings directory
+#
 # Idempotent: re-running upgrades (pulls the new image / pip upgrade) and
-# restarts, leaving your .env / sidecar.yml untouched.
+# restarts, keeping the values already in .env / sidecar.yml.
 set -euo pipefail
 
+# Bumped with __version__ on every release (tests/test_install_script.py fails
+# if they disagree). Override for testing, or MARCELLUS_VERSION=main.
+MARCELLUS_VERSION="${MARCELLUS_VERSION:-0.5.0}"
 REPO="helicopterrun/marcellus"
-RAW="https://raw.githubusercontent.com/$REPO/main"
 INSTALL_DIR="${INSTALL_DIR:-/opt/marcellus}"
-# Release train, not :latest — reruns of this script should not silently
-# cross a minor version.
-IMAGE="ghcr.io/$REPO:0.5"
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
@@ -62,6 +78,221 @@ ALLOW_LEGACY_COEXIST=1.
 MSG
 }
 
+# ---- version-derived locations ----------------------------------------------
+version_plain() { printf '%s' "${MARCELLUS_VERSION#v}"; }
+
+version_valid() {
+  case "$(version_plain)" in
+    main) return 0 ;;
+    *[!0-9A-Za-z.+-]* | "") return 1 ;;
+  esac
+  printf '%s' "$(version_plain)" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'
+}
+
+release_ref() { # git ref of the release: v0.5.0, or main
+  if [ "$(version_plain)" = main ]; then printf 'main'; else printf 'v%s' "$(version_plain)"; fi
+}
+raw_base()   { printf 'https://raw.githubusercontent.com/%s/%s' "$REPO" "$(release_ref)"; }
+wheel_name() { printf 'marcellus-%s-py3-none-any.whl' "$(version_plain)"; }
+wheel_url()  { printf 'https://github.com/%s/releases/download/%s/%s' "$REPO" "$(release_ref)" "$(wheel_name)"; }
+image_ref() { # release minor train (0.5.0 -> :0.5), not :latest; main -> :latest
+  local v; v="$(version_plain)"
+  if [ "$v" = main ]; then printf 'ghcr.io/%s:latest' "$REPO"; else printf 'ghcr.io/%s:%s' "$REPO" "${v%.*}"; fi
+}
+
+# ---- Frigate host paths (Docker path) ---------------------------------------
+PATH_KEYS="FRIGATE_CONFIG FRIGATE_DB_DIR FRIGATE_RECORDINGS"
+FRIGATE_SEARCH_ROOTS="${FRIGATE_SEARCH_ROOTS:-/opt/frigate /srv/frigate /mnt/frigate /media/frigate /var/lib/frigate}"
+FRIGATE_MOUNTS="${FRIGATE_MOUNTS:-}"   # "destination=source" lines, filled from docker
+BAD_PATHS=""                           # "KEY|reason" lines left unresolved
+
+path_what() {
+  case "$1" in
+    FRIGATE_CONFIG)     printf "Frigate's config.yml (a file)" ;;
+    FRIGATE_DB_DIR)     printf "the directory that holds Frigate's frigate.db" ;;
+    FRIGATE_RECORDINGS) printf "Frigate's recordings directory (the 'recordings' folder inside its media dir)" ;;
+  esac
+}
+
+# path_problem KEY VALUE: prints why VALUE is unusable and returns 0; returns 1
+# (printing nothing) when it is fine.
+path_problem() {
+  local key="$1" val="$2"
+  [ -n "$val" ] || { echo "not set"; return 0; }
+  case "$val" in /*) ;; *) echo "must be an absolute path"; return 0 ;; esac
+  case "$val" in
+    *[[:space:]\"\'\#\$\\\`]*) echo "contains a space or one of \" ' # \$ \\ \` (not safe in .env)"; return 0 ;;
+  esac
+  [ -e "$val" ] || { echo "does not exist"; return 0; }
+  case "$key" in
+    FRIGATE_CONFIG)
+      [ -f "$val" ] || { echo "is not a file (give the config.yml itself)"; return 0; }
+      ;;
+    FRIGATE_DB_DIR|FRIGATE_RECORDINGS)
+      [ -d "$val" ] || { echo "is not a directory"; return 0; }
+      ;;
+  esac
+  [ -r "$val" ] || { echo "is not readable"; return 0; }
+  if [ "$key" = FRIGATE_DB_DIR ]; then
+    [ -f "$val/frigate.db" ] || { echo "has no frigate.db inside it (give the directory, not the file)"; return 0; }
+    [ -r "$val/frigate.db" ] || { echo "frigate.db is not readable"; return 0; }
+  fi
+  return 1
+}
+
+# frigate_mounts: "destination=source" mounts of a running Frigate container.
+# Read-only inspection; empty when docker or such a container is absent.
+frigate_mounts() {
+  command -v docker >/dev/null 2>&1 || return 0
+  local name
+  name="$(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null \
+    | awk 'tolower($2) ~ /frigate/ && tolower($2) !~ /marcellus|frigate-sidecar/ {print $1; exit}')" || true
+  [ -n "$name" ] || return 0
+  docker inspect -f '{{range .Mounts}}{{.Destination}}={{.Source}}{{"\n"}}{{end}}' "$name" 2>/dev/null || true
+}
+
+# candidate_paths KEY: candidate host paths, one per line, best first -- those
+# derived from a running Frigate container's mounts, then common locations.
+candidate_paths() {
+  local key="$1" line dest src root
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    dest="${line%%=*}"; src="${line#*=}"
+    case "$key:$dest" in
+      FRIGATE_CONFIG:/config) echo "$src/config.yml"; echo "$src/config.yaml" ;;
+      FRIGATE_CONFIG:/config/config.yml|FRIGATE_CONFIG:/config/config.yaml) echo "$src" ;;
+      FRIGATE_DB_DIR:/config|FRIGATE_DB_DIR:/db|FRIGATE_DB_DIR:/media/frigate) echo "$src" ;;
+      FRIGATE_RECORDINGS:/media/frigate) echo "$src/recordings" ;;
+      FRIGATE_RECORDINGS:/media/frigate/recordings) echo "$src" ;;
+    esac
+  done <<EOF
+$FRIGATE_MOUNTS
+EOF
+  for root in $FRIGATE_SEARCH_ROOTS; do
+    case "$key" in
+      FRIGATE_CONFIG)
+        echo "$root/config.yml"; echo "$root/config.yaml"
+        echo "$root/config/config.yml"; echo "$root/config/config.yaml" ;;
+      FRIGATE_DB_DIR)
+        echo "$root/database"; echo "$root/config"; echo "$root" ;;
+      FRIGATE_RECORDINGS)
+        echo "$root/media/recordings"; echo "$root/recordings" ;;
+    esac
+  done
+}
+
+# best_candidate KEY: the first candidate that passes path_problem.
+best_candidate() {
+  local c
+  while IFS= read -r c; do
+    if ! path_problem "$1" "$c" >/dev/null; then printf '%s' "$c"; return 0; fi
+  done <<EOF
+$(candidate_paths "$1")
+EOF
+  return 1
+}
+
+# env_file_value FILE KEY: the active (uncommented) value in a .env, or empty.
+env_file_value() {
+  [ -f "$1" ] || return 0
+  grep -E "^$2=" "$1" | tail -n 1 | cut -d= -f2- || true
+}
+
+# set_env_value FILE KEY VALUE: replace the active line, else the commented
+# example line, else append. Other lines are left as they are.
+set_env_value() {
+  local file="$1" key="$2" val="$3" tmp
+  tmp="$(mktemp "$file.XXXXXX")"
+  if grep -Eq "^$key=" "$file"; then
+    K="$key" V="$val" awk 'BEGIN{k=ENVIRON["K"]; v=ENVIRON["V"]} index($0, k"=")==1 {print k"="v; next} {print}' "$file" >"$tmp"
+  elif grep -Eq "^#$key=" "$file"; then
+    K="$key" V="$val" awk 'BEGIN{k=ENVIRON["K"]; v=ENVIRON["V"]; d=0} !d && index($0, "#"k"=")==1 {print k"="v; d=1; next} {print}' "$file" >"$tmp"
+  else
+    cat "$file" >"$tmp"; printf '%s=%s\n' "$key" "$val" >>"$tmp"
+  fi
+  cat "$tmp" >"$file"; rm -f "$tmp"   # keep the file's mode and owner
+}
+
+# resolve_paths ENVFILE INTERACTIVE(1|0): sets RESOLVED_<KEY> for each key.
+# Precedence: environment override, then a valid value already in ENVFILE
+# (kept silently), then a detected candidate (confirmed when interactive,
+# accepted when not). Unresolvable keys are listed in BAD_PATHS, never guessed.
+resolve_paths() {
+  local envfile="$1" interactive="$2" key val src problem answer
+  BAD_PATHS=""
+  for key in $PATH_KEYS; do
+    val=""; src=""
+    if [ -n "${!key:-}" ]; then val="${!key}"; src="from the environment"
+    elif [ -n "$(env_file_value "$envfile" "$key")" ]; then val="$(env_file_value "$envfile" "$key")"; src="already in .env"
+    else val="$(best_candidate "$key" || true)"; [ -z "$val" ] || src="detected"
+    fi
+    problem="$(path_problem "$key" "$val" || true)"
+    if [ "$interactive" = 1 ] && { [ "$src" = detected ] || [ -n "$problem" ]; }; then
+      printf '\n%s\n' "$(path_what "$key")" >&2
+      [ -z "$val" ] || printf '  %s: %s%s\n' "${src:-suggested}" "$val" "${problem:+  (PROBLEM: $problem)}" >&2
+      while :; do
+        printf '  path [%s]: ' "$val" >&2
+        IFS= read -r answer || answer=""
+        [ -z "$answer" ] && answer="$val"
+        problem="$(path_problem "$key" "$answer" || true)"
+        [ -z "$problem" ] && { val="$answer"; break; }
+        printf '  %s: %s\n' "$answer" "$problem" >&2
+      done
+    elif [ -n "$problem" ]; then
+      BAD_PATHS="$BAD_PATHS$key|${val:-<none found>}|$problem
+"
+    fi
+    printf -v "RESOLVED_$key" '%s' "$val"
+  done
+  [ -z "$BAD_PATHS" ]
+}
+
+paths_stop_message() {
+  local line key val why
+  printf 'Could not settle Frigate'"'"'s host paths without asking, so nothing was started\n'
+  printf '(a wrong path would be mounted as an empty root-owned directory).\n\n'
+  while IFS='|' read -r key val why; do
+    [ -n "$key" ] || continue
+    printf '  %s  %s\n      %s: %s\n' "$key" "$(path_what "$key")" "$val" "$why"
+  done <<EOF
+$BAD_PATHS
+EOF
+  cat <<'MSG'
+
+Pass them in the environment and run again, for example:
+
+  curl -fsSL <install.sh url> | sudo FRIGATE_CONFIG=/opt/frigate/config.yml \
+    FRIGATE_DB_DIR=/opt/frigate/database \
+    FRIGATE_RECORDINGS=/opt/frigate/media/recordings bash
+
+or download install.sh and run `sudo bash install.sh` in a terminal to be asked.
+MSG
+}
+
+# write_env_values ENVFILE: persist the resolved paths (only what changed).
+write_env_values() {
+  local key val
+  for key in $PATH_KEYS; do
+    local ref="RESOLVED_$key"; val="${!ref}"
+    [ "$(env_file_value "$1" "$key")" = "$val" ] || set_env_value "$1" "$key" "$val"
+  done
+}
+
+# recordings_empty DIR: true when DIR has no entries (a new Frigate: warn only).
+recordings_empty() { [ -z "$(ls -A "$1" 2>/dev/null)" ]; }
+
+# wait_healthy [SECONDS]: wait for the marcellus container's health check.
+wait_healthy() {
+  local deadline=$((SECONDS + ${1:-180})) st
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    st="$(docker inspect -f '{{.State.Health.Status}}' marcellus 2>/dev/null || true)"
+    [ "$st" = healthy ] && return 0
+    [ "$(docker inspect -f '{{.State.Running}}' marcellus 2>/dev/null || echo false)" = true ] || return 2
+    sleep 2
+  done
+  return 1
+}
+
 # Sourcing with MARCELLUS_INSTALL_SOURCE_ONLY=1 loads the functions above only
 # (used by tests/test_install_script.py).
 if [ "${MARCELLUS_INSTALL_SOURCE_ONLY:-}" = 1 ]; then return 0 2>/dev/null || exit 0; fi
@@ -73,44 +304,108 @@ if [ "${ALLOW_LEGACY_COEXIST:-}" != 1 ] && legacy_install_found; then
   exit 1
 fi
 
+NON_INTERACTIVE=0
+for arg in "$@"; do
+  case "$arg" in
+    --non-interactive) NON_INTERACTIVE=1 ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
+INTERACTIVE=0
+if [ "$NON_INTERACTIVE" = 0 ] && [ "${MARCELLUS_NON_INTERACTIVE:-}" != 1 ] && [ -t 0 ]; then INTERACTIVE=1; fi
+
+version_valid || die "MARCELLUS_VERSION='$MARCELLUS_VERSION' is not a release like 0.5.0 (or 'main')"
+[ "$(version_plain)" != main ] || warn "MARCELLUS_VERSION=main: installing the development branch (image :latest), not a release"
+
 fetch() { # fetch <relpath> <dest> -- never clobber an existing user-edited file
   if [ -e "$2" ]; then
     say "keeping existing $2"
   else
-    curl -fsSL "$RAW/$1" -o "$2"
+    curl -fsSL "$(raw_base)/$1" -o "$2" || die "could not download $(raw_base)/$1 (is release $(release_ref) real, and is the network up?)"
   fi
 }
 
 mkdir -p "$INSTALL_DIR/config" "$INSTALL_DIR/data"
 
 if command -v docker >/dev/null 2>&1; then
-  say "Docker found -- installing compose deployment in $INSTALL_DIR"
+  say "Docker found -- installing compose deployment in $INSTALL_DIR (release $(release_ref))"
   docker compose version >/dev/null 2>&1 || die "docker is present but 'docker compose' is not; install the compose plugin"
 
   cd "$INSTALL_DIR"
-  fetch docker-compose.yml docker-compose.yml
-  fetch .env.example .env.example
-  fetch .env.example .env
+  # 1. files from the same release as this script
+  if [ -e docker-compose.yml ]; then
+    # The compose file is not meant to be edited (every host setting is in .env)
+    # and carries the image pin, so an upgrade must replace it; keep a copy.
+    curl -fsSL "$(raw_base)/docker-compose.yml" -o docker-compose.yml.new \
+      || die "could not download $(raw_base)/docker-compose.yml"
+    if cmp -s docker-compose.yml docker-compose.yml.new; then
+      rm -f docker-compose.yml.new
+    else
+      mv docker-compose.yml "docker-compose.yml.bak-$(date +%Y%m%d%H%M%S)"
+      mv docker-compose.yml.new docker-compose.yml
+      say "updated docker-compose.yml to $(release_ref) (old one kept as docker-compose.yml.bak-*)"
+    fi
+  else
+    fetch docker-compose.yml docker-compose.yml
+  fi
+  curl -fsSL "$(raw_base)/.env.example" -o .env.example \
+    || die "could not download $(raw_base)/.env.example"
+  [ -e .env ] || cp .env.example .env
+
+  # 2. Frigate's host paths, settled BEFORE anything starts
+  say "locating Frigate's files on this host"
+  FRIGATE_MOUNTS="$(frigate_mounts)"
+  if [ -n "$FRIGATE_MOUNTS" ]; then say "found a running Frigate container; using its mounts as suggestions"; fi
+  if ! resolve_paths "$INSTALL_DIR/.env" "$INTERACTIVE"; then
+    paths_stop_message >&2
+    exit 1
+  fi
+
+  # 3. record and validate them
+  write_env_values "$INSTALL_DIR/.env"
+  for key in $PATH_KEYS; do
+    ref="RESOLVED_$key"; say "$key=${!ref}"
+  done
+  if recordings_empty "$RESOLVED_FRIGATE_RECORDINGS"; then
+    warn "$RESOLVED_FRIGATE_RECORDINGS is empty -- fine for a brand-new Frigate with no recordings yet; otherwise check the path"
+  fi
   # data dir must be writable by the container's non-root uid
   chown -R 10001:10001 "$INSTALL_DIR/data"
 
+  IMAGE="$(image_ref)"
   say "pulling $IMAGE"
   docker pull "$IMAGE"
 
+  # 4. config, then start. The host paths are already known, so `init` is told
+  # the matching in-container paths (see docker-compose.yml's volumes) instead
+  # of prompting for them; only Frigate's URLs are still asked.
   if [ ! -f "$INSTALL_DIR/config/sidecar.yml" ]; then
-    if [ -t 0 ]; then
-      say "generating config (answer the prompts; defaults suit a stock Frigate install)"
-      docker compose run --rm marcellus init -o /config/sidecar.yml
+    init_args=(init -o /config/sidecar.yml
+      --frigate-config /opt/frigate/config.yml
+      --frigate-db /opt/frigate/database/frigate.db
+      --recordings-path "$RESOLVED_FRIGATE_RECORDINGS"
+      --sidecar-db /data/marcellus.db)
+    if [ "$INTERACTIVE" = 1 ]; then
+      say "generating config (Frigate's folders come from .env; answer the URL prompts, defaults suit a stock Frigate)"
+      docker compose run --rm marcellus "${init_args[@]}"
     else
-      warn "stdin is not a tty (curl|bash) -- writing a default config; edit $INSTALL_DIR/config/sidecar.yml"
-      docker compose run --rm marcellus init --non-interactive -o /config/sidecar.yml
+      warn "not interactive -- writing a default config; edit $INSTALL_DIR/config/sidecar.yml (Frigate's URLs)"
+      docker compose run --rm marcellus "${init_args[@]}" --non-interactive
     fi
   fi
 
   say "starting"
   docker compose up -d
-  say "done. Check: curl http://localhost:5001/healthz  |  logs: docker logs -f marcellus"
-  say "Edit $INSTALL_DIR/.env (host paths) and $INSTALL_DIR/config/sidecar.yml, then: docker compose up -d"
+  say "waiting for the container to report healthy"
+  rc=0; wait_healthy "${HEALTH_WAIT_S:-180}" || rc=$?
+  case "$rc" in
+    0) ;;
+    2) die "the container exited; see: docker logs marcellus" ;;
+    *) die "not healthy after ${HEALTH_WAIT_S:-180}s; see: docker logs marcellus" ;;
+  esac
+  host_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  say "done. Open http://${host_ip:-localhost}:5001  |  logs: docker logs -f marcellus"
+  say "Host paths: $INSTALL_DIR/.env  |  settings: $INSTALL_DIR/config/sidecar.yml (then: docker compose up -d)"
 else
   say "Docker not found -- installing bare-metal (venv + systemd) in $INSTALL_DIR"
   command -v python3 >/dev/null 2>&1 || die "python3 is required"
@@ -127,8 +422,22 @@ EOF
   "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
   # [http2]: long-lived HTTP/2 relay connection instead of the HTTP/1.1
   # keep-alive fallback (push/transport.py warns at startup without it).
-  # Marcellus is not published to PyPI; install from the repository.
-  "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade "marcellus[http2] @ git+https://github.com/$REPO"
+  # Marcellus is not on PyPI: install the wheel the release workflow attaches
+  # to the GitHub release (no git needed). main is only for MARCELLUS_VERSION=main.
+  if [ "$(version_plain)" = main ]; then
+    command -v git >/dev/null 2>&1 || die "MARCELLUS_VERSION=main installs from git; git is required"
+    "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade "marcellus[http2] @ git+https://github.com/$REPO"
+  else
+    WHEEL_DIR="$(mktemp -d)"
+    WHEEL="$WHEEL_DIR/$(wheel_name)"
+    say "downloading $(wheel_url)"
+    curl -fsSL "$(wheel_url)" -o "$WHEEL" \
+      || die "could not download $(wheel_url) -- check the network and that release $(release_ref) exists. Nothing was installed (MARCELLUS_VERSION=main installs the development branch instead)."
+    "$INSTALL_DIR/venv/bin/python" -c 'import sys, zipfile; sys.exit(0 if zipfile.is_zipfile(sys.argv[1]) else 1)' "$WHEEL" \
+      || die "the download from $(wheel_url) is not a wheel; nothing was installed"
+    "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade "$WHEEL[http2]"
+    rm -rf "$WHEEL_DIR"
+  fi
 
   mkdir -p /etc/marcellus
   if [ ! -f /etc/marcellus/sidecar.yml ]; then

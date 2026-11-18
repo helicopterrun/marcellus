@@ -16,6 +16,34 @@ may change behaviour). Numbers are pull requests.
   the push relay and the running service. One line per check, a one-line fix
   for anything wrong, exit code 1 on a failure; `--json` gives a stable list
   for scripts. A new guide page, "Check your install", explains it.
+### Fixed
+
+- **Docker install order:** `install.sh` used to start the container and only
+  then tell you to edit the host paths in `.env`; a wrong or missing path was
+  mounted by Docker as an empty root-owned directory, so nothing errored and
+  nothing worked. It now settles `FRIGATE_CONFIG`, `FRIGATE_DB_DIR` and
+  `FRIGATE_RECORDINGS` first (detected from a running Frigate container or common
+  locations, confirmed or typed in a terminal, or passed as environment
+  variables), writes `.env`, checks each (exists, right kind, readable; an empty
+  recordings folder only warns) and only then runs `init` and starts the
+  container, waiting for it to report healthy. Without a terminal
+  (`curl | bash`) it proceeds only when every path was detected and checks out,
+  otherwise it stops with nothing started and says what to pass. Existing `.env`
+  values are kept and re-checked on re-runs. `init` is now given the matching
+  in-container paths instead of asking for them.
+
+### Changed
+
+- **Installer pinned to its release:** one `MARCELLUS_VERSION` in `install.sh`
+  (default: the release it ships with) now decides the image train, the
+  `docker-compose.yml`/`.env.example` downloaded (from that tag, not `main`) and
+  the bare-metal install, which installs the release's wheel from the GitHub
+  release instead of `pip install git+https` from `main` (no git needed on the
+  host; a failed download stops with an error and does not fall back to `main`).
+  `MARCELLUS_VERSION=main` installs the development branch on purpose. The
+  README and guide one-liners now name the release tag. Upgrading Docker installs
+  replaces `docker-compose.yml` (the old one is kept as `.bak-*`). A test fails
+  if the script's version disagrees with `__version__`.
 ### Upgrade notes
 
 - **Event times now include a per-segment correction, on by default.**
