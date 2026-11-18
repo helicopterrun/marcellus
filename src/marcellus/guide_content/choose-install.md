@@ -41,7 +41,9 @@ folders (for example over NFS) before you start.
 ## Docker
 
 - Files live in `/opt/marcellus`: `.env` (where Frigate's folders are on the
-  host), `config/sidecar.yml`, and `data/` (Marcellus's own database).
+  host: `FRIGATE_CONFIG`, `FRIGATE_DB_DIR`, `FRIGATE_RECORDINGS`, which the
+  quick install detects, confirms and checks before starting),
+  `config/sidecar.yml`, and `data/` (Marcellus's own database).
 - The container reaches Frigate and your MQTT broker through host networking,
   which is why the default needs no port settings. The page is at
   `http://<host>:5001`.
