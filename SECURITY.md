@@ -5,8 +5,8 @@ taken seriously, but there is no formal SLA.
 
 ## Supported versions
 
-Only the latest minor release train receives fixes (currently 0.4.x, image
-tag `:0.4`). Older trains are not patched; please upgrade.
+Only the latest minor release train receives fixes (currently 0.5.x, image
+tag `:0.5`). Older trains are not patched; please upgrade.
 
 ## Reporting a vulnerability
 

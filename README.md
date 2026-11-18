@@ -62,7 +62,7 @@ with Docker or `install.sh`.
 ### Face recognition in Docker
 
 The default image omits the optional face-recognition packages. For People and
-identity clustering, use the `-full` image (`ghcr.io/helicopterrun/marcellus:0.4-full`,
+identity clustering, use the `-full` image (`ghcr.io/helicopterrun/marcellus:0.5-full`,
 amd64 only; the model downloads on first use). See
 [Docker image variants](docs/deployment.md#docker-image-variants).
 
@@ -73,7 +73,7 @@ arm64) and signed keylessly with [cosign](https://github.com/sigstore/cosign)
 by the release workflow. Signing starts with v0.4.0; earlier images are unsigned.
 
 ```sh
-cosign verify ghcr.io/helicopterrun/marcellus:0.4 \
+cosign verify ghcr.io/helicopterrun/marcellus:0.5 \
   --certificate-identity-regexp '^https://github.com/helicopterrun/marcellus/\.github/workflows/release\.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
