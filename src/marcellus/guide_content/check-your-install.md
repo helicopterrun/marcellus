@@ -20,6 +20,12 @@ It reads the same config file the server does (`MARCELLUS_CONFIG`, then
 `/etc/marcellus/sidecar.yml`, then `./config/sidecar.yml`). To check a
 different file, add `--config /path/to/sidecar.yml`.
 
+The quick install runs it for you as its last step (in the container for
+Docker, as the service user for systemd) and ends with either "everything is
+working" or "N checks need attention: fix them and run `<command>` again", with
+the exact command for your install. It never fails the install; a release
+without `doctor` is skipped with one line.
+
 ## What it prints
 
 ```
@@ -68,7 +74,7 @@ Each check has its own time limit and one failing never stops the rest.
 
 - `--json` prints a list of `{"id", "status", "detail", "fix"}` objects
   instead of the table, where `status` is `pass`, `warn`, `fail` or
-  `skipped`. Scripts and the installer use it.
+  `skipped`. For scripts.
 - `--timeout SECONDS` sets how long each check may take (default 5).
 - `--mqtt-wait SECONDS` sets how long the `mqtt` check waits for a message
   from Frigate (default 20).

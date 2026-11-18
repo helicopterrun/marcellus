@@ -63,11 +63,14 @@ docker compose run --rm marcellus init -o /config/sidecar.yml
 docker compose up -d
 ```
 
-The `init` prompts here show paths **as the container sees them**, not your
-host paths: accept the defaults for the config file and database
+`init` runs inside the container, so the paths it shows are **as the container
+sees them**, not your host paths: accept the config file and database it finds
 (`/opt/frigate/config.yml`, `/opt/frigate/database/frigate.db`), and for the
-recordings root enter the same host path you set as `FRIGATE_RECORDINGS` (it is
-mounted at the same path inside the container).
+recordings folder enter the same host path you set as `FRIGATE_RECORDINGS` (it
+is mounted at the same path inside the container). `init` reads Frigate's own
+settings and asks you to confirm them (see [First run](/guide/first-run)); its
+optional "Set up push alerts now?" question is covered in
+[Set up push](/guide/push-setup).
 
 Then open `http://<host>:5001`. To build the image locally instead of
 pulling, clone the repo and run `docker compose build`.

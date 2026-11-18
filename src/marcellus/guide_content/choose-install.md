@@ -21,7 +21,10 @@ you the same app. Pick with the questions below.
 If you run the [quick install](/guide/deployment) script, it makes this choice
 for you the same way: it installs the Docker deployment when it finds `docker`
 on the machine (and stops if the compose plugin is missing), and otherwise
-installs the systemd one.
+installs the systemd one. Either way it ends by running the
+[install checklist](/guide/check-your-install) and printing it, then one line:
+everything works, or how many checks need attention and the exact command to
+run again. A problem there never undoes the install.
 
 ## What either way needs
 
@@ -47,8 +50,8 @@ folders (for example over NFS) before you start.
 - The container reaches Frigate and your MQTT broker through host networking,
   which is why the default needs no port settings. The page is at
   `http://<host>:5001`.
-- Secrets such as the MQTT password go in `.env`; see
-  [Set up push](/guide/push-setup).
+- Secrets such as the MQTT password go in `.env`; `init` can write the line for
+  you, and see [Set up push](/guide/push-setup).
 - Upgrade: `docker compose pull && docker compose up -d`, or re-run the quick
   install command.
 - Face recognition needs the larger `-full` image (amd64 only); see
@@ -60,7 +63,8 @@ folders (for example over NFS) before you start.
   `/etc/marcellus/sidecar.yml`. The service runs as its own `marcellus` user,
   which needs read access to Frigate's files. If it cannot read them, add it
   to a group that can, for example `usermod -aG <frigate-group> marcellus`.
-- Secrets such as the MQTT password go in `/etc/marcellus-push.env`; see
+- Secrets such as the MQTT password go in `/etc/marcellus-push.env` (root-owned,
+  mode `0600`); run `init` as root and it writes the line for you, and see
   [Set up push](/guide/push-setup).
 - Restart after editing the config: `systemctl restart marcellus`. Logs:
   `journalctl -fu marcellus`.

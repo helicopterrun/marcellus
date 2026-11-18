@@ -9,6 +9,25 @@ may change behaviour). Numbers are pull requests.
 
 ### Added
 
+- **`fsc init` finds Frigate instead of asking.** It reads Frigate's `/api/config`
+  and its `config.yml` (a file counts only if its cameras match the running
+  Frigate's; nothing is ever written to Frigate), summarises what it found
+  (cameras, sign-in, TLS, database path, MQTT broker and user) and asks you to
+  confirm or edit it once. Only the host-side media folder is normally typed;
+  a `recordings` folder given by mistake is corrected to the folder above it.
+  Passwords are never read from Frigate's config.
+- **Push from `init`:** an optional "Set up push alerts now?" step writes the
+  broker into `sidecar.yml` and the MQTT password only into an env file
+  (`/etc/marcellus-push.env`, mode 0600, for systemd; the install directory's
+  `.env` for Docker, or `--env-file`), then tests the connection with the
+  doctor's MQTT check. Not root, or inside the container: it prints the exact
+  commands instead. New flags `--enable-push`, `--mqtt-host/-port/-user`,
+  `--mqtt-password-file`, `--env-file`; `--force` now re-runs over an existing
+  config keeping its values and unrelated settings.
+- **The installer ends with `fsc doctor`:** both install paths print the
+  checklist, then either "everything is working" or "N checks need attention:
+  fix them and run `<command>` again". It never fails the install and is
+  skipped with one line for a release without `doctor`.
 - `marcellus doctor` (also `fsc doctor`): a read-only checklist of the config,
   both Frigate addresses (including the untrusted-certificate and
   http-to-an-https-port diagnoses), Frigate's database and recordings paths,

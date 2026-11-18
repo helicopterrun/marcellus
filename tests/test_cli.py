@@ -201,7 +201,7 @@ def test_interactive_self_signed_on_a_private_address_defaults_to_trust(
     monkeypatch.setattr(httpx, "get", _raise_connect)
     prober.result = SigninProbe("https", False, "192.168.1.10")
     code, output, cfg = _init_interactive(
-        tmp_path, "\n",
+        tmp_path, "\n\n",
         "--frigate-url", "http://192.168.1.10:5000", "--proxy-url", "https://192.168.1.10:8971",
     )
     assert code == 0, output
@@ -217,7 +217,7 @@ def test_interactive_self_signed_on_a_public_address_defaults_to_strict(
     monkeypatch.setattr(httpx, "get", _raise_connect)
     prober.result = SigninProbe("https", False, "8.8.8.8")
     code, output, cfg = _init_interactive(
-        tmp_path, "\n",
+        tmp_path, "\n\n",
         "--frigate-url", "http://frigate.example.net:5000",
         "--proxy-url", "https://frigate.example.net:8971",
     )
@@ -233,7 +233,7 @@ def test_interactive_answer_no_keeps_strict(
     monkeypatch.setattr(httpx, "get", _raise_connect)
     prober.result = SigninProbe("https", False, "192.168.1.10")
     code, _, cfg = _init_interactive(
-        tmp_path, "n\n",
+        tmp_path, "n\n\n",
         "--frigate-url", "http://192.168.1.10:5000", "--proxy-url", "https://192.168.1.10:8971",
     )
     assert code == 0

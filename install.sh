@@ -17,6 +17,11 @@
 # that release's wheel (no git needed). MARCELLUS_VERSION=main installs the
 # development branch on purpose (image :latest, pip from git).
 #
+# Both paths finish by running `fsc doctor` and showing its checklist, then one
+# closing line: everything works, or N checks need attention and the exact
+# command to run again. That never fails the install, and is skipped with one
+# line when the release installed has no `doctor` command.
+#
 # Options:  --non-interactive   never prompt (also implied without a tty)
 # Docker host paths (env override, else detected, else asked):
 #   FRIGATE_CONFIG       Frigate's config.yml (file)
@@ -293,6 +298,108 @@ wait_healthy() {
   return 1
 }
 
+# ---- the closing checklist (fsc doctor) --------------------------------------
+# Both install paths end by running `fsc doctor` and showing it. The install
+# itself already succeeded, so nothing here ever fails the script: it prints the
+# checklist, then one closing line, either that everything works or how many
+# checks need attention and the exact command to run again.
+PUSH_ENV_FILE="${PUSH_ENV_FILE:-/etc/marcellus-push.env}"
+SYSTEMD_CONFIG="${SYSTEMD_CONFIG:-/etc/marcellus/sidecar.yml}"
+
+# as_service_user CMD...: run as the marcellus user when we are root and it
+# exists, otherwise as ourselves.
+as_service_user() {
+  if [ "$(id -u)" -eq 0 ] && id -u marcellus >/dev/null 2>&1 && command -v runuser >/dev/null 2>&1; then
+    runuser -u marcellus -- "$@"
+  else
+    "$@"
+  fi
+}
+
+# systemd_fsc ARGS...: the venv's `fsc` as the service user, with the same MQTT
+# password the unit gets from its EnvironmentFile (read here, never put on a
+# command line).
+systemd_fsc() {
+  (
+    pw="$(env_file_value "$PUSH_ENV_FILE" MARCELLUS_PUSH__MQTT_PASSWORD)"
+    case "$pw" in
+      \'*\') pw="${pw#\'}"; pw="${pw%\'}" ;;
+      \"*\") pw="${pw#\"}"; pw="${pw%\"}" ;;
+    esac
+    [ -z "$pw" ] || export MARCELLUS_PUSH__MQTT_PASSWORD="$pw"
+    export MARCELLUS_CONFIG="$SYSTEMD_CONFIG"
+    as_service_user "$INSTALL_DIR/venv/bin/fsc" "$@"
+  )
+}
+
+# doctor_exec KIND ARGS...: `fsc ARGS` the way this install runs it.
+doctor_exec() {
+  local kind="$1"; shift
+  case "$kind" in
+    docker)  docker compose exec -T marcellus fsc "$@" ;;
+    systemd) systemd_fsc "$@" ;;
+    *) return 127 ;;
+  esac
+}
+
+# doctor_rerun_command KIND: the command a person types to run the checklist again.
+doctor_rerun_command() {
+  case "$1" in
+    docker) printf 'cd %s && docker compose exec marcellus fsc doctor' "$INSTALL_DIR" ;;
+    systemd)
+      if [ -f "$PUSH_ENV_FILE" ]; then
+        printf "sudo bash -c 'set -a; . %s; exec %s/venv/bin/fsc doctor --config %s'" \
+          "$PUSH_ENV_FILE" "$INSTALL_DIR" "$SYSTEMD_CONFIG"
+      else
+        printf 'sudo %s/venv/bin/fsc doctor --config %s' "$INSTALL_DIR" "$SYSTEMD_CONFIG"
+      fi ;;
+  esac
+}
+
+# doctor_available KIND: does this release's `fsc` have a doctor command? An
+# older image (MARCELLUS_VERSION pointing before it was added) does not.
+doctor_available() {
+  local help
+  help="$(doctor_exec "$1" --help 2>&1 </dev/null || true)"
+  case "$help" in *doctor*) return 0 ;; esac
+  return 1
+}
+
+# finish_with_doctor KIND: print the checklist and the closing line. Always returns 0.
+finish_with_doctor() {
+  local kind="$1" out rc=0 n cmd
+  cmd="$(doctor_rerun_command "$kind")"
+  say "checking the install (fsc doctor)"
+  if ! doctor_available "$kind"; then
+    say "skipping the checklist: this release has no 'fsc doctor' (after upgrading, run: $cmd)"
+    return 0
+  fi
+  out="$(doctor_exec "$kind" doctor --no-color --mqtt-wait 10 2>&1 </dev/null)" || rc=$?
+  printf '%s\n' "$out"
+  n="$(printf '%s\n' "$out" | grep -cE '^ (✗|!) ' || true)"
+  n="${n:-0}"
+  if [ "$rc" -eq 0 ] && [ "$n" -eq 0 ]; then
+    say "everything is working"
+  elif [ "$n" -eq 0 ]; then
+    say "the checklist did not finish (see above): fix that and run \`$cmd\` again"
+  elif [ "$n" -eq 1 ]; then
+    say "1 check needs attention: fix it and run \`$cmd\` again"
+  else
+    say "$n checks need attention: fix them and run \`$cmd\` again"
+  fi
+  return 0
+}
+
+# wait_service_active [SECONDS]: best-effort wait for the systemd unit to be up.
+wait_service_active() {
+  local deadline=$((SECONDS + ${1:-20}))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    systemctl is-active --quiet marcellus 2>/dev/null && return 0
+    sleep 1
+  done
+  return 1
+}
+
 # Sourcing with MARCELLUS_INSTALL_SOURCE_ONLY=1 loads the functions above only
 # (used by tests/test_install_script.py).
 if [ "${MARCELLUS_INSTALL_SOURCE_ONLY:-}" = 1 ]; then return 0 2>/dev/null || exit 0; fi
@@ -386,7 +493,7 @@ if command -v docker >/dev/null 2>&1; then
       --recordings-path "$RESOLVED_FRIGATE_RECORDINGS"
       --sidecar-db /data/marcellus.db)
     if [ "$INTERACTIVE" = 1 ]; then
-      say "generating config (Frigate's folders come from .env; answer the URL prompts, defaults suit a stock Frigate)"
+      say "generating config (Frigate's folders come from .env; init finds the rest in Frigate and asks you to confirm)"
       docker compose run --rm marcellus "${init_args[@]}"
     else
       warn "not interactive -- writing a default config; edit $INSTALL_DIR/config/sidecar.yml (Frigate's URLs)"
@@ -406,6 +513,7 @@ if command -v docker >/dev/null 2>&1; then
   host_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
   say "done. Open http://${host_ip:-localhost}:5001  |  logs: docker logs -f marcellus"
   say "Host paths: $INSTALL_DIR/.env  |  settings: $INSTALL_DIR/config/sidecar.yml (then: docker compose up -d)"
+  finish_with_doctor docker || true
 else
   say "Docker not found -- installing bare-metal (venv + systemd) in $INSTALL_DIR"
   command -v python3 >/dev/null 2>&1 || die "python3 is required"
@@ -442,7 +550,7 @@ EOF
   mkdir -p /etc/marcellus
   if [ ! -f /etc/marcellus/sidecar.yml ]; then
     if [ -t 0 ]; then
-      say "generating config (answer the prompts; defaults suit a stock Frigate install)"
+      say "generating config (init finds Frigate's settings and asks you to confirm them)"
       "$INSTALL_DIR/venv/bin/fsc" init -o /etc/marcellus/sidecar.yml \
         --sidecar-db "$INSTALL_DIR/data/marcellus.db"
     else
@@ -519,4 +627,7 @@ EOF
   say "readable by it, add group access (e.g. usermod -aG <frigate-group> marcellus)"
   say "done. Check: curl http://localhost:5001/healthz  |  logs: journalctl -fu marcellus"
   say "Config: /etc/marcellus/sidecar.yml (restart with: systemctl restart marcellus)"
+  wait_service_active 20 || true
+  sleep 3   # let the server bind its port before the checklist asks it
+  finish_with_doctor systemd || true
 fi
