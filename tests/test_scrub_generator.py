@@ -3358,8 +3358,11 @@ def test_late_cycle_still_gives_decimation_its_minimum_share(
     if expect_pass3:
         assert aged_deadlines, "Pass 3 was skipped although the cycle was merely late"
         assert profile.stats.pass3_s >= 0.0
-        # The floor is measured from when Pass 3 begins, not from the tick.
-        assert aged_deadlines[0] == pytest.approx(1_100.0 + 3.0)
+        # The floor is measured from when Pass 3 begins, not from the tick:
+        # the first camera's turn is its share of it (two cameras), and no
+        # turn runs past it.
+        assert aged_deadlines[0] == pytest.approx(1_100.0 + 3.0 / 2)
+        assert max(aged_deadlines) <= 1_100.0 + 3.0
         # Only ~3 s of floor: not every camera fits, and the cursor advanced so
         # the next cycle starts with whoever was cut off.
         assert 0 < profile.decimation_cursor < 6
@@ -4180,17 +4183,14 @@ def test_dead_span_is_not_learned_when_the_deadline_emptied_it(
         conn.close()
 
 
-def test_pass3_starved_camera_leads_the_next_cycle(
-    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
+def _stub_pass3_cycle(
+    env: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _FakeClock,
+    aged: Callable[..., object],
 ) -> None:
-    """A camera reached with no time left (aged tier `starved`) is not served:
-    the cursor stops on it so the next cycle starts there. Counting it rotated
-    it to the back behind whichever camera eats the budget -- prod's
-    gate-walkway and stairway-wide logged tried=0 behind street."""
-    env = _late_cycle_env(long_history_env, decimation_min_share_s=3.0)
-    _add_garden_segments(env)
-    clock = _FakeClock()
-    monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
+    """Passes 1 and 2 and the derived/retire steps as no-ops, `aged` as the
+    aged tier: only Pass 3's scheduling is left to observe."""
 
     async def _live(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
         return {"camera": camera, "segments": 0, "new_frames": 0}
@@ -4198,36 +4198,86 @@ def test_pass3_starved_camera_leads_the_next_cycle(
     async def _noop_backfill(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
         return {"camera": camera, "segments": 0, "new_frames": 0, "backfilled": False}
 
-    order: list[str] = []
-
-    async def _aged(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
-        order.append(camera)
-        if len(order) == 1:
-            clock.t = float(kw["deadline"]) - 0.001  # type: ignore[arg-type]  # eats it all
-            return {"camera": camera, "new_frames": 5, "starved": False}
-        clock.t = float(kw["deadline"])  # type: ignore[arg-type]
-        return {"camera": camera, "new_frames": 0, "starved": True}
-
     async def _noop_derived(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
         return {"camera": camera, "new_frames": 0, "tiers_touched": 0}
 
+    monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
     monkeypatch.setattr(generator, "generate_live_edge", _live)
     monkeypatch.setattr(generator, "generate_backfill", _noop_backfill)
-    monkeypatch.setattr(generator, "generate_aged_tier", _aged)
+    monkeypatch.setattr(generator, "generate_aged_tier", aged)
     monkeypatch.setattr(generator, "generate_derived", _noop_derived)
     monkeypatch.setattr(generator, "_retire_stale_recent_buckets", lambda *a, **k: None)
 
+
+def test_pass3_turn_gets_a_share_not_the_whole_pass(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A camera that uses its whole turn (and makes no progress) cannot take
+    the rest of the pass: the camera after it still gets a turn in the same
+    cycle, each turn's deadline is its share of what was left, and the cursor
+    moves past the camera that came first."""
+    env = _late_cycle_env(long_history_env, decimation_min_share_s=3.0)
+    _add_garden_segments(env)
+    clock = _FakeClock()
+    calls: list[tuple[str, float, int]] = []
+
+    async def _aged(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        calls.append((camera, float(kw["deadline"]), int(kw.get("min_sheets", 0))))  # type: ignore[call-overload]
+        clock.t = float(kw["deadline"])  # type: ignore[arg-type]  # eats its whole turn
+        return {"camera": camera, "new_frames": 0, "starved": True, "deadline_hit": True,
+                "tried": 0, "spans": 10}
+
+    _stub_pass3_cycle(env, monkeypatch, clock, _aged)
+    profile = generator.SourceProfile()
+    pass3_started = clock.t
+    asyncio.run(generator.generate_cycle(
+        env, now=1_800_000_000.0 + 86400.0, profile=profile, backfill_deadline=clock.t + 20.0,
+    ))
+    cams = [c for c, _, _ in calls]
+    assert len(cams) == 2 and len(set(cams)) == 2, calls
+    first_deadline, last_deadline = calls[0][1], calls[1][1]
+    pass3_deadline = last_deadline  # the last turn's share is all that is left
+    assert pass3_started < first_deadline < pass3_deadline
+    assert first_deadline - pass3_started == pytest.approx((pass3_deadline - pass3_started) / 2)
+    assert all(m == 1 for _, _, m in calls)  # every first-round turn is guaranteed a sheet
+
+    calls.clear()
+    asyncio.run(generator.generate_cycle(
+        env, now=1_800_000_000.0 + 86400.0, profile=profile, backfill_deadline=clock.t + 20.0,
+    ))
+    assert [c for c, _, _ in calls] == [cams[1], cams[0]], "the head must rotate"
+
+
+def test_pass3_second_round_gives_leftover_time_to_the_camera_with_a_backlog(
+    long_history_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shares must not cost throughput: when the other cameras have nothing to
+    do, the camera whose turn ran out gets the time they left."""
+    env = _late_cycle_env(long_history_env, decimation_min_share_s=3.0)
+    _add_garden_segments(env)
+    clock = _FakeClock()
+    calls: list[tuple[str, float]] = []
+    busy: list[str] = []
+
+    async def _aged(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        calls.append((camera, float(kw["deadline"])))  # type: ignore[arg-type]
+        if not busy:
+            busy.append(camera)
+        if camera == busy[0]:
+            clock.t = float(kw["deadline"])  # type: ignore[arg-type]
+            return {"camera": camera, "new_frames": 3, "deadline_hit": True, "tried": 1,
+                    "spans": 50}
+        return {"camera": camera, "new_frames": 0, "deadline_hit": False, "tried": 0,
+                "spans": 0}
+
+    _stub_pass3_cycle(env, monkeypatch, clock, _aged)
     profile = generator.SourceProfile()
     asyncio.run(generator.generate_cycle(
         env, now=1_800_000_000.0 + 86400.0, profile=profile, backfill_deadline=clock.t + 20.0,
     ))
-    assert len(order) == 2, order
-    starved_camera = order[1]
-    order.clear()
-    asyncio.run(generator.generate_cycle(
-        env, now=1_800_000_000.0 + 86400.0, profile=profile, backfill_deadline=clock.t + 20.0,
-    ))
-    assert order[0] == starved_camera, order
+    assert [c for c, _ in calls] == [busy[0], calls[1][0], busy[0]], calls
+    # The second turn runs to the end of the pass: the idle camera's share.
+    assert calls[2][1] > calls[0][1]
 
 
 def test_read_error_never_marks_a_span_dead(
@@ -4462,3 +4512,344 @@ def test_superseded_sweep_unlinks_outside_the_write_transaction(
     finally:
         probe.close()
         conn.close()
+
+
+# ----- Pass 3 fairness against a camera whose setup eats its turn -----
+
+
+_P3_BASE = 1_800_000_000.0
+_P3_NOW = _P3_BASE + 1_000.0  # every segment below is older than the 5 s boundary
+#: Unpatched, for measuring: the tests below wrap `generator.uncovered_spans`.
+_UNCOVERED_SPANS = generator.uncovered_spans
+
+
+def _pass3_env(
+    root: Path, monkeypatch: pytest.MonkeyPatch, cameras: list[str], segments: int = 4
+) -> Settings:
+    """`cameras` each with `segments` 10 s recordings 10 s apart, so the recent
+    (1 s) tier holds one separate bucket -- one sheet -- per segment, and every
+    one of them sits behind an aged-tier (5 s) hole. Generic camera names: the
+    shape is what matters, not the site."""
+    root.mkdir(parents=True, exist_ok=True)
+    frigate_db = root / "frigate.db"
+    conn = sqlite3.connect(frigate_db)
+    conn.executescript(RECORDINGS_SCHEMA)
+    recordings_root = root / "recordings"
+    recordings_root.mkdir()
+    rows = []
+    for cam in cameras:
+        for k in range(segments):
+            name = f"{cam}-{k}.mp4"
+            start = _P3_BASE + k * 20.0
+            rows.append((f"{cam}{k}", cam, f"/media/frigate/{name}", start, start + 10.0))
+            (recordings_root / name).write_bytes(b"fake")
+    conn.executemany("INSERT INTO recordings VALUES (?, ?, ?, ?, ?, 10.0, 5.0)", rows)
+    conn.commit()
+    conn.close()
+
+    settings = Settings(
+        frigate=FrigateSection(
+            base_url="http://frigate.test:5000", config_path=root / "cfg.yml",
+            db_path=frigate_db, media_path=Path("/media/frigate"),
+            recordings_path=recordings_root,
+        ),
+        sidecar=SidecarSection(db_path=root / "sidecar.db", bind_port=5001),
+        scrub=ScrubSection(
+            enabled=True, cameras=list(cameras), cache_dir=root / "scrub",
+            recent_interval_s=1.0, aged_interval_s=5.0,
+            aged_after_h=5.0 / 3600.0, retention_days=4, sheet_cols=4, sheet_rows=3,
+            match_keyframe_cadence=False, derived_intervals_s=[],
+            live_edge_interval_s=20.0, decimation_min_share_s=3.0,
+        ),
+    )
+
+    async def _fake_probe_gop(seg_path: Path, **kw: object) -> float:
+        return 30.0  # fps-fallback path: frames land exactly on each tier's grid
+
+    async def _fake_extract_fps(
+        seg_path: Path, out_dir: Path, interval_s: float, **kw: object
+    ) -> list[Path]:
+        paths = []
+        for i in range(int(round(10.0 / interval_s))):
+            pth = out_dir / f"{i:06d}.jpg"
+            _make_jpg(pth)
+            paths.append(pth)
+        return paths
+
+    monkeypatch.setattr(ffmpeg_io, "probe_gop_seconds", _fake_probe_gop)
+    monkeypatch.setattr(ffmpeg_io, "extract_fps", _fake_extract_fps)
+    return settings
+
+
+def _build_recent_tier(env: Settings) -> generator.SourceProfile:
+    """Decode every camera's recordings into the 1 s tier only (an aged window
+    that doesn't exist yet), as the live edge would have while they were new."""
+    collapsed = env.model_copy(
+        update={"scrub": env.scrub.model_copy(update={"aged_after_h": 1_000_000.0})}
+    )
+    profile = generator.SourceProfile()
+    conn = db.open_joined(env.frigate.db_path, env.sidecar.db_path)
+    try:
+        for cam in env.scrub.cameras:
+            for _ in range(10):
+                done = asyncio.run(generator.generate_camera(
+                    collapsed, cam, frigate_conn=conn, sidecar_conn=conn,
+                    now=_P3_BASE + 200.0, profile=profile, sem=asyncio.Semaphore(3),
+                ))
+                if not done["segments"]:
+                    break
+    finally:
+        conn.close()
+    return profile
+
+
+def _decimable_spans(env: Settings, camera: str) -> int:
+    """Aged-tier holes with 1 s data behind them: the work Pass 3 exists to do."""
+    conn = db.open_sidecar(env.sidecar.db_path)
+    try:
+        cutoff = _P3_NOW - env.scrub.retention_days * 86400
+        holes = _UNCOVERED_SPANS(conn, camera, 5.0, cutoff, _P3_NOW - 5.0)
+        recent = conn.execute(
+            "SELECT start_ts, end_ts FROM scrub_buckets WHERE camera = ? AND interval_s = 1.0",
+            (camera,),
+        ).fetchall()
+        return len(generator._intersect_spans(holes, [(r[0], r[1]) for r in recent]))
+    finally:
+        conn.close()
+
+
+def _pass3_only(
+    monkeypatch: pytest.MonkeyPatch, clock: _FakeClock, heavy: set[str], turns: list[str]
+) -> None:
+    """Stub Passes 1-2; run the real aged tier, whose setup costs `heavy`
+    cameras 100 s of the injected clock -- far more than the whole pass, as
+    the span build did on production."""
+
+    async def _live(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "segments": 0, "new_frames": 0}
+
+    async def _noop_backfill(_s: Settings, camera: str, **kw: object) -> dict[str, object]:
+        return {"camera": camera, "segments": 0, "new_frames": 0, "backfilled": False}
+
+    real_uncovered = generator.uncovered_spans
+
+    def _uncovered(conn: sqlite3.Connection, camera: str, interval_s: float,
+                   ws: float, we: float) -> list[tuple[float, float]]:
+        if interval_s == 5.0:
+            turns.append(camera)
+            if camera in heavy:
+                clock.t += 100.0
+        return real_uncovered(conn, camera, interval_s, ws, we)
+
+    monkeypatch.setattr(generator.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(generator, "generate_live_edge", _live)
+    monkeypatch.setattr(generator, "generate_backfill", _noop_backfill)
+    monkeypatch.setattr(generator, "uncovered_spans", _uncovered)
+
+
+def _cycle(env: Settings, profile: generator.SourceProfile, clock: _FakeClock) -> None:
+    asyncio.run(generator.generate_cycle(
+        env, now=_P3_NOW, profile=profile, backfill_deadline=clock.t + 20.0,
+    ))
+
+
+def test_pass3_heavy_camera_does_not_starve_the_cameras_after_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Production, 2026-11-17: one camera's span build took the whole Pass 3
+    deadline every cycle, it logged tried=0, it was not counted as served, so
+    it led every following cycle and no camera after it was decimated again.
+
+    Now its turn is bounded and counted: the later cameras are decimated
+    within the next cycle, and the heavy camera itself still makes progress
+    every turn (one guaranteed source sheet) instead of none."""
+    cams = ["cam-a", "cam-b", "cam-c"]
+    env = _pass3_env(tmp_path, monkeypatch, cams)
+    profile = _build_recent_tier(env)
+    assert all(_decimable_spans(env, c) == 4 for c in cams)
+
+    clock = _FakeClock()
+    turns: list[str] = []
+    _pass3_only(monkeypatch, clock, {"cam-a"}, turns)
+    heavy_left = [_decimable_spans(env, "cam-a")]
+    caplog.set_level(logging.INFO, logger="marcellus.scrub.generator")
+    for _ in range(4):
+        _cycle(env, profile, clock)
+        heavy_left.append(_decimable_spans(env, "cam-a"))
+        if all(_decimable_spans(env, c) == 0 for c in ("cam-b", "cam-c")):
+            break_at = len(heavy_left) - 1
+            break
+    else:
+        pytest.fail(f"later cameras never decimated; turns={turns}")
+    assert break_at <= 2, f"cam-b/cam-c waited {break_at} cycles; turns={turns}"
+    # Keep cycling until the heavy camera is done: strictly fewer each cycle.
+    while heavy_left[-1] and len(heavy_left) < 10:
+        _cycle(env, profile, clock)
+        heavy_left.append(_decimable_spans(env, "cam-a"))
+    assert heavy_left == sorted(heavy_left, reverse=True) and heavy_left[-1] == 0, heavy_left
+    assert all(a > b for a, b in zip(heavy_left, heavy_left[1:], strict=False)), heavy_left
+
+    cycle_lines = [r.getMessage() for r in caplog.records if "scrub: cycle" in r.getMessage()]
+    assert "out_of_time=cam-a(turns=1 tried=1" in cycle_lines[0], cycle_lines[0]
+    assert "pass3 cursor 0->1 turns=1/3" in cycle_lines[0], cycle_lines[0]
+
+
+def test_pass3_rotation_is_fair_across_three_heavy_cameras(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three cameras that each overrun the whole pass take turns, one per
+    cycle, in rotation -- and each turn decimates something."""
+    cams = ["cam-a", "cam-b", "cam-c"]
+    env = _pass3_env(tmp_path, monkeypatch, cams)
+    profile = _build_recent_tier(env)
+    clock = _FakeClock()
+    turns: list[str] = []
+    _pass3_only(monkeypatch, clock, set(cams), turns)
+    left = {c: _decimable_spans(env, c) for c in cams}
+    for _ in range(6):
+        before = len(turns)
+        _cycle(env, profile, clock)
+        assert len(turns) == before + 1, turns  # the pass is over after one turn
+        cam = turns[-1]
+        now_left = _decimable_spans(env, cam)
+        assert now_left < left[cam], (cam, now_left, left[cam])
+        left[cam] = now_left
+    assert turns == cams + cams
+
+
+def test_pass3_normal_case_generates_what_an_unbounded_run_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With time to spare, a cycle's Pass 3 writes exactly the aged-tier rows
+    and retires exactly the recent rows a plain, deadline-free aged-tier run
+    per camera does: the scheduling change changes nothing else."""
+    cams = ["cam-a", "cam-b", "cam-c"]
+
+    def _snapshot(env: Settings) -> list[tuple[object, ...]]:
+        conn = db.open_sidecar(env.sidecar.db_path)
+        try:
+            buckets = conn.execute(
+                "SELECT camera, interval_s, start_ts, end_ts, generated_through, complete "
+                "FROM scrub_buckets ORDER BY camera, interval_s, start_ts"
+            ).fetchall()
+            sheets = conn.execute(
+                "SELECT camera, interval_s, start_ts, count, complete FROM scrub_sheets "
+                "ORDER BY camera, interval_s, start_ts, count"
+            ).fetchall()
+            return [tuple(r) for r in buckets] + [tuple(r) for r in sheets]
+        finally:
+            conn.close()
+
+    cycled = _pass3_env(tmp_path / "cycled", monkeypatch, cams)
+    profile = _build_recent_tier(cycled)
+    direct = _pass3_env(tmp_path / "direct", monkeypatch, cams)
+    direct_profile = _build_recent_tier(direct)
+    assert _snapshot(cycled) == _snapshot(direct)  # same starting point
+
+    clock = _FakeClock()
+    _pass3_only(monkeypatch, clock, set(), [])
+    _cycle(cycled, profile, clock)
+    conn = db.open_joined(direct.frigate.db_path, direct.sidecar.db_path)
+    try:
+        for cam in cams:
+            asyncio.run(generator.generate_aged_tier(
+                direct, cam, frigate_conn=conn, sidecar_conn=conn,
+                now=_P3_NOW, profile=direct_profile,
+            ))
+            generator._retire_stale_recent_buckets(
+                conn, direct.scrub.cache_dir, cam, 1.0, _P3_NOW - 5.0, aged_interval_s=5.0,
+            )
+    finally:
+        conn.close()
+
+    assert all(_decimable_spans(cycled, c) == 0 for c in cams)
+    assert _snapshot(cycled) == _snapshot(direct)
+
+
+# ----- the setup helpers must equal the brute-force forms they replaced -----
+
+
+def _random_spans(rng: object, n: int, lo: float, hi: float) -> list[tuple[float, float]]:
+    import random
+
+    assert isinstance(rng, random.Random)
+    out = []
+    for _ in range(n):
+        a = rng.uniform(lo, hi)
+        out.append((a, a + rng.choice([0.0, rng.uniform(0.0, 30.0)])))
+    return out
+
+
+def test_intersect_spans_equals_the_cross_product() -> None:
+    import random
+
+    rng = random.Random(7)
+    for _ in range(200):
+        cursor = rng.uniform(0, 50)
+        hole_list = []
+        for _ in range(rng.randint(0, 12)):
+            start = cursor + rng.uniform(0, 20)
+            end = start + rng.uniform(0.1, 40)
+            hole_list.append((start, end))
+            cursor = end
+        rows = sorted(_random_spans(rng, rng.randint(0, 15), 0, 400))
+        brute = sorted(
+            (max(h0, r0), min(h1, r1))
+            for h0, h1 in hole_list
+            for r0, r1 in rows
+            if min(h1, r1) > max(h0, r0)
+        )
+        assert generator._intersect_spans(hole_list, rows) == brute
+
+
+def test_subtract_covered_equals_the_per_hole_scan() -> None:
+    import random
+
+    def _reference(holes: list[tuple[float, float]], covered: list[tuple[float, float]],
+                   min_width_s: float) -> list[tuple[float, float]]:
+        out: list[tuple[float, float]] = []
+        for h_start, h_end in holes:
+            cursor = h_start
+            for c_start, c_end in sorted(covered):
+                if c_end <= cursor or c_start >= h_end:
+                    continue
+                if c_start - cursor >= min_width_s:
+                    out.append((cursor, c_start))
+                cursor = max(cursor, c_end)
+                if cursor >= h_end:
+                    break
+            if h_end - cursor >= min_width_s:
+                out.append((cursor, h_end))
+        return out
+
+    rng = random.Random(11)
+    for _ in range(300):
+        holes = _random_spans(rng, rng.randint(0, 10), 0, 300)
+        covered = _random_spans(rng, rng.randint(0, 15), 0, 300)
+        width = rng.choice([0.5, 1.0, 5.0])
+        assert generator._subtract_covered(holes, covered, width) == _reference(
+            holes, covered, width
+        )
+
+
+def test_live_aged_spans_equals_the_pairwise_filter() -> None:
+    import random
+
+    rng = random.Random(13)
+    for _ in range(300):
+        spans = sorted(_random_spans(rng, rng.randint(0, 12), 0, 300))
+        marks = _random_spans(rng, rng.randint(0, 8), 0, 300)
+        mono = 10_000.0
+        dead = {m: mono - rng.choice([0.0, generator._DEAD_SPAN_TTL_S + 1.0]) for m in marks}
+        expected_dead = {
+            k: v for k, v in dead.items()
+            if mono - v < generator._DEAD_SPAN_TTL_S
+            and any(a < k[1] and k[0] < b for a, b in spans)
+        }
+        expected_live = [
+            sp for sp in spans
+            if not any(d0 <= sp[0] and sp[1] <= d1 for d0, d1 in expected_dead)
+        ]
+        live = generator._live_aged_spans(spans, dead, mono)
+        assert dead == expected_dead
+        assert live == expected_live
