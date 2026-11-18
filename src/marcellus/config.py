@@ -80,7 +80,10 @@ class SidecarSection(BaseModel):
     # label/promote writes, so leaving it open makes it a bypass of Frigate's
     # own auth. The proxy catch-all is deliberately NOT gated here (Frigate
     # authenticates that traffic itself, and its 401 must reach the client).
-    # Set false only on a deployment where Frigate's own auth is disabled.
+    # A request with no cookie at all is still admitted while Frigate itself
+    # has sign-in off (auth.enabled false, checked against Frigate -- see
+    # auth.frigate_allows_anonymous), so a sign-in-off Frigate no longer needs
+    # this set false. False turns the check off whatever Frigate says.
     require_frigate_auth: bool = True
     # A cookie that validated upstream is trusted this long before being
     # re-checked, so /v1 doesn't add a round-trip per request.

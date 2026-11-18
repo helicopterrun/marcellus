@@ -20,9 +20,25 @@ may change behaviour). Numbers are pull requests.
   files afterwards. A busy lock in scrub generation, the push activity sweep,
   the MQTT consumer or external-source state now logs one warning line instead
   of a traceback.
+### Added
+
+- **Frigate with sign-in turned off.** The sidecar's own routes (`/v1`, pages,
+  `/faces`, ...) now admit requests that carry no Frigate cookie when Frigate
+  itself serves such callers: its running config reports `auth.enabled: false`
+  and its authenticated origin answers a request with no credential. The
+  Elsinore app's "no sign-in" servers get the scrub reel, push, Encounters and
+  People instead of falling back to Frigate alone. Checked against Frigate and
+  cached for `sidecar.auth_cache_ttl_s`, never assumed; a Frigate with sign-in
+  on, `proxy.auth_secret` set, or a reverse proxy asking for its own login keeps
+  the session requirement. `sidecar.require_frigate_auth: false` is no longer
+  needed for such a Frigate. Note that the sidecar is then open to anything
+  that can reach its `bind_host`/`bind_port` (guide: "Frigate with sign-in
+  turned off").
 
 ### Changed
 
+- Guide: new getting-started page "Docker or systemd?" and a "Set up push" page covering the MQTT broker settings and Frigate sign-in.
+- Installer: re-running `install.sh` on a bare-metal host that still has a pre-rename `frigate-sidecar` install now stops with migration steps instead of creating a second user and unit beside it; nothing is moved or deleted (`ALLOW_LEGACY_COEXIST=1` overrides).
 - **Frigate 0.18 behaviour decisions.** A motion bucket Frigate leaves out is now
   counted as zero motion, so coarse `/v1/motion` and `/v1/reel` traces read the
   same on 0.17 and 0.18 (0.17 output can shift slightly at window edges).

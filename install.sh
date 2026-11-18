@@ -21,7 +21,57 @@ say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# A bare-metal install made before the rename (v0.3 and earlier, then called
+# frigate-sidecar) has its own unit, user-less root service, venv and config.
+# This script cannot move those safely, so it stops instead of creating a
+# second, empty install beside them. Paths are overridable for testing.
+LEGACY_UNIT="${LEGACY_UNIT:-/etc/systemd/system/frigate-sidecar.service}"
+LEGACY_DIR="${LEGACY_DIR:-/opt/frigate-sidecar}"
+LEGACY_CONF="${LEGACY_CONF:-/etc/frigate-sidecar}"
+NEW_UNIT="${NEW_UNIT:-/etc/systemd/system/marcellus.service}"
+
+# legacy_install_found: true when an old frigate-sidecar bare-metal install is
+# present and no marcellus unit exists yet (i.e. it has not been migrated).
+legacy_install_found() {
+  [ -e "$NEW_UNIT" ] && return 1
+  [ -e "$LEGACY_UNIT" ] || [ -d "$LEGACY_DIR" ] || [ -d "$LEGACY_CONF" ]
+}
+
+legacy_install_message() {
+  cat <<MSG
+An older frigate-sidecar install was found ($LEGACY_UNIT, $LEGACY_DIR or $LEGACY_CONF).
+Re-running this installer would create a second, empty Marcellus install beside
+it, so nothing has been changed. Move the old install first. Back up first,
+then, as root:
+
+  systemctl stop frigate-sidecar
+  systemctl disable frigate-sidecar
+  cp -a $LEGACY_DIR /opt/marcellus
+  cp -a $LEGACY_CONF /etc/marcellus
+  rm -rf /opt/marcellus/venv     # the old venv has the old paths baked in; this script rebuilds it
+  # then edit /etc/marcellus/sidecar.yml: any path that still points under
+  # /opt/frigate-sidecar (notably sidecar.db_path, the database) must point
+  # under /opt/marcellus instead. The database file may keep its old name.
+  mv /etc/systemd/system/frigate-sidecar.service /root/frigate-sidecar.service.bak
+
+then run this installer again. It keeps your config and installs the new
+service. Your old directories are left in place; delete them yourself once the
+new service is healthy. Details: "Upgrading from frigate-sidecar" in
+docs/deployment.md. To install alongside the old one anyway, re-run with
+ALLOW_LEGACY_COEXIST=1.
+MSG
+}
+
+# Sourcing with MARCELLUS_INSTALL_SOURCE_ONLY=1 loads the functions above only
+# (used by tests/test_install_script.py).
+if [ "${MARCELLUS_INSTALL_SOURCE_ONLY:-}" = 1 ]; then return 0 2>/dev/null || exit 0; fi
+
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo) -- installs into $INSTALL_DIR"
+
+if [ "${ALLOW_LEGACY_COEXIST:-}" != 1 ] && legacy_install_found; then
+  legacy_install_message >&2
+  exit 1
+fi
 
 fetch() { # fetch <relpath> <dest> -- never clobber an existing user-edited file
   if [ -e "$2" ]; then
