@@ -38,9 +38,15 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
 from starlette.types import Receive, Scope, Send
+from starlette.websockets import WebSocketDisconnect
 
 from marcellus.errors import error_detail
 from marcellus.frigate_api import get_stream_client, get_vod_stream_client, pool_stats
+
+try:
+    from websockets.exceptions import ConnectionClosed as _WsConnectionClosed
+except ImportError:  # pragma: no cover - uvicorn[standard] ships websockets
+    _WsConnectionClosed = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
@@ -631,21 +637,31 @@ async def proxy_websocket(path: str, websocket: WebSocket) -> None:
     await websocket.accept(subprotocol=upstream_ws.subprotocol)
 
     async def client_to_upstream() -> None:
-        while True:
-            message = await websocket.receive()
-            if message["type"] == "websocket.disconnect":
-                return
-            if (data := message.get("text")) is not None:
-                await upstream_ws.send(data)
-            elif (raw := message.get("bytes")) is not None:
-                await upstream_ws.send(raw)
+        try:
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    return
+                if (data := message.get("text")) is not None:
+                    await upstream_ws.send(data)
+                elif (raw := message.get("bytes")) is not None:
+                    await upstream_ws.send(raw)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a pump must never leak its exception
+            _log_pump_end("client", path, exc)
 
     async def upstream_to_client() -> None:
-        async for message in upstream_ws:
-            if isinstance(message, bytes):
-                await websocket.send_bytes(message)
-            else:
-                await websocket.send_text(message)
+        try:
+            async for message in upstream_ws:
+                if isinstance(message, bytes):
+                    await websocket.send_bytes(message)
+                else:
+                    await websocket.send_text(message)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a pump must never leak its exception
+            _log_pump_end("upstream", path, exc)
 
     tasks = [
         asyncio.create_task(client_to_upstream()),
@@ -655,12 +671,35 @@ async def proxy_websocket(path: str, websocket: WebSocket) -> None:
         _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        # Gather retrieves every task's outcome, so asyncio never logs
+        # "Task exception was never retrieved".
+        await asyncio.gather(*tasks, return_exceptions=True)
     finally:
-        await upstream_ws.close()
+        for task in tasks:
+            task.cancel()
+        with contextlib.suppress(Exception):
+            await upstream_ws.close()
         # RuntimeError: already closed. AttributeError: the client left during the
         # handshake, so uvicorn's websockets protocol never opened and its close() has
         # no transfer_data_task. Either way there is nothing left to close.
         with contextlib.suppress(RuntimeError, AttributeError):
             await websocket.close()
+
+
+_CLOSED_SEND_MARKERS = ("after sending 'websocket.close'", "response already completed")
+
+
+def _peer_closed(exc: BaseException) -> bool:
+    """True when `exc` just means one side of the relay has gone away."""
+    if isinstance(exc, WebSocketDisconnect):
+        return True
+    if _WsConnectionClosed is not None and isinstance(exc, _WsConnectionClosed):
+        return True
+    return isinstance(exc, RuntimeError) and any(m in str(exc) for m in _CLOSED_SEND_MARKERS)
+
+
+def _log_pump_end(side: str, path: str, exc: Exception) -> None:
+    if _peer_closed(exc):
+        logger.debug("proxy: websocket %s closed (%s): %s", path, side, exc)
+    else:
+        logger.warning("proxy: websocket relay for %s ended on %s error: %r", path, side, exc)

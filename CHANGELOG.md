@@ -9,6 +9,7 @@ may change behaviour). Numbers are pull requests.
 
 ### Fixed
 
+- **WebSocket proxy no longer logs a traceback when a client closes a live stream.** A client leaving while upstream frames were still arriving left an unretrieved task exception (`Unexpected ASGI message 'websocket.send'` or `ConnectionClosedOK`). Either side closing now ends the relay quietly, cancels the other pump and closes the upstream socket; a genuine error logs one warning line.
 - **`database is locked` in scrub generation and the push sweep.** One lock
   failure in a generation cycle no longer fails every later camera: Python left
   the failed write's transaction open, so each later write on the cycle's
