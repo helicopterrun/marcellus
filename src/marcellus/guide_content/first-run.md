@@ -15,7 +15,8 @@ warning logged at startup (see `docs/deployment.md`).
 ## Setup checklist
 
 ```walkthrough
-- Copy config/sidecar.example.yml to config/sidecar.yml
+- Run `fsc init`: it finds Frigate's settings and asks you to confirm them (the quick install already did this)
+- Or do it by hand: copy config/sidecar.example.yml to config/sidecar.yml
 - Set frigate.base_url and frigate.proxy_base_url to your Frigate ports
 - Use https:// for port 8971 and decide on frigate.verify_tls (below)
 - Point frigate.db_path at Frigate's frigate.db
@@ -29,7 +30,41 @@ database and recordings paths, ffmpeg, the scrub cache, push and the running
 service, and prints a one-line fix for anything wrong. See
 [Check your install](/guide/check-your-install).
 
-## Configuration
+## Let `fsc init` write the file
+
+`fsc init` (the quick install runs it for you) looks for Frigate instead of
+asking you to type its settings. It never writes to Frigate's config or files.
+
+1. It asks for Frigate's address, then probes the signed-in port (scheme and
+   certificate, see "Frigate's HTTPS sign-in port" below).
+2. It asks Frigate itself (`/api/config`) and looks for Frigate's `config.yml`
+   in the usual places (`--frigate-config`, `$FRIGATE_CONFIG`, `/opt/frigate`,
+   `/srv/frigate`, `/config` and similar). A file counts only if its cameras
+   match the running Frigate's, so another project's file is never used.
+3. It reads from them how many cameras there are, whether sign-in and TLS are
+   on, where Frigate keeps its database, and the `mqtt:` section (broker,
+   port, user, whether a password is set, topic prefix). It never reads a
+   password: a literal one, a `{FRIGATE_MQTT_PASSWORD}` placeholder and a
+   secret file all just mean "a login is needed".
+4. It shows a summary, for example *Frigate 0.18.2 at `http://192.168.1.10:5000`,
+   9 cameras, sign-in on, MQTT broker at `mqtt.local:1883` as user `frigate`*,
+   then asks once whether to use the values it found. Answer no to go through
+   them one by one.
+
+What it cannot know it asks for. Frigate's own paths are paths **inside its
+container**, so the one value you usually type is the host-side folder that
+holds Frigate's `recordings/` (the media folder). It checks that the folder
+exists and looks right; if you give the `recordings` folder itself it uses the
+folder above it, because `recordings_path` replaces `media_path` (see below).
+
+Then comes one optional question, "Set up push alerts now?" (see
+[Set up push](/guide/push-setup)). Say no and nothing about push is written.
+
+Running it again over an existing file needs `--force`. Your current values are
+offered as defaults and every setting `init` does not manage is kept (comments
+are not). With `--non-interactive` it never prompts: it uses flags, then what it
+found, then your existing file, then the defaults, and prints each value it had
+to assume.
 
 **The `frigate:` section — how the sidecar reaches Frigate**
 

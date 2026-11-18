@@ -17,6 +17,8 @@ app = typer.Typer(
     name="fsc",
     help="Marcellus: triage UI + read-only analysis for Frigate NVR.",
     no_args_is_help=True,
+    # A crash must never print local variables: `init` holds the MQTT password.
+    pretty_exceptions_show_locals=False,
 )
 
 triage_app = typer.Typer(help="Sample borderline events and record tp/fp/skip labels.")
@@ -69,13 +71,15 @@ def init(
         None, help="Frigate's AUTHENTICATED origin, e.g. http://frigate.lan:8971"
     ),
     frigate_config: str | None = typer.Option(
-        None, help="Path to Frigate's config.yml as seen by the sidecar."
+        None, help="Path to Frigate's config.yml as seen by the sidecar (found if omitted)."
     ),
     frigate_db: str | None = typer.Option(
-        None, help="Path to Frigate's frigate.db as seen by the sidecar."
+        None, help="Path to Frigate's frigate.db as seen by the sidecar (found if omitted)."
     ),
     recordings_path: str | None = typer.Option(
-        None, help="Host-side recordings root that replaces frigate.media_path."
+        None,
+        help="Host-side copy of Frigate's media folder (the one holding recordings/); "
+        "replaces frigate.media_path.",
     ),
     sidecar_db: str | None = typer.Option(None, help="Path for the sidecar's own SQLite DB."),
     bind_host: str | None = typer.Option(None),
@@ -83,199 +87,67 @@ def init(
     non_interactive: bool = typer.Option(
         False,
         "--non-interactive",
-        help="Never prompt; use flags where given and defaults otherwise.",
+        help="Never prompt; use flags, then what is found in Frigate, then defaults.",
     ),
-    force: bool = typer.Option(False, "--force", help="Overwrite an existing config file."),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Re-run over an existing config file: its values are offered as defaults and "
+        "settings init does not manage are kept.",
+    ),
+    enable_push: bool = typer.Option(
+        False,
+        "--enable-push",
+        help="Set up push alerts (MQTT) without asking; non-interactively this needs "
+        "--mqtt-password-file or $MARCELLUS_INIT_MQTT_PASSWORD when the broker has a login.",
+    ),
+    mqtt_host: str | None = typer.Option(None, help="MQTT broker host (default: Frigate's)."),
+    mqtt_port: int | None = typer.Option(None, help="MQTT broker port (default: Frigate's)."),
+    mqtt_user: str | None = typer.Option(None, help="MQTT username (default: Frigate's)."),
+    mqtt_password_file: str | None = typer.Option(
+        None,
+        "--mqtt-password-file",
+        help="Read the MQTT password from the first line of this file.",
+    ),
+    env_file: str | None = typer.Option(
+        None,
+        "--env-file",
+        help="Env file that receives MARCELLUS_PUSH__MQTT_PASSWORD (default: "
+        "/etc/marcellus-push.env for systemd, the install directory's .env for Docker).",
+    ),
 ) -> None:
-    """Generate a sidecar.yml interactively (or from flags) and sanity-check it.
+    """Generate a sidecar.yml by finding Frigate's settings and confirming them.
 
-    Prompts only for the handful of values that differ per deployment; every
-    other setting keeps its documented default and can be edited in the
-    generated file afterwards (see config/sidecar.example.yml for the full
-    annotated reference).
+    Reads Frigate's API and config.yml (read-only; nothing in Frigate is ever
+    written), shows what it found, and asks you to confirm or edit it. Only the
+    host-side recordings folder usually has to be typed. Optionally sets up push
+    alerts: the MQTT password goes only into an env file, never into sidecar.yml.
+    Every other setting keeps its documented default; see
+    config/sidecar.example.yml for the full annotated reference.
     """
-    from pathlib import Path
+    from marcellus.init_cmd import InitOptions, run_init
 
-    import yaml
-
-    from marcellus.config import FrigateSection, Settings, SidecarSection
-
-    frigate_defaults = FrigateSection()
-    sidecar_defaults = SidecarSection()
-
-    def ask(label: str, flag: str | int | None, default: str) -> str:
-        if flag is not None:
-            return str(flag)
-        if non_interactive:
-            return default
-        return str(typer.prompt(label, default=default))
-
-    out_path = Path(output)
-    if out_path.exists() and not force:
-        typer.echo(f"{out_path} already exists; use --force to overwrite.", err=True)
-        raise typer.Exit(code=1)
-
-    base_url = ask(
-        "Frigate API URL (unauthenticated origin)", frigate_url, frigate_defaults.base_url
+    run_init(
+        InitOptions(
+            output=output,
+            frigate_url=frigate_url,
+            proxy_url=proxy_url,
+            frigate_config=frigate_config,
+            frigate_db=frigate_db,
+            recordings_path=recordings_path,
+            sidecar_db=sidecar_db,
+            bind_host=bind_host,
+            bind_port=bind_port,
+            non_interactive=non_interactive,
+            force=force,
+            env_file=env_file,
+            enable_push=enable_push,
+            mqtt_host=mqtt_host,
+            mqtt_port=mqtt_port,
+            mqtt_user=mqtt_user,
+            mqtt_password_file=mqtt_password_file,
+        )
     )
-    signin_url = ask(
-        "Frigate AUTHENTICATED origin (usually port 8971)",
-        proxy_url,
-        _default_signin_url(base_url, frigate_defaults),
-    )
-    late_warnings: list[str] = []
-    verify_tls = True
-    if signin_url != frigate_defaults.proxy_base_url:
-        signin_url, verify_tls, late_warnings = _check_signin_port(
-            signin_url, interactive=not non_interactive
-        )
-
-    cfg: dict[str, Any] = {
-        "frigate": {
-            "base_url": base_url,
-            "proxy_base_url": signin_url,
-            "verify_tls": verify_tls,
-            "config_path": ask(
-                "Path to Frigate's config.yml", frigate_config, str(frigate_defaults.config_path)
-            ),
-            "db_path": ask(
-                "Path to Frigate's frigate.db", frigate_db, str(frigate_defaults.db_path)
-            ),
-            "recordings_path": ask(
-                "Host-side recordings root (replaces media_path in recordings.path)",
-                recordings_path,
-                str(frigate_defaults.recordings_path),
-            ),
-        },
-        "sidecar": {
-            "db_path": ask("Sidecar SQLite DB path", sidecar_db, str(sidecar_defaults.db_path)),
-            "bind_host": ask("Bind host", bind_host, sidecar_defaults.bind_host),
-            "bind_port": int(ask("Bind port", bind_port, str(sidecar_defaults.bind_port))),
-        },
-    }
-
-    # Validate through the real settings model so a bad value fails here, not
-    # at first server start.
-    settings = Settings.model_validate(cfg)
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    header = (
-        "# Generated by `fsc init`. All other settings keep their defaults --\n"
-        "# see config/sidecar.example.yml for the full annotated reference.\n"
-        "# frigate.verify_tls: false skips the TLS certificate check for Frigate only\n"
-        "# (its sign-in port uses a self-signed certificate by default).\n"
-    )
-    out_path.write_text(header + yaml.safe_dump(cfg, sort_keys=False))
-    typer.echo(f"Wrote {out_path}")
-    for line in late_warnings:
-        typer.echo(line.format(path=out_path), err=True)
-
-    # Sanity checks: warn, never fail -- the config may be written on a box
-    # where Frigate isn't reachable yet (e.g. inside `docker run --rm`).
-    from marcellus import frigate_tls
-
-    try:
-        resp = frigate_tls.get(
-            settings.frigate.base_url.rstrip("/") + "/api/version",
-            verify_tls=settings.frigate.verify_tls,
-            timeout=5.0,
-        )
-        resp.raise_for_status()
-        typer.echo(f"✓ Frigate reachable at {settings.frigate.base_url} ({resp.text.strip()})")
-    except Exception as exc:  # noqa: BLE001 -- diagnostics only
-        typer.echo(f"⚠ Could not reach Frigate at {settings.frigate.base_url}: {exc}", err=True)
-    db = Path(cfg["frigate"]["db_path"])
-    if db.exists():
-        typer.echo(f"✓ Frigate DB found at {db}")
-    else:
-        typer.echo(f"⚠ Frigate DB not found at {db} (check your mount/path)", err=True)
-    rec = Path(cfg["frigate"]["recordings_path"])
-    if rec.is_dir():
-        typer.echo(f"✓ Recordings path exists at {rec}")
-    else:
-        typer.echo(
-            f"⚠ Recordings path {rec} does not exist (scrub cache would find nothing)", err=True
-        )
-
-
-def _default_signin_url(base_url: str, frigate_defaults: Any) -> str:
-    """Frigate's signed-in origin on the same host as `base_url`.
-
-    https, because Frigate serves port 8971 over TLS by default; `fsc init`
-    probes it and corrects the scheme if that host says otherwise.
-    """
-    from urllib.parse import urlsplit
-
-    default = str(frigate_defaults.proxy_base_url)
-    if base_url == frigate_defaults.base_url:
-        return default
-    try:
-        host = urlsplit(base_url).hostname
-    except ValueError:
-        return default
-    if not host:
-        return default
-    if ":" in host:  # IPv6 literal
-        host = f"[{host}]"
-    return f"https://{host}:8971"
-
-
-def _check_signin_port(url: str, *, interactive: bool) -> tuple[str, bool, list[str]]:
-    """Probe Frigate's signed-in port; return `(proxy_base_url, verify_tls,
-    warnings)`.
-
-    Fixes the scheme when the port answers in the other one and, for a
-    certificate this machine does not trust (Frigate's self-signed default),
-    asks whether to trust it (interactive) or keeps the strict default and
-    returns a warning naming the setting (non-interactive). `warnings` are
-    printed after the file is written; `{path}` in them is the output path.
-    A probe that gets no answer only adds a note: init never fails or hangs
-    on it.
-    """
-    from marcellus import frigate_tls
-
-    probe = frigate_tls.probe_signin_port_bounded(url)
-    scheme = url.split("://", 1)[0].lower() if "://" in url else ""
-    if probe.scheme is None:
-        typer.echo(
-            f"⚠ Could not check Frigate's sign-in port at {url} ({probe.detail}). "
-            "If sign-in fails later with a certificate error, see `frigate.verify_tls` "
-            "in the guide's Troubleshooting page.",
-            err=True,
-        )
-        return url, True, []
-    if probe.scheme != scheme:
-        fixed = frigate_tls.with_scheme(url, probe.scheme)
-        typer.echo(f"• Frigate's sign-in port speaks {probe.scheme.upper()}: using {fixed}")
-        url = fixed
-    if probe.scheme == "http":
-        typer.echo(f"✓ Frigate's sign-in port answers over plain HTTP at {url}")
-        return url, True, []
-    if probe.trusted:
-        typer.echo(f"✓ Frigate's sign-in port at {url} has a trusted certificate")
-        return url, True, []
-    if probe.trusted is None:
-        return url, True, [
-            f"⚠ Frigate's sign-in port at {url} speaks HTTPS but did not complete a "
-            "connection. If Marcellus cannot reach it, see `frigate.verify_tls` in {path}."
-        ]
-    if interactive:
-        typer.echo(
-            f"Frigate's sign-in port at {url} uses a TLS certificate this machine does not "
-            "trust (Frigate makes a self-signed one by default).\n"
-            "Trusting it turns off certificate checks for Marcellus's connections to "
-            "Frigate only: fine on a home network, but it gives up proof that the other "
-            "end really is your Frigate."
-        )
-        if typer.confirm("Trust Frigate's certificate?", default=probe.private_address):
-            typer.echo("✓ Writing frigate.verify_tls: false")
-            return url, False, []
-    return url, True, [
-        f"⚠ Frigate's sign-in port at {url} uses a TLS certificate this machine does not "
-        "trust (Frigate makes a self-signed one by default), so Marcellus cannot reach it "
-        "yet. Either set `frigate.verify_tls: false` in {path} (fine on a home network) "
-        "or turn TLS off in Frigate (`tls: enabled: false`) and use http://."
-    ]
 
 
 @app.command()

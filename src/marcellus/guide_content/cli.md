@@ -18,12 +18,24 @@ In Docker, run it inside the container, for example
 - `fsc serve` -- run the HTTP server.
 - `fsc watchdog` -- run the Frigate health watchdog (restarts the Frigate
   container on a hung backend).
-- `fsc init --output/-o <path>` -- generate a config file interactively or
-  from flags (`--frigate-url`, `--proxy-url`, `--frigate-config`,
-  `--frigate-db`, `--recordings-path`, `--sidecar-db`, `--bind-host`,
-  `--bind-port`, `--non-interactive`, `--force`), then sanity-check Frigate
-  reachability, the DB path, and the recordings path. `--output`/`-o`
-  chooses where the file is written; it defaults to `config/sidecar.yml`.
+- `fsc init --output/-o <path>` -- generate a config file. It asks Frigate
+  (`/api/config`) and reads Frigate's `config.yml` (read-only) for the camera
+  count, sign-in and TLS state, database path and `mqtt:` section, shows what
+  it found and asks you to confirm or edit it; only the host-side recordings
+  folder is normally typed. Then one optional question, "Set up push alerts
+  now?", which writes the broker into the config and the password only into an
+  env file (`/etc/marcellus-push.env` for systemd, the install directory's
+  `.env` for Docker). Flags: `--frigate-url`, `--proxy-url`,
+  `--frigate-config`, `--frigate-db`, `--recordings-path`, `--sidecar-db`,
+  `--bind-host`, `--bind-port`, `--non-interactive` (never prompts; prints what
+  it assumed), `--force` (re-run over an existing file: current values become
+  the defaults and unrelated settings are kept), `--enable-push`,
+  `--mqtt-host`, `--mqtt-port`, `--mqtt-user`, `--mqtt-password-file`
+  (or `$MARCELLUS_INIT_MQTT_PASSWORD`) and `--env-file`. It finishes by
+  sanity-checking Frigate reachability, the DB path, the recordings path and,
+  when push was set up, the MQTT connection. `--output`/`-o` chooses where the
+  file is written; it defaults to `config/sidecar.yml`. See
+  [First run](/guide/first-run) and [Set up push](/guide/push-setup).
 - `fsc doctor` -- check the install and print a one-line fix for anything
   wrong (`--json`, `--timeout`, `--mqtt-wait`, `--config`, `--no-color`);
   exits 1 if anything failed. See [Check your install](/guide/check-your-install).

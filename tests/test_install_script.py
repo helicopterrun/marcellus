@@ -392,3 +392,132 @@ def test_interactive_prompts_until_valid(tmp_path: Path) -> None:
     assert "does not exist" in out.stderr  # the typo was rejected, then re-asked
     assert f"FRIGATE_CONFIG={tree['FRIGATE_CONFIG']}" in out.stdout
     assert f"FRIGATE_RECORDINGS={tree['FRIGATE_RECORDINGS']}" in out.stdout
+
+
+# ---- the closing checklist (fsc doctor) ----------------------------------------
+
+_STUB = """#!/usr/bin/env bash
+# Stand-in for `fsc` (and, via docker, for the container's fsc). Behaviour comes
+# from STUB_MODE: ok | attention2 | attention1 | nodoctor | fails_silently
+args=("$@")
+for i in "${!args[@]}"; do [ "${args[$i]}" = fsc ] && args=("${args[@]:$((i+1))}") && break; done
+case " ${args[*]} " in
+  *" --help "*)
+    echo "Usage: fsc [OPTIONS] COMMAND"
+    [ "$STUB_MODE" = nodoctor ] || echo "  doctor   Check the install"
+    echo "  serve    Run the HTTP server"
+    exit 0 ;;
+esac
+echo "ARGS: ${args[*]}" >> "$STUB_LOG"
+echo "PW_SEEN: ${MARCELLUS_PUSH__MQTT_PASSWORD:+yes}" >> "$STUB_LOG"
+case "$STUB_MODE" in
+  ok)
+    printf ' \\xe2\\x9c\\x93 config  loaded\\n\\nEverything needed is working.\\n'; exit 0 ;;
+  attention2)
+    printf ' \\xe2\\x9c\\x93 config  ok\\n \\xe2\\x9c\\x97 mqtt  refused\\n ! recordings  empty\\n'
+    exit 1 ;;
+  attention1)
+    printf ' ! recordings  empty\\n'; exit 0 ;;
+  fails_silently)
+    echo "Error: no such container"; exit 1 ;;
+esac
+"""
+
+
+def _doctor_env(tmp_path: Path, mode: str) -> dict[str, str]:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    # `docker` stub: `docker compose exec -T marcellus fsc ...` -> the same stub
+    stub = tmp_path / "stub.sh"
+    stub.write_text(_STUB)
+    stub.chmod(0o755)
+    (bindir / "docker").symlink_to(stub)
+    install = tmp_path / "opt-marcellus"
+    (install / "venv" / "bin").mkdir(parents=True)
+    (install / "venv" / "bin" / "fsc").symlink_to(stub)
+    return {
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+        "INSTALL_DIR": str(install),
+        "STUB_MODE": mode,
+        "STUB_LOG": str(tmp_path / "log"),
+        "PUSH_ENV_FILE": str(tmp_path / "push.env"),
+    }
+
+
+def _finish(tmp_path: Path, kind: str, mode: str) -> subprocess.CompletedProcess:
+    env = _doctor_env(tmp_path, mode)
+    out = _sh(f"finish_with_doctor {kind}; echo RC=$?", env=env)
+    # the closing step never fails the install
+    assert out.stdout.rstrip().endswith("RC=0"), out.stdout + out.stderr
+    return out
+
+
+@pytest.mark.parametrize("kind", ["docker", "systemd"])
+def test_doctor_all_good_closes_with_everything_working(tmp_path: Path, kind: str) -> None:
+    out = _finish(tmp_path, kind, "ok")
+    assert "Everything needed is working" in out.stdout  # the checklist itself is shown
+    assert "everything is working" in out.stdout
+    assert "need attention" not in out.stdout
+
+
+def test_doctor_failures_are_counted_and_the_exact_docker_command_is_given(
+    tmp_path: Path,
+) -> None:
+    out = _finish(tmp_path, "docker", "attention2")
+    install = tmp_path / "opt-marcellus"
+    assert "mqtt  refused" in out.stdout
+    assert (
+        f"2 checks need attention: fix them and run `cd {install} && "
+        "docker compose exec marcellus fsc doctor` again"
+    ) in out.stdout
+    log = (tmp_path / "log").read_text()
+    assert "doctor --no-color" in log  # asked for plain output
+
+
+def test_doctor_systemd_command_names_the_venv_and_config(tmp_path: Path) -> None:
+    out = _finish(tmp_path, "systemd", "attention1")
+    install = tmp_path / "opt-marcellus"
+    assert (
+        f"1 check needs attention: fix it and run `sudo {install}/venv/bin/fsc doctor "
+        "--config /etc/marcellus/sidecar.yml` again"
+    ) in out.stdout
+
+
+def test_doctor_systemd_passes_the_stored_password_through_the_environment(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "push.env").write_text("OTHER=1\nMARCELLUS_PUSH__MQTT_PASSWORD='s3 cret'\n")
+    out = _finish(tmp_path, "systemd", "ok")
+    assert "PW_SEEN: yes" in (tmp_path / "log").read_text()
+    assert "s3 cret" not in out.stdout + out.stderr  # never printed
+    assert "bash -c" not in out.stdout  # nothing to re-run when all is well
+
+
+def test_doctor_systemd_rerun_command_loads_the_push_env_file(tmp_path: Path) -> None:
+    (tmp_path / "push.env").write_text("MARCELLUS_PUSH__MQTT_PASSWORD=x\n")
+    out = _finish(tmp_path, "systemd", "attention1")
+    assert f"set -a; . {tmp_path}/push.env;" in out.stdout
+
+
+@pytest.mark.parametrize("kind", ["docker", "systemd"])
+def test_doctor_absent_in_an_older_release_is_skipped_with_one_line(
+    tmp_path: Path, kind: str
+) -> None:
+    out = _finish(tmp_path, kind, "nodoctor")
+    assert "skipping the checklist: this release has no 'fsc doctor'" in out.stdout
+    assert not (tmp_path / "log").exists()  # doctor was never run
+    assert "need attention" not in out.stdout and "everything is working" not in out.stdout
+
+
+def test_doctor_that_cannot_run_does_not_claim_success(tmp_path: Path) -> None:
+    out = _finish(tmp_path, "docker", "fails_silently")
+    assert "everything is working" not in out.stdout
+    assert "the checklist did not finish" in out.stdout
+    assert "docker compose exec marcellus fsc doctor" in out.stdout
+
+
+def test_install_script_ends_both_paths_with_the_checklist() -> None:
+    text = SCRIPT.read_text()
+    assert "finish_with_doctor docker" in text and "finish_with_doctor systemd" in text
+    assert text.index("finish_with_doctor docker") < text.index("Docker not found")
+    assert text.rindex("finish_with_doctor systemd") > text.index("Docker not found")

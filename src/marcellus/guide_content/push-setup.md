@@ -16,7 +16,54 @@ broker (the topics `frigate/reviews` and `frigate/available`), decides whether
 each item deserves an alert, and sends it to your phone through the push relay.
 No broker, no events, no alerts. Push is off until you turn it on.
 
-## 1. Frigate and MQTT
+## The quick way: let `fsc init` do it
+
+Run `fsc init --force` (Docker:
+`docker compose run --rm marcellus init --force -o /config/sidecar.yml`; systemd:
+`sudo /opt/marcellus/venv/bin/fsc init --force -o /etc/marcellus/sidecar.yml`).
+`init` reads Frigate's `mqtt:` section, then asks **Set up push alerts now?**
+Answer `y` and it:
+
+- shows the broker it found (address, port, user) and asks you to confirm it,
+  or to type another;
+- writes `push.enabled: true` and the broker's host, port and user into
+  `sidecar.yml`;
+- asks for the broker password with hidden input and writes it **only** to the
+  environment file, as `MARCELLUS_PUSH__MQTT_PASSWORD`, never into
+  `sidecar.yml` and never to the screen. If a password is already stored there
+  it is kept unless you say yes to replacing it;
+- connects to the broker once, with the same check `fsc doctor` runs, and tells
+  you the result.
+
+Where the password goes depends on how it runs:
+
+- **systemd:** `/etc/marcellus-push.env`, created root-owned with mode `0600`.
+  Run `init` as root. As anyone else it stores nothing and prints the exact
+  commands to run instead (they read the password silently, so they hold no
+  secret).
+- **Docker:** `/opt/marcellus/.env` on the host. `init` runs inside the
+  container, which cannot see that file, so it prints the host commands (the
+  same silent-read form) and the `docker compose up -d` to apply them. If you
+  mount the file into the container, `--env-file` writes it directly.
+
+If MQTT is off in Frigate, `init` says push cannot work until it is switched on
+in Frigate's own config (that is Frigate's setting; `init` never edits it) and
+skips push. If Frigate talks to the broker over TLS, it warns you: Marcellus
+connects in plain text, so use the broker's plain listener (usually 1883).
+
+For scripts: `fsc init --force --non-interactive --enable-push
+--mqtt-password-file /path/to/file` (or set `MARCELLUS_INIT_MQTT_PASSWORD` in
+the environment). `--mqtt-host`, `--mqtt-port` and `--mqtt-user` override what
+was found. Without `--enable-push` a non-interactive run leaves push alone, and
+with it but no password for a broker that needs one, it skips push and says so.
+
+Then restart Marcellus (`docker compose up -d` or `systemctl restart marcellus`)
+and carry on with section 4, Frigate sign-in, below. Sections 1 to 3 are the
+same thing done by hand.
+
+## Doing it by hand
+
+### 1. Frigate and MQTT
 
 1. Make sure Frigate is configured to publish to an MQTT broker. This is part
    of Frigate's own configuration, covered in Frigate's documentation.
@@ -25,7 +72,7 @@ No broker, no events, no alerts. Push is off until you turn it on.
 3. Marcellus connects to the broker in plain text, with no TLS option. Use the
    broker's ordinary (non-TLS) listener.
 
-## 2. Tell Marcellus about the broker
+### 2. Tell Marcellus about the broker
 
 Edit `sidecar.yml` (`/opt/marcellus/config/sidecar.yml` for Docker,
 `/etc/marcellus/sidecar.yml` for systemd) and add a `push:` section:
@@ -53,7 +100,7 @@ instead:
 Then restart: `docker compose up -d` (Docker) or
 `systemctl restart marcellus` (systemd).
 
-## 3. Check the connection
+### 3. Check the connection
 
 Open [`/healthz`](/healthz). The `mqtt` line should say `connected`. If it
 says `disconnected`, check the host, port, username and password, and that

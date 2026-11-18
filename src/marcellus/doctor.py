@@ -52,6 +52,7 @@ from pydantic import ValidationError
 from marcellus import db, frigate_tls
 from marcellus.auth import config_says_signin_off
 from marcellus.config import Settings, discover_config_path, load_settings, origins_identical
+from marcellus.frigate_discovery import media_root_of
 from marcellus.scrub.mapping import map_recording_path
 
 PASS = "pass"
@@ -686,13 +687,13 @@ def check_recordings(ctx: Context) -> CheckResult:
         raw, started = newest
         media = str(frigate.media_path).rstrip("/")
         if not (raw == media or raw.startswith(media + "/")):
+            right = media_root_of(raw) or "the directory Frigate records under"
             return CheckResult(
                 "recordings",
                 WARN,
                 f"Frigate stores recordings under {raw.rsplit('/', 1)[0]}..., which is not "
                 f"inside frigate.media_path ({media})",
-                f"set `frigate.media_path` to the directory Frigate records under, the prefix "
-                f"of {raw}",
+                f"set `frigate.media_path` to {right} (the part of {raw} before recordings/)",
             )
         mapped = map_recording_path(raw, frigate.media_path, root)
         age = max(0.0, now - started)
