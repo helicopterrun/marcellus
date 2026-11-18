@@ -13,8 +13,8 @@ from marcellus.frigate_api import FrigateClient
 MAX_DETECT_FPS = 10
 
 
-def analyze(*, frigate_base_url: str) -> dict[str, Any]:
-    with FrigateClient(frigate_base_url) as client:
+def analyze(*, frigate_base_url: str, verify_tls: bool) -> dict[str, Any]:
+    with FrigateClient(frigate_base_url, verify_tls=verify_tls) as client:
         stats = client.stats()
         config = client.config()
 

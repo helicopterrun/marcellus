@@ -49,6 +49,8 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.routing import Match
 
+from marcellus import frigate_tls
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Iterable
 
@@ -64,7 +66,9 @@ ERR_UPSTREAM_UNAVAILABLE = "upstream_unavailable"
 
 # Reachability probes a client may need before it holds a Frigate session
 # (and the login page itself, which exists to acquire one).
-EXEMPT_PATHS = frozenset({"/healthz", "/version", "/v1/capabilities", "/login"})
+EXEMPT_PATHS = frozenset(
+    {"/healthz", "/version", "/v1/capabilities", "/login", "/login/diagnosis"}
+)
 # Trailing slash on the push-thumbnail prefix on purpose: exempts only
 # `/v1/push/thumbnail/{handle}` fetches, not `/v1/push/thumbnail` itself or
 # any other `/v1/push/...` route (device registration, handle redemption,
@@ -187,10 +191,12 @@ async def validate_frigate_session(
     try:
         resp = await client.get(upstream, headers={"cookie": cookie}, timeout=5.0)
     except httpx.HTTPError as exc:
+        frigate_tls.note_error(app, frigate_tls.PROXY_ORIGIN, upstream, exc)
         raise HTTPException(
             status_code=502, detail=f"{ERR_UPSTREAM_UNAVAILABLE}: {exc}"
         ) from exc
 
+    frigate_tls.note_response(app, frigate_tls.PROXY_ORIGIN, upstream, resp)
     if resp.status_code in (401, 403):
         raise HTTPException(status_code=401, detail="frigate session invalid")
     if resp.status_code >= 400:
@@ -283,15 +289,25 @@ async def _check_anonymous_access(app: FastAPI, settings: Settings) -> tuple[boo
     )
     try:
         resp = await client.send(config_req)
+    except httpx.HTTPError as exc:
+        frigate_tls.note_error(app, frigate_tls.API_ORIGIN, str(config_req.url), exc)
+        return False, ANONYMOUS_ERROR_TTL_S
+    frigate_tls.note_response(app, frigate_tls.API_ORIGIN, str(config_req.url), resp)
+    try:
         if resp.status_code != 200:
             return False, ttl_s
         body = resp.json()
-        auth_section = body.get("auth") if isinstance(body, dict) else None
-        if not isinstance(auth_section, dict) or auth_section.get("enabled") is not False:
-            return False, ttl_s
-        bare = await client.send(version_req)
-    except (httpx.HTTPError, ValueError):
+    except ValueError:
         return False, ANONYMOUS_ERROR_TTL_S
+    auth_section = body.get("auth") if isinstance(body, dict) else None
+    if not isinstance(auth_section, dict) or auth_section.get("enabled") is not False:
+        return False, ttl_s
+    try:
+        bare = await client.send(version_req)
+    except httpx.HTTPError as exc:
+        frigate_tls.note_error(app, frigate_tls.PROXY_ORIGIN, str(version_req.url), exc)
+        return False, ANONYMOUS_ERROR_TTL_S
+    frigate_tls.note_response(app, frigate_tls.PROXY_ORIGIN, str(version_req.url), bare)
     return 200 <= bare.status_code < 300, ttl_s
 
 

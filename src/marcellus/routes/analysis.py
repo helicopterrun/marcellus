@@ -70,7 +70,9 @@ def motion_rate_endpoint(
 def fps_budget_endpoint(request: Request) -> dict[str, Any]:
     s = _settings(request)
     try:
-        return fps_budget.analyze(frigate_base_url=s.frigate.base_url)
+        return fps_budget.analyze(
+            frigate_base_url=s.frigate.base_url, verify_tls=s.frigate.verify_tls
+        )
     except FrigateAPIError as exc:
         raise HTTPException(
             status_code=502, detail=error_detail("upstream_unavailable", str(exc))
@@ -84,7 +86,9 @@ def motion_active_endpoint(
 ) -> dict[str, Any]:
     s = _settings(request)
     try:
-        return motion_active.analyze(frigate_base_url=s.frigate.base_url, days=days)
+        return motion_active.analyze(
+            frigate_base_url=s.frigate.base_url, verify_tls=s.frigate.verify_tls, days=days
+        )
     except FrigateAPIError as exc:
         raise HTTPException(
             status_code=502, detail=error_detail("upstream_unavailable", str(exc))
@@ -100,7 +104,10 @@ def motion_compare_endpoint(
     s = _settings(request)
     try:
         return motion_compare.analyze(
-            frigate_base_url=s.frigate.base_url, baseline=baseline, target=target,
+            frigate_base_url=s.frigate.base_url,
+            verify_tls=s.frigate.verify_tls,
+            baseline=baseline,
+            target=target,
         )
     except FrigateAPIError as exc:
         raise HTTPException(
@@ -164,6 +171,7 @@ def annotation_offset_endpoint(
         return annotation_offset.analyze(
             frigate_db=s.frigate.db_path,
             frigate_base_url=s.frigate.base_url,
+            verify_tls=s.frigate.verify_tls,
             days=days, camera=camera,
         )
     except annotation_offset.AnnotationOffsetUnavailable as exc:
@@ -210,6 +218,7 @@ async def alignment_measure(request: Request, days: int = Query(3, ge=1, le=30))
         return annotation_offset.analyze(
             frigate_db=s.frigate.db_path,
             frigate_base_url=s.frigate.base_url,
+            verify_tls=s.frigate.verify_tls,
             days=days,
             search_window_ms=_MEASURE_WINDOW_MS,
         )
@@ -362,7 +371,7 @@ def alignment_thumbnail(request: Request, event_id: str) -> Any:
 
     s = _settings(request)
     try:
-        with FrigateClient(s.frigate.base_url) as fc:
+        with FrigateClient(s.frigate.base_url, verify_tls=s.frigate.verify_tls) as fc:
             jpeg, _status = fc.event_thumbnail(event_id)
     except FrigateAPIError as exc:
         raise HTTPException(
@@ -456,7 +465,7 @@ async def alignment_apply_config(request: Request) -> Any:
     s = _settings(request)
 
     def _apply_config() -> bool:
-        with FrigateClient(s.frigate.base_url) as fc:
+        with FrigateClient(s.frigate.base_url, verify_tls=s.frigate.verify_tls) as fc:
             fc.set_annotation_offset(camera, offset_ms)
             return _commit_frigate_config(str(s.frigate.config_path), camera, offset_ms)
 
@@ -499,7 +508,7 @@ async def alignment_restart_frigate(request: Request) -> Any:
     s = _settings(request)
 
     def _restart() -> None:
-        with FrigateClient(s.frigate.base_url) as fc:
+        with FrigateClient(s.frigate.base_url, verify_tls=s.frigate.verify_tls) as fc:
             fc.restart()
 
     # Sync `FrigateClient.restart()` blocks for Frigate's own ~30s restart
@@ -528,7 +537,7 @@ def alignment_snapshot(request: Request, event_id: str) -> Any:
 
     s = _settings(request)
     try:
-        with FrigateClient(s.frigate.base_url) as fc:
+        with FrigateClient(s.frigate.base_url, verify_tls=s.frigate.verify_tls) as fc:
             jpeg, _status = fc.event_snapshot_jpeg(event_id)
     except FrigateAPIError as exc:
         raise HTTPException(
@@ -565,7 +574,7 @@ def alignment_frame(request: Request, camera: str, ts: float = Query(...)) -> An
     )
     s = _settings(request)
     try:
-        with FrigateClient(s.frigate.base_url) as fc:
+        with FrigateClient(s.frigate.base_url, verify_tls=s.frigate.verify_tls) as fc:
             jpeg, status = fc.recording_snapshot(camera, ts)
     except FrigateAPIError as exc:
         raise HTTPException(
@@ -606,7 +615,7 @@ def alignment_state(request: Request) -> Any:
     all_cameras: list[str] = []
     running_cfg: dict[str, Any] | None = None
     try:
-        with FrigateClient(s.frigate.base_url) as fc:
+        with FrigateClient(s.frigate.base_url, verify_tls=s.frigate.verify_tls) as fc:
             running_cfg = fc.config()
         all_cameras = sorted(running_cfg.get("cameras", {}))
     except FrigateAPIError:

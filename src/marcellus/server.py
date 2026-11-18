@@ -416,6 +416,7 @@ def _make_on_ring(app: FastAPI) -> Callable[[Any], Awaitable[None]]:
                 ring_snapshot=settings.unifi_protect.ring_snapshot,
                 protect_snapshot_fetcher=(subscriber.fetch_snapshot if subscriber else None),
                 http_client=frigate_api.get_async_client(app),
+                frigate_verify_tls=settings.frigate.verify_tls,
             )
             conn.commit()
         finally:
@@ -596,7 +597,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # we just hide them rather than stalling startup on a sync HTTP call.
     async def _probe_plus() -> None:
         def _probe() -> bool:
-            with FrigateClient(settings.frigate.base_url) as fc:
+            with FrigateClient(
+                settings.frigate.base_url, verify_tls=settings.frigate.verify_tls
+            ) as fc:
                 return fc.plus_enabled()
 
         with contextlib.suppress(Exception):
@@ -716,6 +719,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             server_id=server_id,
             situation_handle_ttl_s=settings.push.situation_handle_ttl_s,
             frigate_base_url=settings.frigate.base_url,
+            frigate_verify_tls=settings.frigate.verify_tls,
             rate_limit_window_s=settings.push.rate_limit_window_s,
             thumbnail_max_edge=settings.push.thumbnail_max_edge,
             thumbnail_quality=settings.push.thumbnail_quality,

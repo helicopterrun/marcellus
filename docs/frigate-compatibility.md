@@ -113,6 +113,17 @@ unauthenticated port, which Frigate treats as the admin role. Browser and app tr
 the catch-all proxy to `frigate.proxy_base_url`, the authenticated port, with
 the client's own cookie.
 
+Frigate serves the authenticated port (8971) over TLS by default
+(`tls.enabled: true`), with a self-signed certificate it generates itself.
+Measured against a stock 0.18.2 container: `http://` to that port
+answers 400 (nginx's "The plain HTTP request was sent to HTTPS port"), and
+`https://` works only for a client that accepts the certificate. The sidecar
+checks certificates unless `frigate.verify_tls` is `false`, which turns the
+check off for Frigate's two origins only (`frigate_tls.py`); with the check on
+and a self-signed certificate it logs the cause and reports
+`checks.frigate_diagnosis` on `/healthz` (`tls_untrusted`, or `https_required`
+for the `http://` mistake).
+
 A request to one of the sidecar's own routes that carries no cookie is admitted
 only when Frigate has sign-in turned off: `GET /api/config` on `base_url`
 reports `auth.enabled: false` (the `auth` section is in the dump in 0.17 and

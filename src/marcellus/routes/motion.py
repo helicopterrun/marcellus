@@ -82,6 +82,7 @@ def motion_view(
                 mode = "compare"
                 result = motion_compare.analyze(
                     frigate_base_url=settings.frigate.base_url,
+                    verify_tls=settings.frigate.verify_tls,
                     baseline=baseline,
                     target=target or "today",
                 )
@@ -118,6 +119,7 @@ def motion_view(
                 days = max((date.today() - date.fromisoformat(lo)).days + 1, 1)
                 result = motion_active.analyze(
                     frigate_base_url=settings.frigate.base_url,
+                    verify_tls=settings.frigate.verify_tls,
                     days=days,
                     until=hi,
                 )

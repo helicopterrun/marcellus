@@ -556,7 +556,7 @@ def test_check_inputs_flags_bad_timezone(
 
 
 def _plus_client(handler: Any) -> FrigateClient:
-    c = FrigateClient("http://frigate.test:5000")
+    c = FrigateClient("http://frigate.test:5000", verify_tls=True)
     c._plus_client = httpx.Client(transport=httpx.MockTransport(handler))
     return c
 

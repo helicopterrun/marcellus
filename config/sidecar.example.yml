@@ -10,8 +10,17 @@ frigate:
   # Frigate's AUTHENTICATED origin, used ONLY to proxy app traffic
   # (routes/proxy.py). Auth stays entirely Frigate's -- the sidecar forwards
   # the client's own cookie and never holds a password. Do not merge with
-  # base_url above (docs/scrub-cache-and-proxy-spec.md §3.2).
-  proxy_base_url: http://frigate.lan:8971
+  # base_url above (docs/scrub-cache-and-proxy-spec.md §3.2). Frigate serves
+  # this port over HTTPS with a self-signed certificate by default, so it is
+  # usually https://; use http:// only if TLS is off in Frigate
+  # (`tls: enabled: false`).
+  proxy_base_url: https://frigate.lan:8971
+  # Check the TLS certificate on connections to Frigate (both URLs above, HTTP
+  # and WebSocket). Frigate's default certificate is self-signed, so set this
+  # to false to accept it -- fine on a home network; it gives up proof that
+  # the other end really is your Frigate. Affects Frigate only, never the push
+  # relay, APNs, UniFi Protect or external sources.
+  verify_tls: true
   # Path to Frigate's config.yml (inside the sidecar container).
   config_path: /opt/frigate/config.yml
   # Path to Frigate's main SQLite database (inside the sidecar container).

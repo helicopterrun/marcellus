@@ -26,6 +26,7 @@ from typing import Any
 
 import httpx
 
+from marcellus import frigate_tls
 from marcellus.config import PushSection
 from marcellus.push import activity as activity_payload
 from marcellus.push import card_store, delivery_wire, store
@@ -59,6 +60,8 @@ class PushEngine:
     #: Where the pre-warm fetches from. Empty disables thumbnail warm-up
     #: entirely -- pushes still fire, image-less.
     frigate_base_url: str = ""
+    #: `frigate.verify_tls`, for the pre-warm client and the MQTT backfill.
+    frigate_verify_tls: bool = True
     #: GC keeps send records for twice this window (see `_maybe_gc`);
     #: `delivery_wire`'s own budgets do the actual rate limiting now.
     rate_limit_window_s: float = 3600.0
@@ -176,7 +179,8 @@ class PushEngine:
         life so a match doesn't pay connection setup to Frigate on the
         interrupt path."""
         if self._http is None or self._http.is_closed:
-            self._http = httpx.AsyncClient(
+            self._http = frigate_tls.async_client(
+                verify_tls=self.frigate_verify_tls,
                 timeout=self.thumbnail_timeout_s,
                 limits=httpx.Limits(
                     max_connections=20, max_keepalive_connections=10, keepalive_expiry=15.0

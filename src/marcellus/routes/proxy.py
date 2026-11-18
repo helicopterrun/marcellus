@@ -40,6 +40,7 @@ from fastapi.responses import StreamingResponse
 from starlette.types import Receive, Scope, Send
 from starlette.websockets import WebSocketDisconnect
 
+from marcellus import frigate_tls
 from marcellus.errors import error_detail
 from marcellus.frigate_api import get_stream_client, get_vod_stream_client, pool_stats
 
@@ -484,8 +485,15 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
             detail=error_detail("upstream_busy", "upstream connection pool exhausted"),
         ) from exc
     except httpx.HTTPError as exc:
+        message = f"upstream error: {exc}"
+        diagnosis = frigate_tls.note_error(request.app, frigate_tls.PROXY_ORIGIN, upstream, exc)
+        if diagnosis == frigate_tls.TLS_UNTRUSTED:
+            message += (
+                " -- Frigate's certificate is not trusted; set frigate.verify_tls: false "
+                "or turn TLS off in Frigate"
+            )
         raise HTTPException(
-            status_code=502, detail=error_detail("upstream_unavailable", f"upstream error: {exc}")
+            status_code=502, detail=error_detail("upstream_unavailable", message)
         ) from exc
 
     headers = {k: resp.headers[k] for k in _RESP_PASS if k in resp.headers}
@@ -578,8 +586,12 @@ _WS_CLIENTS = (
 )
 
 
-def _ws_connector() -> Any:
-    """Return `await connect(url, headers, subprotocols)`, or None if unavailable."""
+def _ws_connector(*, verify_tls: bool) -> Any:
+    """Return `await connect(url, headers, subprotocols)`, or None if unavailable.
+
+    `verify_tls` is `frigate.verify_tls`: with it off, a `wss://` upstream is
+    connected without checking its certificate (`frigate_tls.ws_ssl_context`).
+    """
     import importlib
 
     for module_name, headers_kw in _WS_CLIENTS:
@@ -595,7 +607,11 @@ def _ws_connector() -> Any:
             _connect: Any = connect,
             _kw: str = headers_kw,
         ) -> Any:
-            return await _connect(url, **{_kw: headers}, subprotocols=subs or None, open_timeout=10)
+            kwargs: dict[str, Any] = {_kw: headers}
+            ssl_context = frigate_tls.ws_ssl_context(url, verify_tls=verify_tls)
+            if ssl_context is not None:
+                kwargs["ssl"] = ssl_context
+            return await _connect(url, **kwargs, subprotocols=subs or None, open_timeout=10)
 
         return _connect
     return None
@@ -612,7 +628,7 @@ async def proxy_websocket(path: str, websocket: WebSocket) -> None:
         await websocket.close(code=1008)
         return
 
-    connect = _ws_connector()
+    connect = _ws_connector(verify_tls=settings.frigate.verify_tls)
     if connect is None:  # pragma: no cover - uvicorn[standard] ships websockets
         logger.warning("proxy: websockets package unavailable; cannot relay %s", path)
         await websocket.close(code=1011)
@@ -631,6 +647,7 @@ async def proxy_websocket(path: str, websocket: WebSocket) -> None:
         upstream_ws = await connect(upstream, fwd_headers, subprotocols)
     except Exception as exc:  # noqa: BLE001 - any handshake failure is a 1011 to the client
         logger.info("proxy: websocket connect to %s failed: %s", upstream, exc)
+        frigate_tls.note_error(websocket.app, frigate_tls.PROXY_ORIGIN, upstream, exc)
         await websocket.close(code=1011)
         return
 

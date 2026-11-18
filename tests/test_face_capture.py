@@ -231,8 +231,10 @@ def _patch_client(monkeypatch: pytest.MonkeyPatch, handler: object) -> _Recorder
 
     real_init = fa.FrigateClient.__init__
 
-    def init(self: fa.FrigateClient, base_url: str, timeout: float = 10.0) -> None:
-        real_init(self, base_url, timeout)
+    def init(
+        self: fa.FrigateClient, base_url: str, timeout: float = 10.0, *, verify_tls: bool
+    ) -> None:
+        real_init(self, base_url, timeout, verify_tls=verify_tls)
         self._client = httpx.Client(transport=httpx.MockTransport(rec))  # type: ignore[attr-defined]
 
     monkeypatch.setattr(fa.FrigateClient, "__init__", init)

@@ -1639,6 +1639,10 @@ body.map-full-open .me-toolbar {
 .login-tagline { margin: 0 0 22px; font-family: var(--font-mono); font-size: var(--text-sm); color: var(--muted); }
 .login-card { background: var(--surface); border: 1px solid var(--stroke); border-radius: var(--radius-lg); padding: 20px; }
 .login-card .page-intro { margin: 0 0 16px; font-size: var(--text-sm); color: var(--muted); line-height: 1.45; }
+/* Why sign-in cannot work when the cause is the sidecar's own Frigate setting
+   (`frigate_tls.py`); hidden until there is one. */
+.login-problem { margin: 0 0 16px; padding: 10px 12px; font-size: var(--text-sm); line-height: 1.45; color: var(--warn-text); background: var(--warn-bg); border-radius: var(--radius-sm); }
+.login-problem[hidden] { display: none; }
 .login-field { display: block; margin-top: 14px; font-family: var(--font-mono); font-size: var(--text-sm); color: var(--muted); }
 /* One rule for both fields: the base sheet's iOS 16px rule only matches
    type=text, which is what left the password box shorter than the username. */

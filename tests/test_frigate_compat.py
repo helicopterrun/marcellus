@@ -436,7 +436,7 @@ def test_frigate_endpoint_exists_with_expected_auth(
 
 
 def _frigate_client(handler: Any) -> FrigateClient:
-    fc = FrigateClient("http://frigate.test:5000")
+    fc = FrigateClient("http://frigate.test:5000", verify_tls=True)
     fc._client = httpx.Client(transport=httpx.MockTransport(handler))
     fc._plus_client = httpx.Client(transport=httpx.MockTransport(handler))
     return fc

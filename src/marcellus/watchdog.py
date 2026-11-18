@@ -24,6 +24,7 @@ from types import FrameType
 
 import httpx
 
+from marcellus import frigate_tls
 from marcellus.config import Settings, WatchdogSection, load_settings
 
 logger = logging.getLogger("marcellus.watchdog")
@@ -50,11 +51,16 @@ class _StopFlag:
         self.stop = True
 
 
-def _classify(url: str, timeout: float) -> tuple[str, str]:
+def _classify(url: str, timeout: float, *, verify_tls: bool) -> tuple[str, str]:
     """Probe `url`; return (outcome, human-readable detail)."""
     try:
-        resp = httpx.get(url, timeout=timeout)
+        resp = frigate_tls.get(url, verify_tls=verify_tls, timeout=timeout)
     except httpx.HTTPError as exc:
+        diagnosis = frigate_tls.classify_error(exc, url)
+        if diagnosis is not None:
+            # A certificate or scheme mistake in the sidecar config, not a hung
+            # Frigate: restarting the container would never fix it.
+            return _OTHER, frigate_tls.explain(diagnosis, url, setting="frigate.base_url")
         return _DOWN, f"transport error: {type(exc).__name__}: {exc}"
     if resp.status_code == 200:
         return _HEALTHY, "200 OK"
@@ -157,7 +163,7 @@ def run_watchdog(settings: Settings | None = None) -> int:
 
     while not flag.stop:
         now = time.monotonic()
-        outcome, detail = _classify(url, cfg.timeout_s)
+        outcome, detail = _classify(url, cfg.timeout_s, verify_tls=settings.frigate.verify_tls)
 
         if outcome == _HEALTHY:
             if consecutive:

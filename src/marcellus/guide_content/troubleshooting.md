@@ -2,7 +2,7 @@
 title: Troubleshooting
 section: operations
 order: 2
-routes: ["/debug", "/toybox", "/login"]
+routes: ["/debug", "/toybox", "/login", "/login/diagnosis"]
 ---
 
 ## First stops
@@ -27,6 +27,8 @@ ones that flip the whole response to `degraded` + HTTP 503.
 | `frigate` | `ok` | Any HTTP answer through the proxy's own path and pool, 401 included -- the proxy origin is authenticated. | Nothing. |
 | `frigate` | `error` | Frigate answered 5xx. Informational only: `watchdog.py` restarts the *Frigate* container, so a Frigate outage must not restart the sidecar. | Check Frigate itself and the watchdog. |
 | `frigate` | `unreachable` | Connect or read failure to Frigate. Informational, same reason. | Check Frigate and the network path. |
+| `frigate_diagnosis` | `tls_untrusted` | Informational, present only when it applies. Frigate's sign-in port (`frigate.proxy_base_url`) presented a certificate the sidecar does not trust, usually Frigate's own self-signed one. `frigate` reads `unreachable` meanwhile. | Set `frigate.verify_tls: false`, or turn TLS off in Frigate (`tls: enabled: false`) and use `http://`. See "Login always fails" below. |
+| `frigate_diagnosis` | `https_required` | Informational, present only when it applies. `frigate.proxy_base_url` uses `http://` but the port speaks HTTPS, so Frigate answers 400 to everything (`frigate` still reads `ok`, since that is an HTTP answer). | Change `frigate.proxy_base_url` to `https://`. |
 | `frigate` | `proxy_stalled` | **Degraded.** The 2s probe along the media proxy's own path/pool timed out or got no connection: the sidecar's own proxy is wedged and no proxied request can get through. The body carries `reason: proxy_stalled`; the probe result is cached 10s. | The sidecar recycles its own stream pool after 30 s of saturation (checked every 10 s, no `/healthz` poll needed) and closes any upstream response left open past 11 minutes, logging `proxy: reaped leaked upstream path=…`. If it persists, restart the sidecar and send that log line. |
 | `upstream_pool` / `vod_pool` / `api_pool` | stats | Connections/active/idle for the proxy's pool, its recorded-playback (`/vod`) pool (listed once playback has used it), and the API pool. | Nothing. |
 | `upstream_pool` / `vod_pool` / `api_pool` | saturated | **Degraded.** At max connections with nothing idle; the next proxied stream would fail on a slow pool timeout rather than a fast 503. | If the proxy or `/vod` pool stays saturated for 30s straight the sidecar recycles that client and logs a warning -- no restart needed. Otherwise look for a viewer storm. |
@@ -102,6 +104,7 @@ space.
 | Scrub strips empty | `media_path`/`recordings_path` mapping wrong, or camera not enrolled in `scrub.cameras` |
 | No push notifications | MQTT unreachable (check `mqtt` in `/healthz`), or transport still `mock` |
 | Login loop / 401s | `frigate.proxy_base_url` pointing at the wrong origin |
+| Login always fails, everything is 401, proxied calls 502 with `CERTIFICATE_VERIFY_FAILED` | Frigate's sign-in port uses its self-signed certificate: see "Login always fails" below |
 | Triage pages empty on a dev box | No Frigate database -- pages say so rather than erroring |
 | Identities never appear | `face_enrich.enabled` off, camera not enrolled, or the `enrich` extra not installed |
 
@@ -118,6 +121,28 @@ without a session, and its log says so. If an app saved as "no sign-in" still
 gets 401 from the sidecar, check that `frigate.base_url` reaches Frigate and
 that `frigate.proxy_base_url` answers `/api/version` without a cookie (a
 `proxy.auth_secret`, or a reverse proxy with its own login, keeps it closed).
+
+### Login always fails
+
+If the login page says Marcellus cannot reach Frigate's sign-in port, or every
+request is refused with 401 and proxied calls answer 502 with
+`CERTIFICATE_VERIFY_FAILED: self-signed certificate`, the sidecar cannot talk
+to Frigate's port 8971 at all. Frigate serves that port over HTTPS with a
+self-signed certificate by default, and the sidecar checks certificates
+unless told otherwise. The log has one WARNING line that says which case it
+is, and [`/healthz`](/healthz) shows `frigate_diagnosis`:
+
+- `tls_untrusted`: the URL is `https://` and the certificate is not trusted.
+  Set `frigate.verify_tls: false` in the sidecar config and restart (fine on a
+  home network), or turn TLS off in Frigate (`tls: enabled: false`) and use
+  `http://` in `frigate.proxy_base_url`.
+- `https_required`: the URL is `http://` but the port speaks HTTPS, so Frigate
+  answers 400 ("The plain HTTP request was sent to HTTPS port"). Change
+  `frigate.proxy_base_url` to `https://`, and with Frigate's default
+  certificate also set `frigate.verify_tls: false`.
+
+See "Frigate's HTTPS sign-in port" in [First run](/guide/first-run) for the
+three setups that work.
 
 Repeated failed logins from the same IP get a **429** with a `Retry-After`
 header once they exceed the configured attempt window -- only failed

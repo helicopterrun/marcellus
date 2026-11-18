@@ -41,9 +41,9 @@ def _aggregate(
 
 
 def analyze(
-    *, frigate_base_url: str, days: int = 14, until: str | None = None
+    *, frigate_base_url: str, verify_tls: bool, days: int = 14, until: str | None = None
 ) -> dict[str, Any]:
-    with FrigateClient(frigate_base_url) as client:
+    with FrigateClient(frigate_base_url, verify_tls=verify_tls) as client:
         config = client.config()
         stats = client.stats()
         cameras_cfg = config.get("cameras", {})

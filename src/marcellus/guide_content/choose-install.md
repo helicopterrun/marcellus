@@ -31,7 +31,9 @@ Marcellus reads Frigate's files directly, so the machine must be able to see:
 - Frigate's database **directory** (not just `frigate.db`).
 - Frigate's recordings folder.
 - Frigate's two web ports over the network: the plain one (usually `5000`) and
-  the signed-in one (usually `8971`).
+  the signed-in one (usually `8971`). Frigate serves the signed-in one over
+  HTTPS with a self-signed certificate by default; see "Frigate's HTTPS
+  sign-in port" in [First run](/guide/first-run).
 
 All of these are read-only. If Frigate runs on a different machine, mount its
 folders (for example over NFS) before you start.
