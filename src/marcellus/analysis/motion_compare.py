@@ -76,13 +76,14 @@ def _classify(base: dict[str, float], tgt: dict[str, float]) -> tuple[str, str]:
 def analyze(
     *,
     frigate_base_url: str,
+    verify_tls: bool,
     baseline: str,
     target: str,
 ) -> dict[str, Any]:
     b_lo, b_hi = parse_range(baseline)
     t_lo, t_hi = parse_range(target)
     rows: list[dict[str, Any]] = []
-    with FrigateClient(frigate_base_url) as client:
+    with FrigateClient(frigate_base_url, verify_tls=verify_tls) as client:
         config = client.config()
         for cam, ccfg in sorted(config.get("cameras", {}).items()):
             if not ccfg.get("enabled", True):

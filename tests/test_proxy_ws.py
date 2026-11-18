@@ -184,7 +184,7 @@ def test_client_leaving_during_the_handshake_is_not_an_error(
         await asyncio.sleep(0.2)
         return upstream
 
-    monkeypatch.setattr(proxy, "_ws_connector", lambda: connect)
+    monkeypatch.setattr(proxy, "_ws_connector", lambda **_kw: connect)
     app = _client(frigate_db_path, sidecar_db_path, tmp_path, 9).app
 
     async def scenario() -> None:

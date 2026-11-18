@@ -311,7 +311,7 @@ def _stub_motion_active(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     captured: dict[str, object] = {}
 
     def fake_analyze(
-        *, frigate_base_url: str, days: int, until: str | None = None
+        *, frigate_base_url: str, verify_tls: bool, days: int, until: str | None = None
     ) -> dict[str, object]:
         captured["days"] = days
         captured["until"] = until

@@ -288,7 +288,11 @@ def drain(settings: Settings, *, now: float | None = None, client: Any = None) -
         return counts
 
     own_client = client is None
-    fc = FrigateClient(settings.frigate.base_url) if own_client else client
+    fc = (
+        FrigateClient(settings.frigate.base_url, verify_tls=settings.frigate.verify_tls)
+        if own_client
+        else client
+    )
     try:
         for row_id in due:
             conn = open_sidecar(settings.sidecar.db_path)

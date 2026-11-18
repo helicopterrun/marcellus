@@ -13,11 +13,10 @@ import os
 import time
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from marcellus import __version__, db
+from marcellus import __version__, db, frigate_tls
 from marcellus.auth import _cache
 from marcellus.errors import error_detail
 from marcellus.push.stats import STATS
@@ -36,9 +35,11 @@ def _file_size(path: object) -> int | None:
         return None
 
 
-async def _probe_frigate(base_url: str) -> dict[str, Any]:
+async def _probe_frigate(base_url: str, *, verify_tls: bool) -> dict[str, Any]:
     try:
-        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT_S) as client:
+        async with frigate_tls.async_client(
+            verify_tls=verify_tls, timeout=_PROBE_TIMEOUT_S
+        ) as client:
             resp = await client.get(base_url.rstrip("/") + "/api/version")
             resp.raise_for_status()
             return {"reachable": True, "version": resp.text.strip()}
@@ -111,7 +112,11 @@ def _frigate_hardware(settings: Any) -> dict[str, Any]:
 
     hw: dict[str, Any] = {"available": False}
     try:
-        with FrigateClient(settings.frigate.base_url, timeout=_PROBE_TIMEOUT_S) as client:
+        with FrigateClient(
+            settings.frigate.base_url,
+            timeout=_PROBE_TIMEOUT_S,
+            verify_tls=settings.frigate.verify_tls,
+        ) as client:
             stats = client.stats()
     except Exception:  # noqa: BLE001 -- unreachable Frigate is just "no data"
         return hw
@@ -334,7 +339,9 @@ async def _verdict(request: Request) -> dict[str, Any]:
 async def _gather_status(request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     now = time.time()
-    frigate_task = asyncio.create_task(_probe_frigate(settings.frigate.base_url))
+    frigate_task = asyncio.create_task(
+        _probe_frigate(settings.frigate.base_url, verify_tls=settings.frigate.verify_tls)
+    )
     scrub = await asyncio.to_thread(
         _scrub_status, settings, now, getattr(request.app.state, "scrub_last_cycle", None)
     )

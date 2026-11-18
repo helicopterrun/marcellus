@@ -672,7 +672,11 @@ def scan(
     detector_tried = detector is not None
 
     conn = db.open_joined(settings.frigate.db_path, settings.sidecar.db_path)
-    client = FrigateClient(settings.frigate.base_url, timeout=cfg.http_timeout_s)
+    client = FrigateClient(
+        settings.frigate.base_url,
+        timeout=cfg.http_timeout_s,
+        verify_tls=settings.frigate.verify_tls,
+    )
     try:
         candidates = find_candidates(conn, cfg=cfg, now=now)
         summary["candidates"] = len(candidates)

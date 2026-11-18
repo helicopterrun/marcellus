@@ -70,6 +70,10 @@ through Frigate itself, so the settings must point at the right Frigate ports:
   for its own background calls.
 - `frigate.proxy_base_url`: Frigate's signed-in port, usually `8971`. Marcellus
   checks your login against it. These two addresses must be different.
+  Frigate serves this port over HTTPS with a self-signed certificate by
+  default, so use `https://` and set `frigate.verify_tls: false`, or turn TLS
+  off in Frigate and use `http://` (see "Frigate's HTTPS sign-in port" in
+  [First run](/guide/first-run)).
 
 If Frigate has sign-in turned on (the normal case), leave
 `sidecar.require_frigate_auth` at its default of `true`, then open

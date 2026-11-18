@@ -295,7 +295,7 @@ def box_send_plus(box_id: int, request: Request) -> JSONResponse:
             )
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            with FrigateClient(s.frigate.base_url) as client:
+            with FrigateClient(s.frigate.base_url, verify_tls=s.frigate.verify_tls) as client:
                 msg = client.submit_plus_frame(
                     str(row["camera"]), float(row["frame_ts"]), timeout=s.wildlife.http_timeout_s
                 )

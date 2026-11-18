@@ -33,13 +33,13 @@ def _cfg(**overrides: object) -> WatchdogSection:
 
 
 def _classify_with(response_or_exc: httpx.Response | Exception) -> str:
-    def _get(url: str, timeout: float) -> httpx.Response:
+    def _get(url: str, timeout: float, **_kw: object) -> httpx.Response:
         if isinstance(response_or_exc, Exception):
             raise response_or_exc
         return response_or_exc
 
     with mock.patch("marcellus.watchdog.httpx.get", side_effect=_get):
-        outcome, _ = _classify("http://frigate.test:5000/api/version", 2.0)
+        outcome, _ = _classify("http://frigate.test:5000/api/version", 2.0, verify_tls=True)
     return outcome
 
 

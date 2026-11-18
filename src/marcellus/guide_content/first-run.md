@@ -17,6 +17,7 @@ warning logged at startup (see `docs/deployment.md`).
 ```walkthrough
 - Copy config/sidecar.example.yml to config/sidecar.yml
 - Set frigate.base_url and frigate.proxy_base_url to your Frigate ports
+- Use https:// for port 8971 and decide on frigate.verify_tls (below)
 - Point frigate.db_path at Frigate's frigate.db
 - Start the service and open the Status page
 - Check /healthz shows every component "ok" or "disabled"
@@ -31,7 +32,13 @@ warning logged at startup (see `docs/deployment.md`).
 - `proxy_base_url` — Frigate's **authenticated** origin (usually `:8971`).
   The sidecar forwards your browser traffic here and validates your session
   against it. These two URLs must be different, or the login check becomes a
-  no-op.
+  no-op. Frigate serves this port over **HTTPS** by default, so the URL
+  usually starts with `https://` (for example `https://192.168.1.10:8971`);
+  see "Frigate's HTTPS sign-in port" below.
+- `verify_tls` — default `true`: the sidecar checks the TLS certificate on
+  its connections to Frigate (both URLs above, HTTP and WebSocket). Set it to
+  `false` when Frigate uses its own self-signed certificate. It never affects the push relay, APNs, UniFi Protect or
+  external sources.
 - `db_path` — Frigate's SQLite database, opened **read-only**. The sidecar
   never writes to Frigate's database.
 - `media_path` / `recordings_path` — where Frigate's recordings live from the
@@ -77,6 +84,33 @@ warning logged at startup (see `docs/deployment.md`).
   a tuned value applies everywhere, not just to the running server.
 
 `log_level` (top level) defaults to `INFO`.
+
+### Frigate's HTTPS sign-in port
+
+Frigate serves the signed-in port, 8971, over HTTPS with a certificate it
+makes itself (self-signed) unless you turn TLS off in Frigate's config
+(`tls: enabled: false`). That leaves three working setups:
+
+- `proxy_base_url: https://<frigate>:8971` with `verify_tls: false`. The
+  sidecar then accepts Frigate's self-signed certificate. This is fine on a
+  home network; what it gives up is proof that the other end really is your
+  Frigate, so another device on the same network could pose as it.
+- `proxy_base_url: https://<frigate>:8971` with `verify_tls: true` (the
+  default), once Frigate has a certificate this machine trusts (for example
+  one from your own certificate authority, or Let's Encrypt behind a real
+  name).
+- TLS turned off in Frigate (`tls: enabled: false` in Frigate's config) and
+  `proxy_base_url: http://<frigate>:8971`.
+
+What does not work is `https://` with the default strict check against a
+self-signed certificate (every request fails certificate verification), or
+`http://` against a port that speaks HTTPS (Frigate answers every request with
+400, "The plain HTTP request was sent to HTTPS port"). The sidecar recognises
+both: it logs one WARNING naming the setting to change, `/healthz` adds
+`frigate_diagnosis` (`tls_untrusted` or `https_required`) to its checks, and
+the login page shows the same explanation instead of a bare "login failed".
+`fsc init` probes the port when you give it an address, picks the scheme that
+answers, and asks whether to trust a self-signed certificate.
 
 ## Authentication
 

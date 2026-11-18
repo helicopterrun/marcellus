@@ -27,6 +27,7 @@ from typing import Any
 
 import httpx
 
+from marcellus import frigate_tls
 from marcellus.push import store
 from marcellus.push.models import Device
 from marcellus.push.thumbnails import fetch_thumbnail
@@ -213,6 +214,7 @@ async def handle_ring(
     ring_snapshot: str = "frigate",
     protect_snapshot_fetcher: Callable[[str], Awaitable[bytes | None]] | None = None,
     http_client: httpx.AsyncClient | None = None,
+    frigate_verify_tls: bool = True,
     snapshot_prewarm_timeout_s: float = DEFAULT_SNAPSHOT_PREWARM_TIMEOUT_S,
     frigate_fallback_timeout_s: float = DEFAULT_FRIGATE_FALLBACK_TIMEOUT_S,
 ) -> RingOutcome:
@@ -270,7 +272,7 @@ async def handle_ring(
                     # No shared client was supplied (e.g. a caller/test that
                     # doesn't have one handy) -- fall back to a short-lived
                     # client rather than require one everywhere.
-                    async with httpx.AsyncClient() as client:
+                    async with frigate_tls.async_client(verify_tls=frigate_verify_tls) as client:
                         jpeg = await fetch_thumbnail(
                             client,
                             frigate_base_url=frigate_base_url,

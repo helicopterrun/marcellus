@@ -94,7 +94,7 @@ def get(settings: Settings, *, refresh: bool = False) -> PlusMeta:
         if hit and not refresh and now - hit[0] < _TTL_S:
             return hit[1]
     try:
-        with FrigateClient(settings.frigate.base_url) as fc:
+        with FrigateClient(settings.frigate.base_url, verify_tls=settings.frigate.verify_tls) as fc:
             meta = parse(fc.config())
     except Exception:  # noqa: BLE001 - degrade to defaults, never break the page
         logger.warning("inbox: could not read Frigate config", exc_info=True)

@@ -16,6 +16,8 @@
       users of its own. The form posts straight to Frigate through the
       sidecar's proxy, so the session cookie lands here too.
     </p>
+    <p id="login-problem" class="login-problem" role="alert"
+       data-diagnosis="{{ frigate_diagnosis or '' }}"{% if not frigate_diagnosis %} hidden{% endif %}>{{ frigate_diagnosis_message }}</p>
     <form id="login-form">
       <label class="login-field">username
         <input id="login-user" name="username" type="text" autocomplete="username"
@@ -50,6 +52,22 @@
 (function () {
   var form = document.getElementById("login-form");
   var state = document.getElementById("login-state");
+  var problem = document.getElementById("login-problem");
+  // A failed login may be the sidecar's own Frigate URL or certificate
+  // setting; ask the server, and show its answer instead of a bare failure.
+  async function explainFailure() {
+    try {
+      var r = await fetch("/login/diagnosis", { credentials: "same-origin" });
+      if (!r.ok) return;
+      var body = await r.json();
+      if (body && body.diagnosis && body.message) {
+        problem.textContent = body.message;
+        problem.dataset.diagnosis = body.diagnosis;
+        problem.hidden = false;
+        state.textContent = "login failed: Marcellus cannot reach Frigate (see above)";
+      }
+    } catch (e) { /* the bare failure text stays */ }
+  }
   form.addEventListener("submit", async function (ev) {
     ev.preventDefault();
     state.textContent = "logging in...";
@@ -67,6 +85,7 @@
         state.textContent = resp.status === 401
           ? "wrong username or password"
           : "login failed (HTTP " + resp.status + ")";
+        if (resp.status !== 401) await explainFailure();
         return;
       }
       if (document.getElementById("login-remember").checked) {
@@ -83,6 +102,7 @@
       window.location.replace(next);
     } catch (err) {
       state.textContent = "error: " + err.message;
+      await explainFailure();
     }
   });
 })();

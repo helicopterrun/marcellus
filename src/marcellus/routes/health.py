@@ -20,6 +20,12 @@ against a different origin and never saw the wedged proxy. `checks
 ["upstream_pool"]`, `checks["vod_pool"]` (once recorded playback has used it)
 and `checks["api_pool"]` additionally report pool stats and flip to degraded
 when a pool is at `max_connections` with nothing idle.
+
+`checks["frigate_diagnosis"]` (additive, informational, present only when it
+applies) names a certificate or scheme mistake behind a failing sign-in port:
+`tls_untrusted` (Frigate's self-signed certificate with `frigate.verify_tls`
+on) or `https_required` (`http://` pointed at an HTTPS port). See
+`frigate_tls.py`.
 """
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from marcellus import __version__, db
+from marcellus import __version__, db, frigate_tls
 from marcellus.frigate_api import (
     _DEFAULT_LIMITS,
     _STREAM_LIMITS,
@@ -254,10 +260,12 @@ async def _probe_frigate(app: Any, settings: Any, now: float) -> tuple[str, str 
         # and pool are alive, which is what this probe is for. Only a 5xx
         # (Frigate up but broken) reads as `error`.
         result = ("ok" if resp.status_code < 500 else "error", None)
+        frigate_tls.note_response(app, frigate_tls.PROXY_ORIGIN, url, resp)
     except (httpx.PoolTimeout, httpx.TimeoutException):
         result = ("proxy_stalled", "proxy_stalled")
-    except httpx.HTTPError:
+    except httpx.HTTPError as exc:
         result = ("unreachable", None)
+        frigate_tls.note_error(app, frigate_tls.PROXY_ORIGIN, url, exc)
     app.state._frigate_health_cache = (now, result)
     return result
 
@@ -280,6 +288,13 @@ async def compute_health(app: Any, now: float | None = None) -> dict[str, Any]:
 
     frigate_status, frigate_reason = await _probe_frigate(app, settings, now)
     checks["frigate"] = frigate_status
+    # Additive and informational: why the sign-in port fails, when the cause
+    # is a certificate or scheme mistake in the sidecar config (`frigate_tls.py`).
+    # Absent when there is nothing to explain. Never changes `frigate` or the
+    # status code.
+    frigate_diagnosis = frigate_tls.monitor(app).current(frigate_tls.PROXY_ORIGIN)
+    if frigate_diagnosis is not None:
+        checks["frigate_diagnosis"] = frigate_diagnosis
     reason: str | None = None
     if frigate_status == "proxy_stalled":
         ok = False

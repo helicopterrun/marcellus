@@ -595,7 +595,7 @@ def retro_label(conn: sqlite3.Connection, settings: Settings, cluster_id: int, n
     # The network loop only collects; the DB write happens once, after it, so
     # no write transaction is held open across Frigate calls.
     labeled: list[str] = []
-    with FrigateClient(settings.frigate.base_url) as fc:
+    with FrigateClient(settings.frigate.base_url, verify_tls=settings.frigate.verify_tls) as fc:
         for eid in event_ids:
             try:
                 fc.set_sub_label(eid, name)
@@ -618,7 +618,7 @@ def write_sub_labels(settings: Settings, event_ids: list[str], label: str) -> li
     if not event_ids:
         return done
     try:
-        with FrigateClient(settings.frigate.base_url) as fc:
+        with FrigateClient(settings.frigate.base_url, verify_tls=settings.frigate.verify_tls) as fc:
             for eid in event_ids:
                 try:
                     fc.set_sub_label(eid, label)
@@ -1211,7 +1211,11 @@ def run_cycle(settings: Settings, *, now: float | None = None) -> dict[str, Any]
         conn.commit()
         backlog_cands = [b for b in backlog if isinstance(b, Candidate)]
         if candidates or backlog_cands:
-            with FrigateClient(settings.frigate.base_url, timeout=cfg.http_timeout_s) as client:
+            with FrigateClient(
+                settings.frigate.base_url,
+                timeout=cfg.http_timeout_s,
+                verify_tls=settings.frigate.verify_tls,
+            ) as client:
                 for cand in candidates:
                     try:
                         status = process_event(conn, client, cand, cfg=cfg)
@@ -1294,7 +1298,11 @@ def regate(
         with contextlib.ExitStack() as stack:
             if client is None:
                 client = stack.enter_context(
-                    FrigateClient(settings.frigate.base_url, timeout=cfg.http_timeout_s)
+                    FrigateClient(
+                        settings.frigate.base_url,
+                        timeout=cfg.http_timeout_s,
+                        verify_tls=settings.frigate.verify_tls,
+                    )
                 )
             for n, r in enumerate(rows, 1):
                 if n % 100 == 0:

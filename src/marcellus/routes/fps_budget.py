@@ -36,7 +36,10 @@ def fps_budget_view(request: Request) -> Any:
     util_css = "muted"
     status_code = 200
     try:
-        result = fps_budget.analyze(frigate_base_url=settings.frigate.base_url)
+        result = fps_budget.analyze(
+            frigate_base_url=settings.frigate.base_url,
+            verify_tls=settings.frigate.verify_tls,
+        )
         util_css = _util_css(float(result["utilization_pct"]))
     except FrigateAPIError as exc:
         error = f"Frigate API unreachable: {exc}"

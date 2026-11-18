@@ -48,9 +48,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 from zoneinfo import ZoneInfo
 
-import httpx
-
-from marcellus import db
+from marcellus import db, frigate_tls
 from marcellus.frigate_config import _record_section, load_frigate_config
 
 if TYPE_CHECKING:
@@ -330,7 +328,9 @@ class RecordingWatcher:
         can't be read (then the config file alone decides)."""
         url = self.settings.frigate.base_url.rstrip("/") + "/api/config"
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with frigate_tls.async_client(
+                verify_tls=self.settings.frigate.verify_tls, timeout=5.0
+            ) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 cams = resp.json().get("cameras")

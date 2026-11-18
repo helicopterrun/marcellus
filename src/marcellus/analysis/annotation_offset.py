@@ -181,6 +181,7 @@ def analyze(
     *,
     frigate_db: str | Path,
     frigate_base_url: str,
+    verify_tls: bool,
     days: int = 7,
     camera: str | None = None,
     min_events: int = 10,
@@ -195,7 +196,7 @@ def analyze(
     round_to_ms: int = 50,
 ) -> list[dict[str, Any]]:
     cv2_mod, np_mod = _require_deps()
-    import httpx
+    from marcellus import frigate_tls
 
     where, params = time_window_clause(days)
     where += " AND has_snapshot = 1 AND label = 'person'"
@@ -229,7 +230,7 @@ def analyze(
 
     base = frigate_base_url.rstrip("/")
     results: list[dict[str, Any]] = []
-    with httpx.Client(base_url=base, timeout=10.0) as client:
+    with frigate_tls.sync_client(verify_tls=verify_tls, base_url=base, timeout=10.0) as client:
         for cam, evs in sorted(by_cam.items()):
             evs = evs[:target_events]
             offsets: list[int] = []

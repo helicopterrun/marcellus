@@ -55,6 +55,15 @@ class FrigateSection(BaseModel):
     # holds a password. Deliberately separate from base_url (unauth, sidecar's
     # own server-to-server calls) — do not merge them (docs/scrub-cache-and-proxy-spec.md §3.2).
     proxy_base_url: str = "http://frigate.lan:8971"
+    # Check the TLS certificate on connections to Frigate (both origins above,
+    # HTTP and WebSocket). Frigate serves 8971 over HTTPS with a self-signed
+    # certificate by default, which a checking client refuses: set this to
+    # false to skip the check for Frigate only (fine on a home network; it
+    # gives up proof that the other end really is your Frigate), or turn TLS
+    # off in Frigate (`tls: enabled: false`) and use http://. Never affects the
+    # push relay, APNs, UniFi Protect or external sources. `frigate_tls.py`
+    # builds every Frigate-bound client from it.
+    verify_tls: bool = True
     # DB's container-side recordings root, as stored in recordings.path. Used
     # only to strip this prefix before reattaching recordings_path (§8.2).
     media_path: Path = Path("/media/frigate")

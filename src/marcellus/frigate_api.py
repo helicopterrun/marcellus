@@ -12,6 +12,8 @@ from urllib.parse import quote
 
 import httpx
 
+from marcellus import frigate_tls
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from fastapi import FastAPI
 
@@ -69,8 +71,11 @@ def get_async_client(app: FastAPI) -> httpx.AsyncClient:
     """
     client = getattr(app.state, "http_client", None)
     if client is None or getattr(client, "is_closed", False):
-        client = httpx.AsyncClient(
-            timeout=_DEFAULT_TIMEOUT, limits=_DEFAULT_LIMITS, follow_redirects=False
+        client = frigate_tls.async_client(
+            verify_tls=frigate_tls.app_verify_tls(app),
+            timeout=_DEFAULT_TIMEOUT,
+            limits=_DEFAULT_LIMITS,
+            follow_redirects=False,
         )
         app.state.http_client = client
     return client
@@ -96,7 +101,12 @@ def get_vod_stream_client(app: FastAPI) -> httpx.AsyncClient:
 def _pooled_stream_client(app: FastAPI, attr: str, limits: httpx.Limits) -> httpx.AsyncClient:
     client: httpx.AsyncClient | None = getattr(app.state, attr, None)
     if client is None or getattr(client, "is_closed", False):
-        client = httpx.AsyncClient(timeout=_STREAM_TIMEOUT, limits=limits, follow_redirects=False)
+        client = frigate_tls.async_client(
+            verify_tls=frigate_tls.app_verify_tls(app),
+            timeout=_STREAM_TIMEOUT,
+            limits=limits,
+            follow_redirects=False,
+        )
         setattr(app.state, attr, client)
     return client
 
@@ -156,17 +166,21 @@ class FrigatePlusError(RuntimeError):
 
 
 class FrigateClient:
-    def __init__(self, base_url: str, timeout: float = 10.0) -> None:
+    def __init__(self, base_url: str, timeout: float = 10.0, *, verify_tls: bool) -> None:
+        """`verify_tls` is `frigate.verify_tls` (required, so no caller can
+        forget it -- see `frigate_tls.py`)."""
         self.base_url = base_url.rstrip("/")
         # Plus uploads can be slow (snapshot read + remote POST to plus.frigate.video),
         # so allow a longer timeout for those specifically.
-        self._client = httpx.Client(
+        self._client = frigate_tls.sync_client(
+            verify_tls=verify_tls,
             timeout=timeout,
             limits=httpx.Limits(
                 max_connections=20, max_keepalive_connections=10, keepalive_expiry=15.0
             ),
         )
-        self._plus_client = httpx.Client(timeout=30.0)
+        # Still Frigate: the Plus upload is a request to Frigate's own API.
+        self._plus_client = frigate_tls.sync_client(verify_tls=verify_tls, timeout=30.0)
 
     def __enter__(self) -> FrigateClient:
         return self

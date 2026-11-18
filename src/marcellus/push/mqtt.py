@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 
-from marcellus import db
+from marcellus import db, frigate_tls
 from marcellus.push.log_context import reset_push_context, set_push_context
 from marcellus.push.models import ReviewEvent
 from marcellus.push.stats import STATS
@@ -90,7 +90,9 @@ async def backfill_since(
     check used for live events).
     """
     own_client = client is None
-    client = client or httpx.AsyncClient(timeout=timeout)
+    client = client or frigate_tls.async_client(
+        verify_tls=engine.frigate_verify_tls, timeout=timeout
+    )
     notified = 0
     try:
         url = f"{frigate_base_url.rstrip('/')}/api/events"

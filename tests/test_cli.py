@@ -9,14 +9,35 @@ from __future__ import annotations
 from pathlib import Path
 
 import httpx
+import pytest
 import yaml
 from typer.testing import CliRunner
 
-from marcellus import __version__
+from marcellus import __version__, frigate_tls
 from marcellus.cli import app
 from marcellus.config import Settings
+from marcellus.frigate_tls import SigninProbe
 
 runner = CliRunner()
+
+
+class _FakeProber:
+    """Stands in for `frigate_tls.probe_signin_port_bounded`: no network."""
+
+    def __init__(self, result: SigninProbe | None = None) -> None:
+        self.result = result or SigninProbe(None, detail="stubbed")
+        self.urls: list[str] = []
+
+    def __call__(self, url: str, **_kw: object) -> SigninProbe:
+        self.urls.append(url)
+        return self.result
+
+
+@pytest.fixture(autouse=True)
+def prober(monkeypatch: pytest.MonkeyPatch) -> _FakeProber:
+    fake = _FakeProber()
+    monkeypatch.setattr(frigate_tls, "probe_signin_port_bounded", fake)
+    return fake
 
 
 def _init(tmp_path: Path, *extra: str) -> tuple[int, str]:
@@ -77,7 +98,7 @@ def test_init_version_probe_failure_is_warn_only(tmp_path: Path, monkeypatch) ->
 
 
 def test_init_version_probe_success_reported(tmp_path: Path, monkeypatch) -> None:
-    def fake_get(url: str, timeout: float) -> httpx.Response:
+    def fake_get(url: str, timeout: float, **_kw: object) -> httpx.Response:
         return httpx.Response(200, text="0.17.2", request=httpx.Request("GET", url))
 
     monkeypatch.setattr(httpx, "get", fake_get)
@@ -112,13 +133,145 @@ def test_init_existing_frigate_paths_reported(tmp_path: Path, monkeypatch) -> No
     assert "Recordings path exists" in output
 
 
+# -- Frigate's sign-in port: scheme and self-signed certificate ------------------
+
+_ALL_FLAGS = (
+    "--frigate-config", "/tmp/none/config.yml",
+    "--frigate-db", "/tmp/none/frigate.db",
+    "--recordings-path", "/tmp/none/recordings",
+    "--sidecar-db", "/tmp/none/marcellus.db",
+    "--bind-host", "127.0.0.1",
+    "--bind-port", "5001",
+)
+
+
+def _init_interactive(tmp_path: Path, answers: str, *extra: str) -> tuple[int, str, dict]:
+    out = tmp_path / "sidecar.yml"
+    result = runner.invoke(app, ["init", "--output", str(out), *_ALL_FLAGS, *extra], input=answers)
+    cfg = yaml.safe_load(out.read_text()) if out.exists() else {}
+    return result.exit_code, result.output, cfg
+
+
+def test_init_derives_the_signin_url_from_the_frigate_host_and_probes_it(
+    tmp_path: Path, monkeypatch, prober: _FakeProber
+) -> None:
+    monkeypatch.setattr(httpx, "get", _raise_connect)
+    code, output = _init(tmp_path, "--frigate-url", "http://192.168.1.10:5000")
+    assert code == 0
+    assert prober.urls == ["https://192.168.1.10:8971"]
+    cfg = yaml.safe_load((tmp_path / "sidecar.yml").read_text())
+    assert cfg["frigate"]["proxy_base_url"] == "https://192.168.1.10:8971"
+    assert cfg["frigate"]["verify_tls"] is True
+    # An unanswered probe is a note, never a failure.
+    assert "Could not check Frigate's sign-in port" in output
+    assert "frigate.verify_tls" in output
+
+
+def test_init_does_not_probe_the_placeholder_default(
+    tmp_path: Path, monkeypatch, prober: _FakeProber
+) -> None:
+    monkeypatch.setattr(httpx, "get", _raise_connect)
+    code, _ = _init(tmp_path)
+    assert code == 0
+    assert prober.urls == []
+
+
+def test_non_interactive_self_signed_keeps_strict_default_and_warns(
+    tmp_path: Path, monkeypatch, prober: _FakeProber
+) -> None:
+    monkeypatch.setattr(httpx, "get", _raise_connect)
+    prober.result = SigninProbe("https", False, "192.168.1.10")
+    code, output = _init(tmp_path, "--proxy-url", "http://192.168.1.10:8971")
+    assert code == 0
+    cfg = yaml.safe_load((tmp_path / "sidecar.yml").read_text())
+    # The scheme is corrected (http:// can never work against an HTTPS port) ...
+    assert cfg["frigate"]["proxy_base_url"] == "https://192.168.1.10:8971"
+    # ... but trust is never granted without asking.
+    assert cfg["frigate"]["verify_tls"] is True
+    assert "speaks HTTPS: using https://192.168.1.10:8971" in output
+    assert "`frigate.verify_tls: false`" in output
+    assert str(tmp_path / "sidecar.yml") in output
+    assert "`tls: enabled: false`" in output
+    Settings.model_validate(cfg)
+
+
+def test_interactive_self_signed_on_a_private_address_defaults_to_trust(
+    tmp_path: Path, monkeypatch, prober: _FakeProber
+) -> None:
+    monkeypatch.setattr(httpx, "get", _raise_connect)
+    prober.result = SigninProbe("https", False, "192.168.1.10")
+    code, output, cfg = _init_interactive(
+        tmp_path, "\n",
+        "--frigate-url", "http://192.168.1.10:5000", "--proxy-url", "https://192.168.1.10:8971",
+    )
+    assert code == 0, output
+    assert "does not trust" in output
+    assert "Trust Frigate's certificate? [Y/n]" in output
+    assert cfg["frigate"]["verify_tls"] is False
+    assert cfg["frigate"]["proxy_base_url"] == "https://192.168.1.10:8971"
+
+
+def test_interactive_self_signed_on_a_public_address_defaults_to_strict(
+    tmp_path: Path, monkeypatch, prober: _FakeProber
+) -> None:
+    monkeypatch.setattr(httpx, "get", _raise_connect)
+    prober.result = SigninProbe("https", False, "8.8.8.8")
+    code, output, cfg = _init_interactive(
+        tmp_path, "\n",
+        "--frigate-url", "http://frigate.example.net:5000",
+        "--proxy-url", "https://frigate.example.net:8971",
+    )
+    assert code == 0, output
+    assert "Trust Frigate's certificate? [y/N]" in output
+    assert cfg["frigate"]["verify_tls"] is True
+    assert "`frigate.verify_tls: false`" in output
+
+
+def test_interactive_answer_no_keeps_strict(
+    tmp_path: Path, monkeypatch, prober: _FakeProber
+) -> None:
+    monkeypatch.setattr(httpx, "get", _raise_connect)
+    prober.result = SigninProbe("https", False, "192.168.1.10")
+    code, _, cfg = _init_interactive(
+        tmp_path, "n\n",
+        "--frigate-url", "http://192.168.1.10:5000", "--proxy-url", "https://192.168.1.10:8971",
+    )
+    assert code == 0
+    assert cfg["frigate"]["verify_tls"] is True
+
+
+def test_init_switches_to_http_when_the_port_speaks_plain_http(
+    tmp_path: Path, monkeypatch, prober: _FakeProber
+) -> None:
+    monkeypatch.setattr(httpx, "get", _raise_connect)
+    prober.result = SigninProbe("http", None, "192.168.1.10")
+    code, output = _init(tmp_path, "--proxy-url", "https://192.168.1.10:8971")
+    assert code == 0
+    cfg = yaml.safe_load((tmp_path / "sidecar.yml").read_text())
+    assert cfg["frigate"]["proxy_base_url"] == "http://192.168.1.10:8971"
+    assert cfg["frigate"]["verify_tls"] is True
+    assert "speaks HTTP: using http://192.168.1.10:8971" in output
+
+
+def test_init_trusted_https_needs_nothing(
+    tmp_path: Path, monkeypatch, prober: _FakeProber
+) -> None:
+    monkeypatch.setattr(httpx, "get", _raise_connect)
+    prober.result = SigninProbe("https", True, "192.168.1.10")
+    code, output = _init(tmp_path, "--proxy-url", "https://frigate.local:8971")
+    assert code == 0
+    cfg = yaml.safe_load((tmp_path / "sidecar.yml").read_text())
+    assert cfg["frigate"]["verify_tls"] is True
+    assert "trusted certificate" in output
+
+
 def test_version_prints_package_version() -> None:
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert __version__ in result.output
 
 
-def _raise_connect(url: str, timeout: float) -> httpx.Response:
+def _raise_connect(url: str, timeout: float, **_kw: object) -> httpx.Response:
     raise httpx.ConnectError("test: no frigate here")
 
 
