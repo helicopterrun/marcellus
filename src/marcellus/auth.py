@@ -23,6 +23,11 @@ Deliberately NOT gated here:
   pre-fetched thumbnail image, never to anything the sidecar or Frigate can
   be made to do -- the same trust model as a signed download link.
 
+A request with no cookie at all is admitted only when Frigate itself serves
+such callers, i.e. sign-in is turned off there (`frigate_allows_anonymous`):
+then the gate gives away nothing Frigate does not, and an app that saved the
+server as "no sign-in" still gets the sidecar's features.
+
 The gate is applied as raw ASGI middleware rather than a router dependency so
 it can't be forgotten on a newly added route, and so it doesn't wrap the
 proxy's streaming responses.
@@ -165,6 +170,10 @@ async def validate_frigate_session(
 
     settings: Settings = app.state.settings
     if not cookie:
+        # No session to check. Admitted only when Frigate itself serves callers
+        # without one (sign-in turned off) -- see `frigate_allows_anonymous`.
+        if await frigate_allows_anonymous(app):
+            return
         raise HTTPException(status_code=401, detail="frigate session required")
 
     key = hashlib.sha256(cookie.encode()).hexdigest()
@@ -193,6 +202,97 @@ async def validate_frigate_session(
         now + (settings.sidecar.auth_cache_ttl_s if ttl_s is None else ttl_s),
         max_entries=settings.sidecar.auth_cache_max_entries,
     )
+
+
+# How long a failed anonymous-access check (Frigate unreachable, or an answer
+# that would not parse) is remembered. Shorter than a definite answer's
+# `auth_cache_ttl_s`, so a Frigate that was briefly down at the app's first
+# request does not lock a sign-in-off deployment out for the full window.
+ANONYMOUS_ERROR_TTL_S = 5.0
+
+
+async def frigate_allows_anonymous(app: FastAPI) -> bool:
+    """True only when Frigate itself admits callers that carry no session.
+
+    That is the case for a Frigate with sign-in turned off (`auth.enabled:
+    false`): it serves every caller on its authenticated port without a
+    cookie, so the sidecar admitting the same callers gives away nothing
+    Frigate does not already give away. Never assumed -- both have to hold:
+
+    1. Frigate's running config, read from `frigate.base_url` (the origin the
+       sidecar calls itself, which reports the real value on either port),
+       says `auth.enabled` is exactly `false`. A missing key, `true`, a
+       non-200 or a body that is not a Frigate config all mean "no".
+    2. A bare `GET /api/version` on `frigate.proxy_base_url` -- the origin
+       client traffic is forwarded to -- answers 2xx. This is Frigate's own
+       decision for a caller with no credential: it refuses with 401 when
+       sign-in is on, and also when `proxy.auth_secret` is set or a reverse
+       proxy in front of that origin wants its own login.
+
+    (1) on its own would open the gate when `proxy_base_url` is an origin
+    Frigate does not serve openly; (2) on its own would open it when
+    `proxy_base_url` is misconfigured to the unauthenticated port 5000 of a
+    Frigate that has sign-in on. Requiring both means a deployment where
+    Frigate asks for a session keeps asking for one here too.
+
+    The answer is cached for `sidecar.auth_cache_ttl_s` (a failed check for
+    `ANONYMOUS_ERROR_TTL_S`), both ways, so turning sign-in back on in Frigate
+    closes the gate within one window, and session-less requests to a Frigate
+    with sign-in on cost one upstream check per window, not one each.
+    """
+    settings: Settings = app.state.settings
+    now = time.time()
+    cached: tuple[float, bool] | None = getattr(app.state, "anonymous_access", None)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+
+    allowed, ttl_s = await _check_anonymous_access(app, settings)
+    previous = cached[1] if cached is not None else False
+    if allowed and not previous:
+        logger.warning(
+            "Frigate reports sign-in turned off (auth.enabled: false) and serves "
+            "callers without a session; the sidecar's own routes now do the same"
+        )
+    elif previous and not allowed:
+        logger.warning("Frigate no longer serves callers without a session; sign-in required again")
+    app.state.anonymous_access = (now + ttl_s, allowed)
+    return allowed
+
+
+async def _check_anonymous_access(app: FastAPI, settings: Settings) -> tuple[bool, float]:
+    """One uncached run of the two checks in `frigate_allows_anonymous`.
+
+    Returns `(allowed, ttl_s)`: how long the answer may be trusted.
+    """
+    from marcellus.frigate_api import get_async_client
+
+    ttl_s = settings.sidecar.auth_cache_ttl_s
+    client = get_async_client(app)
+    timeout = httpx.Timeout(5.0).as_dict()
+    # Requests built by hand and sent with `send()`, so the pooled client's
+    # cookie jar is never merged in: these checks must carry no credential.
+    config_req = httpx.Request(
+        "GET",
+        f"{settings.frigate.base_url.rstrip('/')}/api/config",
+        extensions={"timeout": timeout},
+    )
+    version_req = httpx.Request(
+        "GET",
+        f"{settings.frigate.proxy_base_url.rstrip('/')}/api/version",
+        extensions={"timeout": timeout},
+    )
+    try:
+        resp = await client.send(config_req)
+        if resp.status_code != 200:
+            return False, ttl_s
+        body = resp.json()
+        auth_section = body.get("auth") if isinstance(body, dict) else None
+        if not isinstance(auth_section, dict) or auth_section.get("enabled") is not False:
+            return False, ttl_s
+        bare = await client.send(version_req)
+    except (httpx.HTTPError, ValueError):
+        return False, ANONYMOUS_ERROR_TTL_S
+    return 200 <= bare.status_code < 300, ttl_s
 
 
 class LoginRateLimiter:

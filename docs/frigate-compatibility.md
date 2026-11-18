@@ -113,12 +113,22 @@ unauthenticated port, which Frigate treats as the admin role. Browser and app tr
 the catch-all proxy to `frigate.proxy_base_url`, the authenticated port, with
 the client's own cookie.
 
+A request to one of the sidecar's own routes that carries no cookie is admitted
+only when Frigate has sign-in turned off: `GET /api/config` on `base_url`
+reports `auth.enabled: false` (the `auth` section is in the dump in 0.17 and
+0.18, and the internal port reports the real value) and a bare `GET
+/api/version` on `proxy_base_url` answers 2xx (with sign-in on that is a 401
+from nginx's auth check, in both releases). On the authenticated port with
+sign-in off Frigate gives such callers the `viewer` role, so admin-only routes
+reached through the proxy answer 403. See "Frigate with sign-in turned off" in
+the first-run guide.
+
 | Method and path | Frigate auth | Caller | Sends | Reads |
 |---|---|---|---|---|
-| `GET /api/version` | public (behind nginx auth on the authenticated port) | `auth.py` session check (proxy URL, client cookie), health/status | (none) | status code |
+| `GET /api/version` | public (behind nginx auth on the authenticated port) | `auth.py` session check (proxy URL, client cookie), its sign-in-off check (proxy URL, no credential), health/status | (none) | status code |
 | `POST /api/login` | public | proxied; rate-limited in `auth.py` | (client body) | status code |
 | `GET /api/stats` | any authenticated | `routes/status.py`, `analysis/fps_budget.py` | (none) | `detectors.*.inference_speed`, `detection_fps`, `cameras.*.{detection_fps,skipped_fps}`, `cpu_usages`, `gpu_usages`, `service.{storage,uptime}` |
-| `GET /api/config` | any authenticated | `recording_watch.py`, `fps_budget`, `plus_enabled` | (none) | `cameras.*.{enabled,record.enabled,detect.fps}`, `plus.enabled` |
+| `GET /api/config` | any authenticated | `recording_watch.py`, `fps_budget`, `plus_enabled`, `auth.py` sign-in-off check | (none) | `cameras.*.{enabled,record.enabled,detect.fps}`, `plus.enabled`, `auth.enabled` |
 | `GET /api/config/raw` | admin | `routes/push_settings.py` zone import (proxy URL, client cookie, so the user must be an admin) | (none) | YAML text |
 | `PUT /api/config/set` | admin | `FrigateClient.set_annotation_offset` | `{requires_restart: 1, config_data: {cameras: {<cam>: {detect: {annotation_offset}}}}}` | status code |
 | `POST /api/restart` | admin | `FrigateClient.restart` | (none) | status code |
