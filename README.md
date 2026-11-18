@@ -60,6 +60,8 @@ stops and tells you which `FRIGATE_CONFIG`, `FRIGATE_DB_DIR` and
 `sudo bash install.sh`. Re-run it to upgrade. Requirements, manual Docker
 Compose and systemd installs, and upgrade notes are in the
 [deployment guide](https://helicopterrun.github.io/marcellus/guide/deployment/).
+Afterwards, `fsc doctor` checks the install and prints a one-line fix for
+anything wrong ([Check your install](https://helicopterrun.github.io/marcellus/guide/check-your-install/)).
 
 Note: v0.3.0 was published as `ghcr.io/helicopterrun/frigate-sidecar` before the
 rename. That image is frozen at 0.3; the current image is
