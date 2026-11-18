@@ -1048,7 +1048,7 @@ def analysis_annotation_offset(
 
     Requires the `[annotation]` extra: `pip install ".[annotation]"`.
     """
-    from marcellus.analysis import annotation_offset
+    from marcellus.analysis import annotation_offset, clock_offset
 
     s = load_settings()
     try:
@@ -1058,6 +1058,7 @@ def analysis_annotation_offset(
             verify_tls=s.frigate.verify_tls,
             days=days,
             camera=camera,
+            segment_term=clock_offset.segment_term_fn(s),
         )
     except annotation_offset.AnnotationOffsetUnavailable as exc:
         typer.echo(str(exc), err=True)

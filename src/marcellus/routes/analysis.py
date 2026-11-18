@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from marcellus import db
 from marcellus.analysis import (
     annotation_offset,
+    clock_offset,
     fps_budget,
     motion_active,
     motion_compare,
@@ -173,6 +174,7 @@ def annotation_offset_endpoint(
             frigate_base_url=s.frigate.base_url,
             verify_tls=s.frigate.verify_tls,
             days=days, camera=camera,
+            segment_term=clock_offset.segment_term_fn(s),
         )
     except annotation_offset.AnnotationOffsetUnavailable as exc:
         raise HTTPException(
@@ -221,6 +223,7 @@ async def alignment_measure(request: Request, days: int = Query(3, ge=1, le=30))
             verify_tls=s.frigate.verify_tls,
             days=days,
             search_window_ms=_MEASURE_WINDOW_MS,
+            segment_term=clock_offset.segment_term_fn(s),
         )
 
     async def _task() -> None:
@@ -555,11 +558,19 @@ def alignment_snapshot(request: Request, event_id: str) -> Any:
 
 
 @router.get("/annotation-offset/frame/{camera}")
-def alignment_frame(request: Request, camera: str, ts: float = Query(...)) -> Any:
+def alignment_frame(
+    request: Request,
+    camera: str,
+    ts: float = Query(...),
+    segment_clock: bool = Query(False),
+) -> Any:
     """A recording frame at wall-clock `ts`, for the calibration filmstrip.
 
-    Recordings are immutable, so successful frames cache hard -- nudging back
-    and forth over the same offsets stays in the browser cache."""
+    With `segment_clock=1` the frame is the one the corrected shift would put
+    at `ts` (`ts + 0.5 - f`, see `analysis.clock_offset`), so the offset the
+    calibrator dials in is the constant to save. Recordings are immutable, so
+    successful frames cache hard -- nudging back and forth over the same
+    offsets stays in the browser cache."""
     import math
     import time
 
@@ -573,6 +584,8 @@ def alignment_frame(request: Request, camera: str, ts: float = Query(...)) -> An
         status_code=422, detail=error_detail("invalid_range", "ts out of range")
     )
     s = _settings(request)
+    if segment_clock:
+        ts += clock_offset.segment_term_s(s, camera, ts)
     try:
         with FrigateClient(s.frigate.base_url, verify_tls=s.frigate.verify_tls) as fc:
             jpeg, status = fc.recording_snapshot(camera, ts)
@@ -589,6 +602,39 @@ def alignment_frame(request: Request, camera: str, ts: float = Query(...)) -> An
         media_type="image/jpeg",
         headers={"Cache-Control": "private, max-age=3600"},
     )
+
+
+@router.get("/segment-clock")
+def segment_clock_endpoint(
+    request: Request,
+    camera: str,
+    ts: float = Query(...),
+    window_s: float = Query(300.0, ge=10.0, le=3600.0),
+) -> dict[str, Any]:
+    """Read-only diagnostics for the recording segment-clock correction.
+
+    The recording segments starting within `window_s` either side of `ts`,
+    each with its estimated sub-second start error `f` and the width of the
+    interval that pins it (<= 0.2 s: pinned; ~1 s: unknown, the correction is
+    ~0 there), plus the shift an event detected at `ts` would get.
+    """
+    from marcellus.analysis import segment_clock as segclock
+
+    s = _settings(request)
+    enabled = clock_offset.segment_correction_enabled(s)
+    shift = clock_offset.event_clock_shift(s, camera)
+    segments = segclock.clock_for(str(s.frigate.db_path)).segments(
+        camera, ts - window_s, ts + window_s
+    )
+    return {
+        "camera": camera,
+        "ts": ts,
+        "enabled": enabled,
+        "constant_s": shift.constant_s,
+        "correction_s": shift.correction_s(ts),
+        "shift_s": shift.at(ts),
+        "segments": segments,
+    }
 
 
 @router.get("/annotation-offset/state")

@@ -283,8 +283,9 @@ class EncounterService:
 * `reconcile`: open Frigate RO + sidecar; read `reviewsegment` rows with
   `start_time >= watermark - max_duration_s` (first run: `now -
   backfill_lookback_s`), apply the annotation clock offset per camera the
-  same way `routes/scrub.py::_event_clock_offset_s` does (factor that helper
-  out so both share it), sort by start_time, run decide/upsert for each
+  same way the scrub reel does (`analysis/clock_offset.event_clock_shift`:
+  the per-camera constant plus the recording segment-clock term, one function
+  for both), sort by start_time, run decide/upsert for each
   (existing members get their end_time/objects refreshed), then
   `seal_stale`, advance the watermark to the max start_time seen, return
   stats (rows, new, updated, sealed, skipped, errors, removed). This is the

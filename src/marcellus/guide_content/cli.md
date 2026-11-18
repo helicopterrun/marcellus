@@ -75,7 +75,9 @@ In Docker, run it inside the container, for example
 - `pull-events --days --camera --label` -- dump events as JSONL on stdout.
 - `annotation-offset --days --camera --json` -- measured
   `detect.annotation_offset` (ms) per camera via template matching; requires
-  the `[annotation]` extra.
+  the `[annotation]` extra. With `scrub.segment_clock_correction` on it
+  measures the offset the corrected shift expects (`segment_clock_corrected`
+  in the JSON says which).
 
 ## `fsc scrub`
 

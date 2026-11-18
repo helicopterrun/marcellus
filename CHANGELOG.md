@@ -16,6 +16,47 @@ may change behaviour). Numbers are pull requests.
   the push relay and the running service. One line per check, a one-line fix
   for anything wrong, exit code 1 on a failure; `--json` gives a stable list
   for scripts. A new guide page, "Check your install", explains it.
+### Upgrade notes
+
+- **Event times now include a per-segment correction, on by default.**
+  `scrub.segment_clock_correction` (default `true`) adds `0.5 s − f` to the
+  per-camera event clock offset, where `f` is the recording segment's own
+  sub-second start error (Frigate names segments after whole seconds). Your
+  existing offsets — Frigate's `detect.annotation_offset` and the values
+  applied from Settings › Event alignment — are left exactly as they are and
+  keep their meaning: the shift that is right on average. Over the events any
+  offset was fitted on, `f` averages about 0.5 on a drifting camera, so the
+  average alignment does not move; only the spread around it shrinks. Where
+  the sidecar cannot pin `f` (no recordings rows, a gap, a camera whose clock
+  never drifts) the term is zero and the old offset applies alone. For the
+  best result, re-run **Measure cameras** (or the calibrator) once after
+  upgrading: both now measure with the correction in place, which removes the
+  small bias (up to a few hundred milliseconds) an older value can carry. Set
+  `scrub.segment_clock_correction: false` to get the previous behaviour
+  byte-for-byte.
+
+### Changed
+
+- **Event, review and path times on the reel, highlights, `continues` links
+  and encounter linking are corrected for each recording segment's
+  sub-second start error** (`analysis/segment_clock.py`). A constant
+  per-camera offset left event bars up to about half a second ahead of or
+  behind the picture, in a sawtooth that drifts over hours; measured on the
+  reference deployment the per-event spread fell from 0.24–0.35 s to
+  0.03–0.09 s (standard deviation). Estimated read-only from Frigate's
+  `recordings` table, cached per camera in bounded memory, no schema change.
+  Times for recent windows can differ from what a client cached before the
+  upgrade by up to ±0.6 s; nothing on the wire changes shape.
+- **The annotation-offset measurement** (`fsc analysis annotation-offset`,
+  Settings › Measure cameras, the calibrator's frames) **measures with the
+  correction applied**, so its suggested value is the constant the corrected
+  shift expects; results carry `segment_clock_corrected`.
+
+### Added
+
+- **`GET /analysis/segment-clock?camera=&ts=`** — read-only diagnostics: the
+  recording segments around `ts` with their estimated start error and how
+  tightly it is pinned, and the shift an event at `ts` gets.
 
 ## [0.5.0] - 2026-11-18
 

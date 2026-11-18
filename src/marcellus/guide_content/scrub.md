@@ -54,6 +54,14 @@ The `scrub:` config section:
   no extra decode) whenever the recent tier already covers a span end to
   end; only a span the recent tier never reached falls back to decoding it
   directly from recordings.
+- `segment_clock_correction` — default on: correct event, review and path
+  times for each recording segment's own sub-second start error (see
+  [Settings › Event alignment](/guide/settings)). Frigate names a segment
+  after the whole second its file was opened, so the footage starts 0–1 s
+  later, and that error drifts through the second over hours: a constant
+  offset alone leaves event bars up to half a second off. Applies to the reel,
+  highlights and encounters whether or not `enabled` is set; off gives the
+  plain per-camera offset exactly as before.
 - `match_keyframe_cadence` — generate a camera at its own keyframe cadence
   when coarser than `recent_interval_s`, instead of full-decoding (default
   on).
