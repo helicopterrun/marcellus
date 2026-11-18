@@ -22,6 +22,7 @@ may change behaviour). Numbers are pull requests.
   `https_required`. The watchdog no longer counts a certificate failure as a
   hung Frigate.
 
+- **WebSocket proxy no longer logs a traceback when a client closes a live stream.** A client leaving while upstream frames were still arriving left an unretrieved task exception (`Unexpected ASGI message 'websocket.send'` or `ConnectionClosedOK`). Either side closing now ends the relay quietly, cancels the other pump and closes the upstream socket; a genuine error logs one warning line.
 - **`database is locked` in scrub generation and the push sweep.** One lock
   failure in a generation cycle no longer fails every later camera: Python left
   the failed write's transaction open, so each later write on the cycle's
@@ -33,6 +34,19 @@ may change behaviour). Numbers are pull requests.
   files afterwards. A busy lock in scrub generation, the push activity sweep,
   the MQTT consumer or external-source state now logs one warning line instead
   of a traceback.
+- **One camera with thousands of aged-tier holes no longer stops scrub
+  decimation for every camera after it.** Pass 3 built that camera's span list
+  by comparing every hole with every finer-tier bucket (millions of pairs, longer
+  than the whole pass), logged `tried=0`, did not count the turn and so started
+  the next cycle with the same camera; no later camera got its 5 s tier
+  decimated or its stale 1 s buckets retired. The span list is now built in one
+  sweep, each camera's turn gets a share of the pass instead of all of it, every
+  turn counts and always decimates at least one source sheet, and time the
+  other cameras leave goes to the ones that ran out. Backfill's subtraction of
+  finer-tier coverage got the same sweep. The cycle log line now ends with
+  `pass3 cursor a->b turns=n/N second_round=k out_of_time=<camera>(turns tried
+  spans)`, and each aged-tier line reports `setup_s` and `turn_s`. What gets
+  generated or retired is unchanged.
 ### Added
 
 - **`frigate.verify_tls`** (default `true`). Set it to `false` to accept

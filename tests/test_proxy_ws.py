@@ -216,3 +216,130 @@ def test_client_leaving_during_the_handshake_is_not_an_error(
 
     assert upstream.closed
     assert "Exception in ASGI application" not in caplog.text
+
+
+class _FakeUpstream:
+    """Scripted upstream: yields `frames`, then ends or raises `then`."""
+
+    subprotocol = None
+
+    def __init__(
+        self, frames: list[bytes], *, forever: bool = False, then: Exception | None = None
+    ):
+        self.frames = frames
+        self.forever = forever
+        self.then = then
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def send(self, _: object) -> None:
+        return None
+
+    def __aiter__(self) -> _FakeUpstream:
+        self._i = 0
+        return self
+
+    async def __anext__(self) -> bytes:
+        await asyncio.sleep(0)
+        if self.forever:
+            return b"\x00" * 64
+        if self._i < len(self.frames):
+            self._i += 1
+            return self.frames[self._i - 1]
+        if self.then is not None:
+            raise self.then
+        raise StopAsyncIteration
+
+
+def _fake_client(
+    frigate_db_path: Path,
+    sidecar_db_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    upstream: _FakeUpstream,
+) -> TestClient:
+    from marcellus.routes import proxy
+
+    async def connect(*_: object) -> _FakeUpstream:
+        return upstream
+
+    monkeypatch.setattr(proxy, "_ws_connector", lambda **_kw: connect)
+    return _client(frigate_db_path, sidecar_db_path, tmp_path, 9)
+
+
+def test_client_closing_mid_stream_ends_quietly_and_closes_upstream(
+    frigate_db_path: Path,
+    sidecar_db_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Stopping a live MSE stream: the client leaves while binary frames still arrive."""
+    import gc
+
+    upstream = _FakeUpstream([], forever=True)
+    client = _fake_client(frigate_db_path, sidecar_db_path, tmp_path, monkeypatch, upstream)
+    with caplog.at_level("DEBUG"):
+        with client.websocket_connect("/ws") as ws:
+            assert ws.receive_bytes()
+        client.close()
+        gc.collect()
+    assert upstream.closed
+    assert "never retrieved" not in caplog.text
+    assert not [r for r in caplog.records if r.levelname in ("WARNING", "ERROR")]
+
+
+def test_upstream_closing_first_closes_the_client_cleanly(
+    frigate_db_path: Path,
+    sidecar_db_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from starlette.websockets import WebSocketDisconnect
+
+    upstream = _FakeUpstream([b"a", b"b"])
+    client = _fake_client(frigate_db_path, sidecar_db_path, tmp_path, monkeypatch, upstream)
+    with caplog.at_level("DEBUG"), client.websocket_connect("/ws") as ws:
+        assert ws.receive_bytes() == b"a"
+        assert ws.receive_bytes() == b"b"
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_bytes()
+    assert upstream.closed
+    assert not [r for r in caplog.records if r.levelname in ("WARNING", "ERROR")]
+
+
+def test_unexpected_upstream_error_logs_one_warning(
+    frigate_db_path: Path,
+    sidecar_db_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from starlette.websockets import WebSocketDisconnect
+
+    upstream = _FakeUpstream([b"a"], then=ValueError("boom"))
+    client = _fake_client(frigate_db_path, sidecar_db_path, tmp_path, monkeypatch, upstream)
+    with caplog.at_level("DEBUG"), client.websocket_connect("/ws") as ws:
+        assert ws.receive_bytes() == b"a"
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_bytes()
+    assert upstream.closed
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "boom" in warnings[0].getMessage()
+
+
+def test_peer_closed_matches_only_closed_socket_errors() -> None:
+    from marcellus.routes.proxy import _peer_closed
+
+    assert _peer_closed(
+        RuntimeError(
+            "Unexpected ASGI message 'websocket.send', after sending 'websocket.close' "
+            "or response already completed."
+        )
+    )
+    assert not _peer_closed(RuntimeError("something else broke"))
+    assert not _peer_closed(ValueError("nope"))
