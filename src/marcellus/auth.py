@@ -1,20 +1,32 @@
-"""Frigate-session gate for every endpoint the sidecar owns.
+"""Frigate-session gate for every request the sidecar serves.
 
 The sidecar has no user database and never holds a password: it validates the
-client's own Frigate session cookie against Frigate's authenticated origin and
-caches the pass for a short TTL. That is the same mechanism `/v1` already used
-(docs/scrub-cache-and-proxy-spec.md §3.2 finding 5, option (a)); this module
-generalises it so the triage UI, `/faces/captures`, `/analysis` and `/toybox` are
-covered too. Those endpoints expose event history, face crops of identified
-people, and label/promote writes with side effects on Frigate itself, so
-leaving them open made the sidecar a way around Frigate's own auth.
+caller's own Frigate credential -- the `Cookie` header (`frigate_token`) and/or
+an `Authorization: Bearer` header, both of which Frigate accepts -- against
+Frigate's authenticated origin and caches the pass for a short TTL
+(docs/scrub-cache-and-proxy-spec.md §3.2 finding 5, option (a)). It covers the
+sidecar's own routes (triage UI, `/faces/captures`, `/analysis`, `/toybox`,
+`/v1`), which expose event history, face crops of identified people and writes
+with side effects on Frigate, and the reverse-proxy catch-all as well.
+
+The catch-all used to be left to Frigate ("Frigate authenticates proxied
+traffic itself"). That held only while every proxied request carried exactly
+its caller's credential and `frigate.proxy_base_url` was an origin that checks
+it. The shared proxy client once kept a cookie jar and replayed the last
+proxied login's `frigate_token` on every later request that sent no cookie,
+so any caller acted as the last user who signed in; and a `proxy_base_url`
+pointed at Frigate's unauthenticated port checks nothing. The gate now runs
+before anything is forwarded, so a caller without a credential of its own is
+refused here, and an origin that would serve such callers while Frigate has
+sign-in on (`proxy_origin_unprotected`) fails every request closed.
 
 Deliberately NOT gated here:
 
-* the reverse-proxy catch-all -- Frigate authenticates that traffic itself and
-  its 401/`WWW-Authenticate` challenge has to reach the client intact;
+* `POST /api/login` -- forwarded to Frigate so a caller can get a session;
+  rate-limited per IP instead (`LoginRateLimiter`);
 * `/v1/capabilities`, `/healthz`, `/version` -- reachability probes a client
-  needs *before* it has a session, and `/static`;
+  needs *before* it has a session, `/login` (the page that gets one), and
+  `/static`;
 * `/v1/push/thumbnail/` -- fetched by the iOS Notification Service Extension
   (docs/push-notifications.md), which has no Frigate session and cannot
   acquire one (it runs in its own short-lived, network-isolated sandbox).
@@ -23,10 +35,11 @@ Deliberately NOT gated here:
   pre-fetched thumbnail image, never to anything the sidecar or Frigate can
   be made to do -- the same trust model as a signed download link.
 
-A request with no cookie at all is admitted only when Frigate itself serves
-such callers, i.e. sign-in is turned off there (`frigate_allows_anonymous`):
-then the gate gives away nothing Frigate does not, and an app that saved the
-server as "no sign-in" still gets the sidecar's features.
+A request with no credential at all is admitted only when Frigate itself
+serves such callers, i.e. sign-in is turned off there
+(`frigate_allows_anonymous`): then the gate gives away nothing Frigate does
+not, and an app that saved the server as "no sign-in" still gets the sidecar's
+features and the proxy.
 
 The gate is applied as raw ASGI middleware rather than a router dependency so
 it can't be forgotten on a newly added route, and so it doesn't wrap the
@@ -47,15 +60,11 @@ from urllib.parse import quote
 import httpx
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
-from starlette.routing import Match
 
 from marcellus import frigate_tls
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Iterable
-
     from fastapi import FastAPI
-    from starlette.routing import BaseRoute
 
     from marcellus.config import Settings
 
@@ -63,6 +72,9 @@ logger = logging.getLogger(__name__)
 
 ERR_UNAUTHORIZED = "unauthorized"
 ERR_UPSTREAM_UNAVAILABLE = "upstream_unavailable"
+# `frigate.proxy_base_url` serves callers with no credential while Frigate has
+# sign-in on, so it can't tell a real session from a made-up one.
+ERR_PROXY_ORIGIN_UNPROTECTED = "proxy_origin_unprotected"
 
 # Reachability probes a client may need before it holds a Frigate session
 # (and the login page itself, which exists to acquire one).
@@ -159,12 +171,21 @@ def _remember(app: FastAPI, key: str, expiry: float, *, max_entries: int) -> Non
 
 
 async def validate_frigate_session(
-    app: FastAPI, cookie: str, *, ttl_s: float | None = None
+    app: FastAPI,
+    cookie: str,
+    *,
+    ttl_s: float | None = None,
+    authorization: str = "",
 ) -> None:
-    """Raise HTTPException unless `cookie` is a live Frigate session.
+    """Raise HTTPException unless the caller's credential is a live Frigate
+    session: its `Cookie` header and/or its `Authorization` header (Frigate
+    reads a bearer token first, then the `frigate_token` cookie).
 
     Validated against `frigate.proxy_base_url` -- the authenticated origin --
-    because that is the one that can actually reject a bad cookie.
+    because that is the one that can actually reject a bad credential. When
+    that origin serves callers with no credential while Frigate has sign-in on
+    (`proxy_origin_unprotected`), it would accept anything, so the request is
+    refused with a 502 instead.
 
     `ttl_s` overrides how long a successful check is cached; callers holding a
     valid remember-me cookie pass the longer `remember_cache_ttl_s`. Defaults
@@ -173,14 +194,25 @@ async def validate_frigate_session(
     from marcellus.frigate_api import get_async_client
 
     settings: Settings = app.state.settings
-    if not cookie:
-        # No session to check. Admitted only when Frigate itself serves callers
-        # without one (sign-in turned off) -- see `frigate_allows_anonymous`.
+    if not cookie and not authorization:
+        # No credential to check. Admitted only when Frigate itself serves
+        # callers without one (sign-in turned off) -- see
+        # `frigate_allows_anonymous`.
         if await frigate_allows_anonymous(app):
             return
         raise HTTPException(status_code=401, detail="frigate session required")
 
-    key = hashlib.sha256(cookie.encode()).hexdigest()
+    if await proxy_origin_unprotected(app):
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"{ERR_PROXY_ORIGIN_UNPROTECTED}: frigate.proxy_base_url serves requests "
+                "without a session while Frigate has sign-in on, so sessions cannot be "
+                "checked; point it at Frigate's authenticated port (8971)"
+            ),
+        )
+
+    key = hashlib.sha256(f"{cookie}\n{authorization}".encode()).hexdigest()
     now = time.time()
     expiry = _cache(app).get(key)
     if expiry is not None and expiry > now:
@@ -188,8 +220,13 @@ async def validate_frigate_session(
 
     upstream = f"{settings.frigate.proxy_base_url.rstrip('/')}/api/version"
     client = get_async_client(app)
+    headers = {}
+    if cookie:
+        headers["cookie"] = cookie
+    if authorization:
+        headers["authorization"] = authorization
     try:
-        resp = await client.get(upstream, headers={"cookie": cookie}, timeout=5.0)
+        resp = await client.get(upstream, headers=headers, timeout=5.0)
     except httpx.HTTPError as exc:
         frigate_tls.note_error(app, frigate_tls.PROXY_ORIGIN, upstream, exc)
         raise HTTPException(
@@ -260,23 +297,51 @@ async def frigate_allows_anonymous(app: FastAPI) -> bool:
     if cached is not None and cached[0] > now:
         return cached[1]
 
-    allowed, ttl_s = await _check_anonymous_access(app, settings)
+    allowed, ttl_s, origin_open = await _check_anonymous_access(app, settings)
     previous = cached[1] if cached is not None else False
     if allowed and not previous:
         logger.warning(
             "Frigate reports sign-in turned off (auth.enabled: false) and serves "
-            "callers without a session; the sidecar's own routes now do the same"
+            "callers without a session; the sidecar now does the same"
         )
     elif previous and not allowed:
         logger.warning("Frigate no longer serves callers without a session; sign-in required again")
+    if origin_open and not getattr(app.state, "proxy_origin_open", False):
+        logger.error(
+            "frigate.proxy_base_url (%s) serves requests without a session although "
+            "Frigate has sign-in on -- probably Frigate's unauthenticated port. Sessions "
+            "cannot be checked against it, so every request is refused until it points "
+            "at the authenticated port",
+            settings.frigate.proxy_base_url,
+        )
+    app.state.proxy_origin_open = origin_open
     app.state.anonymous_access = (now + ttl_s, allowed)
     return allowed
 
 
-async def _check_anonymous_access(app: FastAPI, settings: Settings) -> tuple[bool, float]:
+async def proxy_origin_unprotected(app: FastAPI) -> bool:
+    """True when `frigate.proxy_base_url` answers a bare request although
+    Frigate's config says sign-in is on.
+
+    That origin is then not one that checks credentials (typically
+    `proxy_base_url` set to the unauthenticated port 5000): validating a
+    session against it would pass anything, and forwarding to it would serve
+    every caller. Read from the same cached checks as
+    `frigate_allows_anonymous`.
+    """
+    await frigate_allows_anonymous(app)
+    return bool(getattr(app.state, "proxy_origin_open", False))
+
+
+async def _check_anonymous_access(
+    app: FastAPI, settings: Settings
+) -> tuple[bool, float, bool]:
     """One uncached run of the two checks in `frigate_allows_anonymous`.
 
-    Returns `(allowed, ttl_s)`: how long the answer may be trusted.
+    Returns `(allowed, ttl_s, origin_open)`: whether a caller with no
+    credential is admitted, how long the answer may be trusted, and whether
+    the proxy origin serves such callers although Frigate's config says
+    sign-in is on (`proxy_origin_unprotected`).
     """
     from marcellus.frigate_api import get_async_client
 
@@ -299,23 +364,25 @@ async def _check_anonymous_access(app: FastAPI, settings: Settings) -> tuple[boo
         resp = await client.send(config_req)
     except httpx.HTTPError as exc:
         frigate_tls.note_error(app, frigate_tls.API_ORIGIN, str(config_req.url), exc)
-        return False, ANONYMOUS_ERROR_TTL_S
+        return False, ANONYMOUS_ERROR_TTL_S, False
     frigate_tls.note_response(app, frigate_tls.API_ORIGIN, str(config_req.url), resp)
     try:
         if resp.status_code != 200:
-            return False, ttl_s
+            return False, ttl_s, False
         body = resp.json()
     except ValueError:
-        return False, ANONYMOUS_ERROR_TTL_S
-    if not config_says_signin_off(body):
-        return False, ttl_s
+        return False, ANONYMOUS_ERROR_TTL_S, False
+    signin_off = config_says_signin_off(body)
+    # Probed whichever way the config reads: with sign-in on, a 2xx here means
+    # the proxy origin does not check credentials at all.
     try:
         bare = await client.send(version_req)
     except httpx.HTTPError as exc:
         frigate_tls.note_error(app, frigate_tls.PROXY_ORIGIN, str(version_req.url), exc)
-        return False, ANONYMOUS_ERROR_TTL_S
+        return False, ANONYMOUS_ERROR_TTL_S, False
     frigate_tls.note_response(app, frigate_tls.PROXY_ORIGIN, str(version_req.url), bare)
-    return 200 <= bare.status_code < 300, ttl_s
+    served = 200 <= bare.status_code < 300
+    return signin_off and served, ttl_s, served and not signin_off
 
 
 class LoginRateLimiter:
@@ -421,31 +488,17 @@ def _rate_limit_response(retry_after: float, app: FastAPI) -> JSONResponse:
 
 
 class FrigateAuthMiddleware:
-    """Require a Frigate session on the sidecar's own routes.
+    """Require the caller's own Frigate credential on every request: the
+    sidecar's routes and the proxy catch-all alike (exemptions in the module
+    docstring)."""
 
-    `owned_routes` is everything registered before the proxy catch-all, so a
-    path the sidecar doesn't serve itself falls through to Frigate untouched.
-    """
-
-    def __init__(self, app: Any, *, owned_routes: Iterable[BaseRoute]) -> None:
+    def __init__(self, app: Any) -> None:
         self.app = app
-        self._owned = list(owned_routes)
-
-    def _owns(self, scope: dict[str, Any]) -> bool:
-        for route in self._owned:
-            match, _ = route.matches(scope)
-            # PARTIAL means the path matched but the method didn't: still ours,
-            # and a 405 shouldn't be answered by Frigate either.
-            if match in (Match.FULL, Match.PARTIAL):
-                return True
-        return False
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        # WebSocket scopes are gated too. No sidecar-owned WS route exists today
-        # -- `_owns` matches none of them, so every upgrade falls through to the
-        # proxy and Frigate authenticates it -- but skipping the whole scope
-        # type meant the first one added would have been unauthenticated by
-        # default, with nothing in the code saying so.
+        # WebSocket scopes are gated too: the proxied ones (Frigate's `/ws`
+        # state feed, go2rtc signalling under `/live`) and any the sidecar
+        # adds itself.
         if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
@@ -456,20 +509,18 @@ class FrigateAuthMiddleware:
         is_login_post = (
             scope["type"] == "http" and scope.get("method") == "POST" and path == "/api/login"
         )
-        owns = self._owns(scope)
         if (
             not settings.sidecar.require_frigate_auth
             or path in EXEMPT_PATHS
             or path.startswith(EXEMPT_PREFIXES)
-            or (not owns and not is_login_post)
         ):
             await self.app(scope, receive, send)
             return
 
         if is_login_post:
-            # /api/login is proxied, not owned by the sidecar (routes/proxy.py),
-            # so it never goes through the cookie-validation flow below -- gate
-            # it here, before it reaches Frigate, and count it only if it fails.
+            # /api/login is proxied (routes/proxy.py) and is how a caller gets
+            # a credential, so it skips the validation below -- rate-limit it
+            # here, before it reaches Frigate, and count it only if it fails.
             # Only this endpoint is rate-limited/counted (see LoginRateLimiter's
             # docstring for why owned-route 401s deliberately are not).
             limiter = LoginRateLimiter(
@@ -497,10 +548,12 @@ class FrigateAuthMiddleware:
             return
 
         cookie = ""
+        authorization = ""
         for name, value in scope.get("headers", []):
-            if name == b"cookie":
+            if name == b"cookie" and not cookie:
                 cookie = value.decode("latin-1")
-                break
+            elif name == b"authorization" and not authorization:
+                authorization = value.decode("latin-1")
 
         # The Frigate session is always validated, so a stale Frigate JWT
         # triggers re-login — without that, proxied content (/api/* images,
@@ -518,7 +571,9 @@ class FrigateAuthMiddleware:
         )
 
         try:
-            await validate_frigate_session(app, cookie, ttl_s=ttl_s)
+            await validate_frigate_session(
+                app, cookie, ttl_s=ttl_s, authorization=authorization
+            )
         except HTTPException as exc:
             if scope["type"] == "websocket":
                 # Reject before the handshake completes; 1008 is "policy
@@ -543,10 +598,13 @@ class FrigateAuthMiddleware:
                     )
                     await response(scope, receive, send)
                     return
-            body = {
-                "error": ERR_UNAUTHORIZED if exc.status_code == 401 else ERR_UPSTREAM_UNAVAILABLE,
-                "message": str(exc.detail),
-            }
+            if exc.status_code == 401:
+                error = ERR_UNAUTHORIZED
+            elif str(exc.detail).startswith(ERR_PROXY_ORIGIN_UNPROTECTED):
+                error = ERR_PROXY_ORIGIN_UNPROTECTED
+            else:
+                error = ERR_UPSTREAM_UNAVAILABLE
+            body = {"error": error, "message": str(exc.detail)}
             response = JSONResponse(body, status_code=exc.status_code)
             await response(scope, receive, send)
             return

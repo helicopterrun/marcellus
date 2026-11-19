@@ -3,9 +3,11 @@
 Gives Elsinore one base URL: everything the sidecar doesn't handle itself
 (``/api/*``, ``/vod/*``, ``/live/*``, ``/preview/*``, and any other Frigate
 path) streams through to Frigate's authed port unchanged, with ``Range`` and
-the client's own auth cookie/header passed through untouched. Auth stays
-entirely Frigate's -- the sidecar never holds or validates the password, and
-never applies its own session gate here (see auth.py).
+the client's own auth cookie/header passed through untouched. The sidecar never
+holds a password, and a request carries the credential its own caller sent and
+nothing else: the pooled clients keep no cookie jar
+(``frigate_tls.no_cookie_jar``), and the session gate in auth.py checks the
+caller's credential before anything is forwarded.
 
 Registered LAST in server.py so ``/v1/*``, ``/static``, the sidecar's own
 pages, and ``/healthz`` all win first; only unmatched paths fall through here.

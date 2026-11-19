@@ -31,6 +31,7 @@ timeouts and a hard overall deadline so a dead address can never hang init.
 
 from __future__ import annotations
 
+import http.cookiejar
 import ipaddress
 import logging
 import socket
@@ -68,14 +69,41 @@ RELOG_INTERVAL_S = 3600.0
 # -- clients -------------------------------------------------------------------
 
 
+class _RefuseAllCookies(http.cookiejar.DefaultCookiePolicy):
+    """A cookie policy that neither stores nor sends any cookie."""
+
+    def set_ok(self, cookie: http.cookiejar.Cookie, request: Any) -> bool:
+        return False
+
+    def return_ok(self, cookie: http.cookiejar.Cookie, request: Any) -> bool:
+        return False
+
+
+def no_cookie_jar() -> http.cookiejar.CookieJar:
+    """A cookie jar that never keeps or replays a cookie.
+
+    Frigate-bound clients are pooled per app and shared by every caller, and
+    httpx gives each client a cookie jar by default: every response's
+    `Set-Cookie` is stored and added to every later request that carries no
+    `Cookie` header of its own. Through the proxy that turned one user's
+    `POST /api/login` into a Frigate session for every later caller that sent
+    no credential. A request must carry exactly what its own caller sent.
+    """
+    return http.cookiejar.CookieJar(policy=_RefuseAllCookies())
+
+
 def async_client(*, verify_tls: bool, **kwargs: Any) -> httpx.AsyncClient:
-    """An `httpx.AsyncClient` for Frigate; `verify_tls` is `frigate.verify_tls`."""
-    return httpx.AsyncClient(verify=verify_tls, **kwargs)
+    """An `httpx.AsyncClient` for Frigate; `verify_tls` is `frigate.verify_tls`.
+
+    Its cookie jar never stores or sends a cookie (`no_cookie_jar`)."""
+    return httpx.AsyncClient(verify=verify_tls, cookies=no_cookie_jar(), **kwargs)
 
 
 def sync_client(*, verify_tls: bool, **kwargs: Any) -> httpx.Client:
-    """An `httpx.Client` for Frigate; `verify_tls` is `frigate.verify_tls`."""
-    return httpx.Client(verify=verify_tls, **kwargs)
+    """An `httpx.Client` for Frigate; `verify_tls` is `frigate.verify_tls`.
+
+    Its cookie jar never stores or sends a cookie (`no_cookie_jar`)."""
+    return httpx.Client(verify=verify_tls, cookies=no_cookie_jar(), **kwargs)
 
 
 def get(url: str, *, verify_tls: bool, **kwargs: Any) -> httpx.Response:

@@ -340,7 +340,9 @@ def _reel(
 ) -> dict:
     from marcellus.routes import scrub as scrub_routes
 
-    async def _noop(app: object, cookie: str, *, ttl_s: float | None = None) -> None:
+    async def _noop(
+        app: object, cookie: str, *, ttl_s: float | None = None, authorization: str = ""
+    ) -> None:
         return None
 
     async def _fake_motion(

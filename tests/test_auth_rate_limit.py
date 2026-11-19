@@ -157,7 +157,9 @@ def test_401_on_owned_routes_does_not_count(
     for _ in range(10):
         r = client.get("/", headers={"cookie": "frigate_token=bad"})
         assert r.status_code == 401
-    assert len(calls) == 10
+    # One session check per request (plus the cached, credential-less
+    # sign-in-off/origin checks, which are not validations).
+    assert len([c for c in calls if "cookie" in c.headers]) == 10
     assert getattr(client.app.state, "login_rate_limit_rejections", 0) == 0
 
 
@@ -170,6 +172,8 @@ def test_owned_route_never_429s_while_login_ip_is_blocked(
         calls.append(request)
         if request.url.path == "/api/login":
             return httpx.Response(401, json={"message": "bad credentials"})
+        if request.url.port == 8971 and "cookie" not in request.headers:
+            return httpx.Response(401, text="unauthorized")  # sign-in on
         return httpx.Response(200, json={"version": "0.16.0"})
 
     client = _build(

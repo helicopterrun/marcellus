@@ -195,10 +195,20 @@ a Docker network or localhost, bind the sidecar just as narrowly or put it
 behind a firewall rule, because otherwise the sidecar is the more exposed of
 the two.
 
-Requests the sidecar forwards to Frigate (its catch-all proxy) are Frigate's
-to answer: on the authenticated port with sign-in off Frigate treats them as
+Requests the sidecar forwards to Frigate (its catch-all proxy) are then
+Frigate's to answer: on the authenticated port with sign-in off Frigate treats them as
 the `viewer` role (`proxy.default_role`), so admin-only Frigate routes answer
 403 there.
+
+The reverse-proxy catch-all is gated the same way: a request is forwarded to
+Frigate only with the caller's own credential, the `frigate_token` cookie or
+an `Authorization: Bearer` token (both are accepted everywhere the sidecar
+asks for a session), and the sidecar never adds one of its own. If
+`frigate.proxy_base_url` answers requests without a session while Frigate has
+sign-in on (usually because it points at the unauthenticated port 5000), the
+sidecar cannot check sessions against it, so it refuses every request with a
+502 `proxy_origin_unprotected` and logs why; point it at the authenticated
+port (8971).
 
 Three deliberate exceptions:
 
@@ -207,8 +217,8 @@ Three deliberate exceptions:
 - `/v1/push/thumbnail/{handle}`: fetched by the iOS Notification Service
   Extension, which holds no Frigate session; protected instead by the handle
   being opaque, unguessable and short-lived.
-- The reverse-proxy catch-all: Frigate authenticates that traffic itself, and
-  its 401 + `WWW-Authenticate` challenge must reach the client intact.
+- `POST /api/login`: forwarded to Frigate without a credential, since it is
+  how a caller gets one; failed attempts are rate-limited per address.
 
 The remember-me cookie (the "stay signed in" box at `/login`) is not an
 exception: it never admits a request on its own. It is a signed expiry token

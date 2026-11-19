@@ -7,8 +7,35 @@ may change behaviour). Numbers are pull requests.
 
 ## [Unreleased]
 
+### Security
+
+- **The proxy no longer lends one caller's Frigate session to another.** The
+  sidecar's pooled Frigate clients kept httpx's default cookie jar, so the
+  `frigate_token` from any login made through the proxy was stored and sent on
+  every later proxied request that carried no cookie of its own. Any client
+  that could reach the sidecar could then use Frigate's API (`/api/*`, live
+  streams, snapshots, exports, admin writes) as the last user who had signed
+  in, with no credentials. Introduced when the proxy moved to a shared client
+  (2026-07-30) and present in every release since. The Frigate clients now
+  keep no cookies at all, and the catch-all proxy is gated like the sidecar's
+  own routes: a request is forwarded only with the caller's own valid
+  credential (only `POST /api/login` goes through without one), except when
+  Frigate itself has sign-in turned off. If `frigate.proxy_base_url` answers
+  requests without a session while Frigate has sign-in on (typically the
+  unauthenticated port 5000), every request is now refused with a 502
+  `proxy_origin_unprotected` instead of being served.
+  **Upgrade:** nothing to change for a `proxy_base_url` on Frigate's
+  authenticated port (the default). A client that called proxied Frigate
+  paths without a credential and relied on the leak now gets a 401 and has to
+  sign in. Consider signing out every Frigate user (or restarting Frigate to
+  rotate sessions) after upgrading, and review Frigate's logs for unexpected
+  activity.
+
 ### Added
 
+- **Bearer tokens on the sidecar's routes.** The session gate accepts
+  `Authorization: Bearer <token>` wherever it accepts the `frigate_token`
+  cookie, as Frigate does.
 - **`fsc init` finds Frigate instead of asking.** It reads Frigate's `/api/config`
   and its `config.yml` (a file counts only if its cameras match the running
   Frigate's; nothing is ever written to Frigate), summarises what it found
