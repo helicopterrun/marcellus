@@ -111,7 +111,8 @@ data, not as an error, which is why the fixture tests assert on values.
 Except where noted, the sidecar calls `frigate.base_url`, Frigate's internal
 unauthenticated port, which Frigate treats as the admin role. Browser and app traffic goes through
 the catch-all proxy to `frigate.proxy_base_url`, the authenticated port, with
-the client's own cookie.
+the client's own cookie or bearer token and nothing else (the sidecar checks it
+first, and its Frigate clients keep no cookie jar).
 
 Frigate serves the authenticated port (8971) over TLS by default
 (`tls.enabled: true`), with a self-signed certificate it generates itself.

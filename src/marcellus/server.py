@@ -99,10 +99,6 @@ class _CachedStaticFiles(StaticFiles):
         return response
 
 
-# The proxy's catch-all: everything registered before it is a route the sidecar
-# owns and therefore gates behind a Frigate session (auth.py).
-_PROXY_CATCH_ALL = "/{path:path}"
-
 T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
@@ -961,11 +957,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(login_page_routes.router)
     app.include_router(guide_routes.router)
 
-    # Everything registered so far is the sidecar's own surface and requires a
-    # Frigate session; the proxy catch-all below must not (Frigate does its own
-    # auth and its 401 has to reach the client).
-    owned_routes = [r for r in app.routes if getattr(r, "path", None) != _PROXY_CATCH_ALL]
-    app.add_middleware(FrigateAuthMiddleware, owned_routes=owned_routes)
+    # Every request needs the caller's own Frigate credential: the sidecar's own
+    # routes and the proxy catch-all below alike (auth.py lists the exemptions).
+    app.add_middleware(FrigateAuthMiddleware)
     # Compress HTML/JSON responses (auth runs inside, gzip outside).
     app.add_middleware(GZipMiddleware, minimum_size=1024)
 

@@ -3,8 +3,7 @@
 The sidecar's own surface -- triage UI, /faces/captures, /analysis, /toybox, /v1 --
 exposes event history, face crops and writes with side effects on Frigate, so
 it must not be reachable without the same session Frigate itself requires. The
-proxy catch-all must stay ungated (Frigate authenticates it, and its own 401
-has to reach the client).
+proxy catch-all is gated the same way (tests/test_proxy_auth.py).
 
 Auditing this against a live deployment is not a matter of reading status
 codes: an unmatched path falls through to Frigate, which answers almost
@@ -63,8 +62,15 @@ def upstream_calls() -> list[httpx.Request]:
 
 
 def _ok_handler(calls: list[httpx.Request]) -> Any:
+    """Frigate with sign-in on: the authenticated port (8971) refuses a request
+    that carries no credential, and accepts any that does."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
+        if request.url.port == 8971 and not (
+            "cookie" in request.headers or "authorization" in request.headers
+        ):
+            return httpx.Response(401, text="unauthorized")
         return httpx.Response(200, json={"version": "0.16.0"})
 
     return handler
@@ -91,10 +97,13 @@ def test_sidecar_surface_requires_a_session(
     assert r.status_code == 401, path
     assert r.json()["error"] == "unauthorized"
     # No cookie at all: the only upstream traffic is the sign-in-off check
-    # (Frigate's config on the sidecar's own origin), which finds no
-    # `auth.enabled: false` here and so never probes the proxy origin.
-    assert [(c.url.port, c.url.path) for c in upstream_calls] == [(5000, "/api/config")]
-    assert "cookie" not in upstream_calls[0].headers
+    # (Frigate's config on the sidecar's own origin, then a bare probe of the
+    # proxy origin), neither carrying a credential.
+    assert [(c.url.port, c.url.path) for c in upstream_calls] == [
+        (5000, "/api/config"),
+        (8971, "/api/version"),
+    ]
+    assert all("cookie" not in c.headers for c in upstream_calls)
 
 
 def test_mutating_endpoints_require_a_session(
@@ -130,10 +139,12 @@ def test_invalid_session_is_rejected(
     client = _build(frigate_db_path, sidecar_db_path, tmp_path, _denied_handler(upstream_calls))
     r = client.get("/", headers={"cookie": "frigate_token=stale"})
     assert r.status_code == 401
-    assert len(upstream_calls) == 1
+    validations = [c for c in upstream_calls if "cookie" in c.headers]
+    assert len(validations) == 1
     # A rejected cookie is never cached, so it gets re-checked next time.
     client.get("/", headers={"cookie": "frigate_token=stale"})
-    assert len(upstream_calls) == 2
+    validations = [c for c in upstream_calls if "cookie" in c.headers]
+    assert len(validations) == 2
 
 
 def test_probe_endpoints_stay_open(
@@ -149,25 +160,6 @@ def test_probe_endpoints_stay_open(
     # generate, and it never forwards a client cookie.
     assert [(r.method, r.url.path) for r in upstream_calls] == [("GET", "/api/version")]
     assert "cookie" not in upstream_calls[0].headers
-
-
-def test_proxy_catch_all_is_not_gated(
-    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
-    upstream_calls: list[httpx.Request],
-) -> None:
-    """Frigate authenticates proxied traffic itself; gating here would both
-    double-authenticate and swallow Frigate's own challenge."""
-    def handler(request: httpx.Request) -> httpx.Response:
-        upstream_calls.append(request)
-        if request.url.path == "/api/login":
-            return httpx.Response(401, headers={"www-authenticate": 'Basic realm="frigate"'})
-        return httpx.Response(200, json={})
-
-    client = _build(frigate_db_path, sidecar_db_path, tmp_path, handler)
-    r = client.get("/api/login")  # no cookie
-    assert r.status_code == 401
-    assert r.headers["www-authenticate"] == 'Basic realm="frigate"'
-    assert upstream_calls[-1].url.path == "/api/login"
 
 
 def test_gate_can_be_disabled_for_an_unauthenticated_frigate(
@@ -196,30 +188,6 @@ def test_session_cache_is_bounded() -> None:
     for i in range(50):
         auth._remember(app, f"key{i}", 1e12, max_entries=10)
     assert len(app.state.auth_cache) <= 10
-
-
-def test_websocket_scopes_reach_the_gate(
-    frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
-    upstream_calls: list[httpx.Request],
-) -> None:
-    """No sidecar-owned WebSocket route exists yet, so this only pins the
-    behaviour: upgrades are evaluated by the gate rather than skipped whole, so
-    the first owned WS route isn't unauthenticated by default."""
-    from starlette.routing import Match, WebSocketRoute
-
-    from marcellus.auth import FrigateAuthMiddleware
-
-    async def _noop(websocket: object) -> None:  # pragma: no cover - never called
-        return None
-
-    owned = WebSocketRoute("/v1/live", endpoint=_noop)
-    middleware = FrigateAuthMiddleware(None, owned_routes=[owned])
-    scope = {"type": "websocket", "path": "/v1/live", "headers": []}
-    assert middleware._owns(scope) is True
-
-    # And a proxied path is still not ours, so it falls through to Frigate.
-    assert middleware._owns({"type": "websocket", "path": "/ws", "headers": []}) is False
-    assert owned.matches({"type": "websocket", "path": "/ws"})[0] is Match.NONE
 
 
 def test_capabilities_always_carries_version(
@@ -365,7 +333,8 @@ def test_auth_failure_probes_upstream_exactly_once(
         headers={"cookie": f"{auth.REMEMBER_COOKIE}={token}; frigate_token=stale"},
         follow_redirects=False,
     )
-    assert len(denied) == 1, f"expected 1 upstream probe, got {len(denied)}"
+    validations = [c for c in denied if "cookie" in c.headers]
+    assert len(validations) == 1, f"expected 1 upstream probe, got {len(validations)}"
 
 
 def test_remember_cookie_grants_the_longer_auth_cache_window(

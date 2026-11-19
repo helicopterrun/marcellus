@@ -52,7 +52,9 @@ CREATE TABLE recordings (
 
 
 def _skip_auth(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _noop(app: object, cookie: str, *, ttl_s: float | None = None) -> None:
+    async def _noop(
+        app: object, cookie: str, *, ttl_s: float | None = None, authorization: str = ""
+    ) -> None:
         return None
 
     monkeypatch.setattr(auth, "validate_frigate_session", _noop)

@@ -133,8 +133,8 @@ def test_config_must_say_exactly_false(
     frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path, auth_enabled: Any,
 ) -> None:
     """Sign-in on, a missing `auth` section (pre-auth Frigate, or not a Frigate
-    config) or a value that is merely falsy: still a session required, and the
-    proxy origin is never probed."""
+    config) or a value that is merely falsy: still a session required. (The
+    proxy origin is still probed bare, to catch one that serves anyone.)"""
     calls: list[httpx.Request] = []
     client = _build(
         frigate_db_path, sidecar_db_path, tmp_path, _frigate(calls, auth_enabled=auth_enabled)
@@ -142,7 +142,7 @@ def test_config_must_say_exactly_false(
     r = client.get("/v1/stats", headers={"accept": "application/json"})
     assert r.status_code == 401
     assert r.json()["error"] == "unauthorized"
-    assert _checks(calls) == [(5000, "/api/config")]
+    assert _checks(calls) == [(5000, "/api/config"), (8971, "/api/version")]
 
 
 def test_proxy_origin_refusing_a_bare_request_keeps_the_gate_shut(
@@ -232,15 +232,19 @@ def test_checks_never_carry_the_pooled_clients_cookies(
 def test_a_cookie_is_still_validated_as_a_session(
     frigate_db_path: Path, sidecar_db_path: Path, tmp_path: Path,
 ) -> None:
-    """Sign-in on: a request that does carry a cookie takes the usual path, and
-    the sign-in-off check is not consulted at all."""
+    """Sign-in on: a request that does carry a cookie is validated as a
+    session; the credential-less checks run only to confirm the proxy origin
+    is one that checks sessions, and never admit it on their own."""
     calls: list[httpx.Request] = []
     client = _build(
-        frigate_db_path, sidecar_db_path, tmp_path, _frigate(calls, auth_enabled=True)
+        frigate_db_path, sidecar_db_path, tmp_path,
+        _frigate(calls, auth_enabled=True, proxy_bare_status=401),
     )
     r = client.get(
         "/v1/stats", headers={"accept": "application/json", "cookie": "frigate_token=abc"}
     )
     assert r.status_code == 200
-    assert not hasattr(client.app.state, "anonymous_access")  # type: ignore[attr-defined]
-    assert (5000, "/api/config") not in _checks(calls)
+    _, allowed = client.app.state.anonymous_access  # type: ignore[attr-defined]
+    assert allowed is False
+    validations = [c for c in calls if c.headers.get("cookie") == "frigate_token=abc"]
+    assert [(c.url.port, c.url.path) for c in validations] == [(8971, "/api/version")]

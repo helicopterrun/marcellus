@@ -87,9 +87,10 @@ class SidecarSection(BaseModel):
     # already forwards to Frigate. On by default: the sidecar sits on the same
     # LAN origin as Frigate and exposes event history, face crops and
     # label/promote writes, so leaving it open makes it a bypass of Frigate's
-    # own auth. The proxy catch-all is deliberately NOT gated here (Frigate
-    # authenticates that traffic itself, and its 401 must reach the client).
-    # A request with no cookie at all is still admitted while Frigate itself
+    # own auth. The proxy catch-all is gated too: a proxied request needs the
+    # caller's own Frigate cookie or bearer token (only POST /api/login, which
+    # gets one, is forwarded without).
+    # A request with no credential at all is still admitted while Frigate itself
     # has sign-in off (auth.enabled false, checked against Frigate -- see
     # auth.frigate_allows_anonymous), so a sign-in-off Frigate no longer needs
     # this set false. False turns the check off whatever Frigate says.

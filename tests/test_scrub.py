@@ -57,7 +57,9 @@ CREATE TABLE event (
 def _skip_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     """Bypass the central Frigate-session gate (marcellus.auth)."""
 
-    async def _noop(app: object, cookie: str, *, ttl_s: float | None = None) -> None:
+    async def _noop(
+        app: object, cookie: str, *, ttl_s: float | None = None, authorization: str = ""
+    ) -> None:
         return None
 
     monkeypatch.setattr(auth, "validate_frigate_session", _noop)
@@ -563,8 +565,13 @@ def test_highlights_use_frigate_label_vocabulary(
         assert "score" in h
 
 
-def test_unknown_v1_path_is_json_404_not_html(client: TestClient) -> None:
-    r = client.get("/v1/does-not-exist")
+def test_unknown_v1_path_is_json_404_not_html(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Unknown paths are gated like every other (an unauthenticated caller gets
+    # 401 first); past the gate an unknown /v1 path is the sidecar's JSON 404.
+    _skip_auth(monkeypatch)
+    r = client.get("/v1/does-not-exist", headers={"cookie": "frigate_token=x"})
     assert r.status_code == 404
     assert r.headers["content-type"].startswith("application/json")
 
