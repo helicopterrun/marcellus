@@ -333,6 +333,58 @@ class _BoundedStreamingResponse(StreamingResponse):
             await send({"type": "http.response.body", "body": b"", "more_body": False})
 
 
+class _SendPhases:
+    """Where a slow `client.send` spent its time, from httpx's `trace`
+    extension (httpcore names each step; the first time each one fires is
+    kept). httpcore has no event for waiting on the pool, so `pool_wait` is
+    the gap before the first event of any kind. A transport that doesn't run
+    httpcore (tests' mocks) fires none, and the log then says so.
+
+    Every phase is wall time on the event loop: a loop held by synchronous
+    work inflates whichever phase it lands in (see `checks.loop_lag_max_ms`
+    in `/healthz` to tell the two apart).
+    """
+
+    __slots__ = ("marks", "start")
+
+    def __init__(self, start: float) -> None:
+        self.start = start
+        self.marks: dict[str, float] = {}
+
+    async def __call__(self, event_name: str, info: dict[str, Any]) -> None:
+        # "http11.send_request_headers.started" -> "send_request_headers.started"
+        step = event_name.partition(".")[2] or event_name
+        self.marks.setdefault(step, asyncio.get_running_loop().time())
+
+    def _span(self, begin: str, *ends: str) -> float | None:
+        began = self.marks.get(begin)
+        ended = next((self.marks[e] for e in ends if e in self.marks), None)
+        if began is None or ended is None:
+            return None
+        return ended - began
+
+    def describe(self) -> str:
+        if not self.marks:
+            return "phases=untraced"
+        spans = {
+            "pool_wait": min(self.marks.values()) - self.start,
+            "connect": self._span(
+                "connect_tcp.started", "start_tls.complete", "connect_tcp.complete"
+            ),
+            "write": self._span(
+                "send_request_headers.started",
+                "send_request_body.complete",
+                "send_request_headers.complete",
+            ),
+            "headers": self._span(
+                "receive_response_headers.started", "receive_response_headers.complete"
+            ),
+        }
+        return " ".join(
+            f"{name}={'-' if secs is None else f'{secs:.2f}'}" for name, secs in spans.items()
+        )
+
+
 def _upstream_url(settings: Any, path: str, query: str, *, scheme_ws: bool = False) -> str:
     base = settings.frigate.proxy_base_url.rstrip("/")
     if scheme_ws:
@@ -426,14 +478,16 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
     else:
         client = get_stream_client(request.app)
     try:
+        send_start = asyncio.get_event_loop().time()
+        phases = _SendPhases(send_start)
         req = client.build_request(
             request.method,
             upstream,
             headers=fwd_headers,
             content=body or None,
             timeout=_UPSTREAM_TIMEOUT,
+            extensions={"trace": phases},
         )
-        send_start = asyncio.get_event_loop().time()
         # `client.send(req, stream=True)` is wrapped in a real Task and only
         # *shielded* from the timeout below, never cancelled by it. httpx has
         # no per-request read timeout that bounds header arrival without also
@@ -474,9 +528,10 @@ async def proxy_passthrough(path: str, request: Request) -> Any:
         send_elapsed = asyncio.get_event_loop().time() - send_start
         if send_elapsed > _SLOW_ACQUIRE_LOG_THRESHOLD_S:
             logger.warning(
-                "proxy: slow upstream acquire path=%s secs=%.1f pool_stats=%s",
+                "proxy: slow upstream acquire path=%s secs=%.1f %s pool_stats=%s",
                 path,
                 send_elapsed,
+                phases.describe(),
                 pool_stats(client),
             )
     except httpx.PoolTimeout as exc:

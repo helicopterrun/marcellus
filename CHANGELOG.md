@@ -62,8 +62,33 @@ may change behaviour). Numbers are pull requests.
   the push relay and the running service. One line per check, a one-line fix
   for anything wrong, exit code 1 on a failure; `--json` gives a stable list
   for scripts. A new guide page, "Check your install", explains it.
+- **Event-loop lag in `/healthz`.** `checks.loop_lag_max_ms` is the longest the
+  sidecar's event loop was held over the last minute (informational: it never
+  changes the status or the 503), and a hold longer than 250 ms is logged, at
+  most once every 30 s. The proxy's "slow upstream acquire" warning now splits
+  the wait into `pool_wait`, `connect`, `write` and `headers`.
 ### Fixed
 
+- **`/v1/highlights` no longer stalls every other request, recorded video
+  included.** It ran its Frigate-database read on the event loop, and that read
+  sorted every event the camera ever had (`data` blobs included) to return one
+  page: about a quarter of a second per call on a camera with ~29k events. A
+  client walking a camera's index (hundreds of pages a minute) held the loop
+  for nearly half of each minute, and proxied recorded-video requests queued
+  behind it for seconds. The page is now read newest-first off Frigate's
+  start-time index (stopping once the page is full; a camera with few events
+  uses its own index), only the page's rows are read in full, and the read
+  runs on a worker thread, at most two at a time. Old, settled pages (`before`
+  an hour or more in the past, no event still running) are also kept in memory
+  for five minutes. The response is unchanged: same events, same order (ties on
+  start time break the way the stock query broke them) and no new caching
+  headers.
+- **Proxied video, images and playlists are no longer gzipped.** Which media
+  types Starlette's gzip middleware skips depends on its version; the sidecar
+  now decides itself: `/vod/` and `/live/` paths, `video/*`, `audio/*`, images
+  other than SVG, HLS playlists, `application/octet-stream`, archives, 206
+  responses and anything already encoded pass through untouched. HTML and JSON
+  still compress, at level 6 instead of 9.
 - **Docker install order:** `install.sh` used to start the container and only
   then tell you to edit the host paths in `.env`; a wrong or missing path was
   mounted by Docker as an empty root-owned directory, so nothing errored and

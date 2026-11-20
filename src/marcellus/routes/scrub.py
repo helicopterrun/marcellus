@@ -1137,6 +1137,138 @@ def _cluster_highlights(
     return clusters
 
 
+#: At most this many `/v1/highlights` reads run on worker threads at once. A
+#: client walking a camera's index fires pages back to back; without a cap
+#: they could fill the default thread pool that every other `to_thread` read
+#: (reel, coverage, the sidecar DB) shares.
+_HIGHLIGHTS_CONCURRENCY = 2
+
+#: In-process page cache for `/v1/highlights`. Only pages whose `before` is at
+#: least `_HIGHLIGHTS_CACHE_HORIZON_S` old and that hold no in-progress event
+#: are kept, and only for `_HIGHLIGHTS_CACHE_TTL_S`: an old event can still be
+#: deleted (by a person or by retention) or re-shifted (an event-alignment
+#: change), so the response carries no HTTP caching headers and a page is at
+#: most this stale.
+_HIGHLIGHTS_CACHE_SIZE = 256
+_HIGHLIGHTS_CACHE_TTL_S = 300.0
+_HIGHLIGHTS_CACHE_HORIZON_S = 3600.0
+
+
+class _PageCache:
+    """A small LRU with a per-entry TTL. Lives on `app.state`, loop-only."""
+
+    def __init__(self, size: int, ttl_s: float) -> None:
+        self._size = size
+        self._ttl_s = ttl_s
+        self._entries: OrderedDict[Any, tuple[float, list[dict[str, Any]]]] = OrderedDict()
+
+    def get(self, key: Any, now: float) -> list[dict[str, Any]] | None:
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        if now - entry[0] > self._ttl_s:
+            del self._entries[key]
+            return None
+        self._entries.move_to_end(key)
+        return entry[1]
+
+    def put(self, key: Any, value: list[dict[str, Any]], now: float) -> None:
+        self._entries[key] = (now, value)
+        self._entries.move_to_end(key)
+        while len(self._entries) > self._size:
+            self._entries.popitem(last=False)
+
+
+def _highlights_cache(app_state: Any) -> _PageCache:
+    cache = getattr(app_state, "highlights_cache", None)
+    if cache is None:
+        cache = app_state.highlights_cache = _PageCache(
+            _HIGHLIGHTS_CACHE_SIZE, _HIGHLIGHTS_CACHE_TTL_S
+        )
+    return cast(_PageCache, cache)
+
+
+def _highlights_gate(app_state: Any) -> asyncio.Semaphore:
+    # Made on first use, inside the running loop (a Semaphore binds to the
+    # loop that first waits on it).
+    gate = getattr(app_state, "highlights_gate", None)
+    if gate is None:
+        gate = app_state.highlights_gate = asyncio.Semaphore(_HIGHLIGHTS_CONCURRENCY)
+    return cast(asyncio.Semaphore, gate)
+
+
+#: What a highlight needs from an `event` row. The two scores `event_top_score`
+#: looks for in `data` are cut out in SQL: parsing a blob that carries the
+#: whole `path_data` in Python just to read two numbers was most of a call's
+#: CPU, and it held the GIL (so the event loop) while it ran. `->` returns
+#: each value's own JSON text, which Python then parses exactly as it would
+#: inside the whole blob (SQLite's float conversion never gets a say). A
+#: blob that isn't valid JSON reads as having neither, as through `json.loads`.
+_HIGHLIGHT_COLUMNS = (
+    "start_time, end_time, label, top_score, score, "
+    "CASE WHEN json_valid(data) THEN data -> '$.top_score' END AS _data_top_score, "
+    "CASE WHEN json_valid(data) THEN data -> '$.score' END AS _data_score"
+)
+
+
+def _json_value(text: Any) -> Any:
+    """A `->` result (JSON text, or NULL for a missing key) as Python."""
+    return None if text is None else json.loads(text)
+
+
+def _highlight_items(
+    settings: Any, camera: str, before: float, limit: int
+) -> list[dict[str, Any]]:
+    """The newest-first `/v1/highlights` items before clustering/ranking.
+
+    Synchronous -- run on a worker thread: it reads `frigate.db` and the
+    segment clock (which may itself query the DB and waits on its lock).
+    """
+    conn = db.open_frigate_ro(settings.frigate.db_path)
+    try:
+        # Same clock shift as /v1/reel: `before` is record-clock, rows are
+        # detect-clock -- shift the bound down, the results back up.
+        shift = _event_clock_shift(settings, camera)
+        margin = shift.max_dev_s
+        # A time-dependent shift can move an event across `before`: read a
+        # little past it, shift, filter, then cut to `limit`. With the
+        # correction off (margin 0) this is exactly the old query.
+        query = (camera, before - shift.constant_s + margin, limit + (20 if margin else 0))
+        try:
+            rows = db.newest_events(conn, *query, columns=_HIGHLIGHT_COLUMNS)
+            from_sql = True
+        except sqlite3.OperationalError:
+            # An SQLite built without its JSON functions: read `data` whole.
+            rows = db.newest_events(conn, *query)
+            from_sql = False
+        items: list[dict[str, Any]] = []
+        for r in rows:
+            h_start = shift.shift(r["start_time"])
+            if margin and h_start >= before:
+                continue
+            items.append(
+                {
+                    "start": h_start,
+                    "end": shift.shift(r["end_time"]) if r["end_time"] is not None else None,
+                    "reason": r["label"],
+                    "score": db.event_top_score(
+                        r,
+                        {
+                            "top_score": _json_value(r["_data_top_score"]),
+                            "score": _json_value(r["_data_score"]),
+                        }
+                        if from_sql
+                        else None,
+                    ),
+                }
+            )
+            if len(items) >= limit:
+                break
+    finally:
+        conn.close()
+    return items
+
+
 @router.get(
     "/highlights/{camera}",
     response_model=HighlightsResponse,
@@ -1171,43 +1303,25 @@ async def highlights(
         raise _bad_range("order must be 'recent' or 'score'")
     if cluster_s < 0:
         raise _bad_range("cluster_s must be >= 0")
+    await _require_known_camera(request, camera)
 
-    conn = db.open_frigate_ro(settings.frigate.db_path)
-    try:
-        if camera not in _known_cameras(request.app.state, conn):
-            raise HTTPException(
-                status_code=404,
-                detail={"error": _ERR_CAMERA_UNKNOWN, "message": f"no such camera: {camera}"},
-            )
-        # Same clock shift as /v1/reel: `before` is record-clock, rows are
-        # detect-clock -- shift the bound down, the results back up.
-        shift = _event_clock_shift(settings, camera)
-        margin = shift.max_dev_s
-        # A time-dependent shift can move an event across `before`: read a
-        # little past it, shift, filter, then cut to `limit`. With the
-        # correction off (margin 0) this is exactly the old query.
-        rows = conn.execute(
-            "SELECT * FROM event WHERE camera = ? AND start_time < ? "
-            "ORDER BY start_time DESC LIMIT ?",
-            (camera, before - shift.constant_s + margin, limit + (20 if margin else 0)),
-        ).fetchall()
-        items = []
-        for r in rows:
-            h_start = shift.shift(r["start_time"])
-            if margin and h_start >= before:
-                continue
-            items.append(
-                {
-                    "start": h_start,
-                    "end": shift.shift(r["end_time"]) if r["end_time"] is not None else None,
-                    "reason": r["label"],
-                    "score": db.event_top_score(r),
-                }
-            )
-            if len(items) >= limit:
-                break
-    finally:
-        conn.close()
+    state = request.app.state
+    now = time.time()
+    key = (camera, before, limit)
+    cache = _highlights_cache(state)
+    cached = cache.get(key, now)
+    if cached is None:
+        async with _highlights_gate(state):
+            items = await asyncio.to_thread(_highlight_items, settings, camera, before, limit)
+        if before <= now - _HIGHLIGHTS_CACHE_HORIZON_S and all(
+            h["end"] is not None for h in items
+        ):
+            cache.put(key, items, now)
+    else:
+        items = cached
+    # Fresh dicts either way: clustering below builds on them, and a cached
+    # page is shared.
+    items = [dict(h) for h in items]
 
     # Clustering needs ascending order; the response is newest-first.
     items = _cluster_highlights(list(reversed(items)), cluster_s)

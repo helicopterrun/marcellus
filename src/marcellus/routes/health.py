@@ -464,6 +464,13 @@ async def compute_health(app: Any, now: float | None = None) -> dict[str, Any]:
     if settings.recording_watch.enabled and recording_watcher is not None:
         checks["recording"] = recording_watcher.health(now)
 
+    # Informational only: the worst event-loop wake-up delay over the last
+    # minute (loop_lag.py). Never gates the status. Absent until the lifespan
+    # has started the monitor.
+    loop_lag = getattr(app.state, "loop_lag", None)
+    if loop_lag is not None:
+        checks["loop_lag_max_ms"] = round(loop_lag.max_lag_s() * 1000)
+
     return {
         "ok": ok,
         "checks": checks,

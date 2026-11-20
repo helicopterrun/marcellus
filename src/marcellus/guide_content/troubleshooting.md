@@ -50,6 +50,7 @@ ones that flip the whole response to `degraded` + HTTP 503.
 | `encounters` | `starting` | Enabled, but the service object isn't up yet. | Wait. |
 | `encounters` | `ok` | Reconciling; `encounters_last_reconcile` carries the last cycle's counts and age. | Nothing. |
 | `encounters` | `error` | **Degraded.** The last reconcile raised; the message is in the body. | Read the error, check the Frigate DB is readable, then restart. |
+| `loop_lag_max_ms` | number | Informational only (never degrades the response). The longest the sidecar's event loop was held over the last minute, in milliseconds; every request, proxied video included, waits that long. Holds over 250 ms are also logged (`event loop lag: …`, at most every 30 s). A few ms is normal. | If it stays in the hundreds, playback through the proxy stalls: send the `event loop lag` and `proxy: slow upstream acquire` log lines from that time. |
 | `recording` | `ok` / `stalled` | Informational only (never degrades the response). `stalled` lists `{camera, since}` for cameras whose newest recording segment is older than `recording_watch.stall_after_s`; `last_check_age_s` is the age of the last successful check. Absent when `recording_watch.enabled` is off. | See [Status](/guide/status) ("Cameras that stop recording"); check that camera's record stream in Frigate. |
 
 The body also carries `scrub_low_disk` when scrub is enabled -- free space
