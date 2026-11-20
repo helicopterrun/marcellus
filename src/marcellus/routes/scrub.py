@@ -15,12 +15,15 @@ Auth (§3.2 -- `/v1` is never less protected than `/api`) is applied centrally i
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import io
 import json
+import logging
 import sqlite3
+import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Any, cast
 
@@ -49,6 +52,7 @@ from marcellus.scrub.motion import aggregate_motion, safe_fetch_scale
 from marcellus.scrub.motion_flight import MotionFlight
 
 router = APIRouter(prefix="/v1", tags=["v1"])
+logger = logging.getLogger(__name__)
 
 # Error vocabulary (docs spec §4.0) -- always paired with a machine-readable
 # `error` field so the client can distinguish "nothing here yet" from "broken".
@@ -1143,6 +1147,16 @@ def _cluster_highlights(
 #: (reel, coverage, the sidecar DB) shares.
 _HIGHLIGHTS_CONCURRENCY = 2
 
+#: How long a `/v1/highlights` request may queue for one of those slots
+#: before it is answered 503 with `Retry-After`. A read takes milliseconds,
+#: so a wait this long means reads are stuck (a locked Frigate DB), and
+#: piling more onto the queue helps no one. Kept well short of a client's
+#: own request timeout, and long enough that ordinary bursts never hit it
+#: (the app's index walk backs off 30 s after a failure and gives up after
+#: three).
+_HIGHLIGHTS_QUEUE_TIMEOUT_S = 5.0
+_HIGHLIGHTS_RETRY_AFTER_S = 2
+
 #: In-process page cache for `/v1/highlights`. Only pages whose `before` is at
 #: least `_HIGHLIGHTS_CACHE_HORIZON_S` old and that hold no in-progress event
 #: are kept, and only for `_HIGHLIGHTS_CACHE_TTL_S`: an old event can still be
@@ -1188,32 +1202,158 @@ def _highlights_cache(app_state: Any) -> _PageCache:
     return cast(_PageCache, cache)
 
 
-def _highlights_gate(app_state: Any) -> asyncio.Semaphore:
-    # Made on first use, inside the running loop (a Semaphore binds to the
-    # loop that first waits on it).
+class _Gate:
+    """At most `size` holders; waiters queue in order, each for a bounded time.
+
+    Not `asyncio.Semaphore` + `wait_for`: whether a cancelled or timed-out
+    waiter can lose or keep a permit differs across the Python versions this
+    runs on. Here a release hands the permit straight to the next live
+    waiter, and a waiter that gives up after being handed one passes it on,
+    so the count can't drift. Loop-only (no locking).
+    """
+
+    def __init__(self, size: int) -> None:
+        self._free = size
+        self._waiters: deque[asyncio.Future[None]] = deque()
+
+    @property
+    def free(self) -> int:
+        return self._free
+
+    async def acquire(self, timeout_s: float) -> bool:
+        """True with a permit held; False if none came within `timeout_s`."""
+        if self._free > 0 and not self._waiters:
+            self._free -= 1
+            return True
+        waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._waiters.append(waiter)
+        try:
+            await asyncio.wait((waiter,), timeout=timeout_s)
+        except BaseException:
+            self._give_up(waiter)
+            raise
+        if waiter.done() and not waiter.cancelled():
+            return True
+        self._give_up(waiter)
+        return False
+
+    def _give_up(self, waiter: asyncio.Future[None]) -> None:
+        if waiter.done() and not waiter.cancelled():
+            self.release()  # handed a permit just as we left: pass it on
+            return
+        waiter.cancel()
+        with contextlib.suppress(ValueError):
+            self._waiters.remove(waiter)
+
+    def release(self) -> None:
+        while self._waiters:
+            waiter = self._waiters.popleft()
+            if not waiter.done():
+                waiter.set_result(None)
+                return
+        self._free += 1
+
+
+def _release_after(gate: _Gate, done: asyncio.Future[Any]) -> None:
+    gate.release()
+    if not done.cancelled():
+        done.exception()  # retrieved: a read nobody awaits any more logs nothing
+
+
+def _highlights_gate(app_state: Any) -> _Gate:
     gate = getattr(app_state, "highlights_gate", None)
     if gate is None:
-        gate = app_state.highlights_gate = asyncio.Semaphore(_HIGHLIGHTS_CONCURRENCY)
-    return cast(asyncio.Semaphore, gate)
+        gate = app_state.highlights_gate = _Gate(_HIGHLIGHTS_CONCURRENCY)
+    return cast(_Gate, gate)
 
 
-#: What a highlight needs from an `event` row. The two scores `event_top_score`
-#: looks for in `data` are cut out in SQL: parsing a blob that carries the
-#: whole `path_data` in Python just to read two numbers was most of a call's
-#: CPU, and it held the GIL (so the event loop) while it ran. `->` returns
-#: each value's own JSON text, which Python then parses exactly as it would
-#: inside the whole blob (SQLite's float conversion never gets a say). A
-#: blob that isn't valid JSON reads as having neither, as through `json.loads`.
-_HIGHLIGHT_COLUMNS = (
-    "start_time, end_time, label, top_score, score, "
-    "CASE WHEN json_valid(data) THEN data -> '$.top_score' END AS _data_top_score, "
-    "CASE WHEN json_valid(data) THEN data -> '$.score' END AS _data_score"
+#: When a row's `data` is plainly the JSON Python would parse the same way,
+#: the two scores `event_top_score` looks for in it are cut out in SQL:
+#: parsing a blob that carries the whole `path_data` in Python just to read
+#: two numbers was most of a call's CPU, and it held the GIL (so the event
+#: loop) while it ran. `->` returns each value's own JSON text, which Python
+#: then parses exactly as it would inside the whole blob, so SQLite's float
+#: conversion never gets a say. Any other row -- NULL or empty, not strict
+#: JSON, not an object, carrying Python's `NaN`/`Infinity` (which `json.dumps`
+#: writes and `json_valid` rejects), or naming a score key twice (SQLite reads
+#: the first, Python keeps the last; `json.dumps` of a dict never writes one)
+#: -- comes back with its whole `data`, parsed in Python as before.
+_HIGHLIGHT_CLEAN = (
+    ", CASE"
+    " WHEN data IS NULL OR data = '' OR NOT json_valid(data) THEN 0"
+    " WHEN json_type(data) <> 'object' THEN 0"
+    " WHEN instr(data, 'NaN') > 0 OR instr(data, 'Infinity') > 0 THEN 0"
+    " WHEN (SELECT count(*) - count(DISTINCT key) FROM json_each(data)"
+    "       WHERE key IN ('top_score', 'score')) > 0 THEN 0"
+    " ELSE 1 END AS _clean"
 )
+_HIGHLIGHT_COLUMNS = (
+    "start_time, end_time, label, top_score, score, _clean, "
+    "CASE WHEN _clean THEN data -> '$.top_score' END AS _data_top_score, "
+    "CASE WHEN _clean THEN data -> '$.score' END AS _data_score, "
+    "CASE WHEN _clean THEN NULL ELSE data END AS data"
+)
+
+_sql_scores: bool | None = None
+_sql_scores_lock = threading.Lock()
+
+
+def sql_scores_supported() -> bool:
+    """Whether this process's SQLite can run `_HIGHLIGHT_COLUMNS` (JSON
+    functions, `->` from 3.38, materialized CTEs). Decided once, by running
+    the real query shape against an in-memory table, and logged. Without it
+    `/v1/highlights` parses `data` in Python, as it always did: `json_extract`
+    (older) would hand Python SQLite's own float conversion instead of the
+    number's text, and could change a score in its last digit.
+    """
+    global _sql_scores
+    with _sql_scores_lock:
+        if _sql_scores is None:
+            probe = sqlite3.connect(":memory:")
+            probe.row_factory = sqlite3.Row
+            try:
+                probe.execute(
+                    "CREATE TABLE event (start_time, end_time, label, top_score, score, data)"
+                )
+                probe.execute(
+                    "INSERT INTO event VALUES (1, 2, 'person', NULL, NULL, ?)",
+                    ('{"top_score": 0.5}',),
+                )
+                row = probe.execute(
+                    "WITH page AS MATERIALIZED (SELECT rowid AS _event_rowid, *"
+                    f"{_HIGHLIGHT_CLEAN} FROM event) "
+                    f"SELECT _event_rowid, {_HIGHLIGHT_COLUMNS} FROM page"
+                ).fetchone()
+                _sql_scores = row["_data_top_score"] == "0.5"
+            except sqlite3.Error:
+                _sql_scores = False
+            finally:
+                probe.close()
+            logger.info(
+                "highlights: SQLite %s -- event scores read %s",
+                sqlite3.sqlite_version,
+                "in SQL (data -> '$.top_score')"
+                if _sql_scores
+                else "by parsing data in Python (no JSON '->' support)",
+            )
+        return _sql_scores
 
 
 def _json_value(text: Any) -> Any:
     """A `->` result (JSON text, or NULL for a missing key) as Python."""
     return None if text is None else json.loads(text)
+
+
+def _row_score(row: sqlite3.Row, from_sql: bool) -> float | None:
+    if from_sql and row["_clean"]:
+        return db.event_top_score(
+            row,
+            {
+                "top_score": _json_value(row["_data_top_score"]),
+                "score": _json_value(row["_data_score"]),
+            },
+        )
+    return db.event_top_score(row)
 
 
 def _highlight_items(
@@ -1234,13 +1374,13 @@ def _highlight_items(
         # little past it, shift, filter, then cut to `limit`. With the
         # correction off (margin 0) this is exactly the old query.
         query = (camera, before - shift.constant_s + margin, limit + (20 if margin else 0))
-        try:
-            rows = db.newest_events(conn, *query, columns=_HIGHLIGHT_COLUMNS)
-            from_sql = True
-        except sqlite3.OperationalError:
-            # An SQLite built without its JSON functions: read `data` whole.
+        from_sql = sql_scores_supported()
+        if from_sql:
+            rows = db.newest_events(
+                conn, *query, columns=_HIGHLIGHT_COLUMNS, prepare=_HIGHLIGHT_CLEAN
+            )
+        else:
             rows = db.newest_events(conn, *query)
-            from_sql = False
         items: list[dict[str, Any]] = []
         for r in rows:
             h_start = shift.shift(r["start_time"])
@@ -1251,15 +1391,7 @@ def _highlight_items(
                     "start": h_start,
                     "end": shift.shift(r["end_time"]) if r["end_time"] is not None else None,
                     "reason": r["label"],
-                    "score": db.event_top_score(
-                        r,
-                        {
-                            "top_score": _json_value(r["_data_top_score"]),
-                            "score": _json_value(r["_data_score"]),
-                        }
-                        if from_sql
-                        else None,
-                    ),
+                    "score": _row_score(r, from_sql),
                 }
             )
             if len(items) >= limit:
@@ -1311,8 +1443,33 @@ async def highlights(
     cache = _highlights_cache(state)
     cached = cache.get(key, now)
     if cached is None:
-        async with _highlights_gate(state):
-            items = await asyncio.to_thread(_highlight_items, settings, camera, before, limit)
+        gate = _highlights_gate(state)
+        if not await gate.acquire(_HIGHLIGHTS_QUEUE_TIMEOUT_S):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "upstream_busy",
+                    "message": "too many highlight reads queued; retry shortly",
+                },
+                headers={"Retry-After": str(_HIGHLIGHTS_RETRY_AFTER_S)},
+            )
+        try:
+            # A caller that gave up while queued gets nothing read for it.
+            gone = await request.is_disconnected()
+        except BaseException:
+            gate.release()
+            raise
+        if gone:
+            gate.release()
+            return Response(status_code=499)
+        # The permit goes back when the thread finishes, not when this
+        # handler stops waiting: a cancelled request must not let a third
+        # read start while its own is still running.
+        work = asyncio.ensure_future(
+            asyncio.to_thread(_highlight_items, settings, camera, before, limit)
+        )
+        work.add_done_callback(lambda done: _release_after(gate, done))
+        items = await asyncio.shield(work)
         if before <= now - _HIGHLIGHTS_CACHE_HORIZON_S and all(
             h["end"] is not None for h in items
         ):

@@ -220,3 +220,35 @@ def test_no_accept_encoding_means_no_gzip(mw_client: TestClient) -> None:
 )
 def test_skips_content_type(content_type: str, skipped: bool) -> None:
     assert skips_content_type(content_type) is skipped
+
+
+async def test_pathsend_passes_through_with_its_start() -> None:
+    """`http.response.pathsend` (the server sends the file itself) is never
+    compressed, and the held start goes out first, unchanged."""
+    sent: list[dict[str, Any]] = []
+
+    async def app(scope: Any, receive: Any, send: Any) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"text/plain"), (b"content-length", b"9999")],
+            }
+        )
+        await send({"type": "http.response.pathsend", "path": "/tmp/x.txt"})
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Any) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "path": "/file",
+        "headers": [(b"accept-encoding", b"gzip")],
+        "extensions": {"http.response.pathsend": {}},
+    }
+    await MediaSafeGZipMiddleware(app)(scope, receive, send)
+    assert [m["type"] for m in sent] == ["http.response.start", "http.response.pathsend"]
+    assert dict(sent[0]["headers"]) == {b"content-type": b"text/plain", b"content-length": b"9999"}

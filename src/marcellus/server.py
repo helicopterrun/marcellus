@@ -609,6 +609,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     loop_lag = LoopLagMonitor()
     app.state.loop_lag = loop_lag
     loop_lag_task = asyncio.create_task(loop_lag.run())
+    # Settle (and log, once) how /v1/highlights reads event scores on this
+    # host's SQLite, so the startup log says which path is live.
+    await asyncio.to_thread(scrub_routes.sql_scores_supported)
 
     if settings.face_capture.enabled:
         # Logged from the server too, not just from the timer job: a

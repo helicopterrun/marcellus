@@ -366,6 +366,15 @@ _ODD_DATA = [
     "{}",
     "not json",
     "",
+    None,
+    # Python's json.dumps writes these; SQLite's json_valid rejects them.
+    '{"top_score": NaN, "score": 0.5}',
+    '{"top_score": Infinity}',
+    '{"top_score": -Infinity, "score": 0.25}',
+    '{"score": NaN}',
+    # Duplicate keys: SQLite reads the first, Python keeps the last.
+    '{"top_score": 0.1, "top_score": 0.9}',
+    '{"score": 0.2, "top_score": null, "score": 0.7}',
 ]
 
 
@@ -398,11 +407,18 @@ def _old_items(settings: Settings, camera: str, before: float, limit: int) -> li
     return items
 
 
+@pytest.mark.parametrize("sql_scores", [True, False], ids=["sql-scores", "python-scores"])
 @pytest.mark.parametrize("correction", [True, False])
-def test_items_match_the_old_read_score_for_score(tmp_path: Path, correction: bool) -> None:
+def test_items_match_the_old_read_score_for_score(
+    tmp_path: Path, correction: bool, sql_scores: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scrub_routes, "_sql_scores", sql_scores)
     path = tmp_path / "frigate.db"
     conn = sqlite3.connect(path)
-    conn.executescript((FIXTURES / "v0.18.2.sql").read_text())
+    # `data` nullable here, so a NULL blob can be tried too.
+    conn.executescript(
+        (FIXTURES / "v0.18.2.sql").read_text().replace('"data" JSON NOT NULL', '"data" JSON')
+    )
     rng = random.Random(4)
     rows = []
     for i in range(600):
@@ -434,18 +450,216 @@ def test_items_match_the_old_read_score_for_score(tmp_path: Path, correction: bo
             enabled=False, cache_dir=tmp_path / "scrub", segment_clock_correction=correction
         ),
     )
-    # The scores really come out in SQL here, not through the fallback.
-    ro = _ro(path)
-    try:
-        cut = db.newest_events(
-            ro, "camera_a", _BASE_T + 1e9, 5, columns=scrub_routes._HIGHLIGHT_COLUMNS
-        )
-        assert cut and "data" not in cut[0].keys()  # noqa: SIM118 - sqlite3.Row
-    finally:
-        ro.close()
+    if sql_scores:
+        # Clean rows really are read in SQL, and only the others carry `data`.
+        ro = _ro(path)
+        try:
+            cut = db.newest_events(
+                ro,
+                "camera_a",
+                _BASE_T + 1e9,
+                120,
+                columns=scrub_routes._HIGHLIGHT_COLUMNS,
+                prepare=scrub_routes._HIGHLIGHT_CLEAN,
+            )
+            clean = [r for r in cut if r["_clean"]]
+            unclean = [r for r in cut if not r["_clean"]]
+            assert clean and unclean
+            assert all(r["data"] is None for r in clean)
+            for r in clean:  # each a value's own JSON text
+                scrub_routes._json_value(r["_data_top_score"])
+            assert any(r["data"] and "NaN" in r["data"] for r in unclean)
+            assert any(r["data"] and r["data"].count('"top_score"') == 2 for r in unclean)
+        finally:
+            ro.close()
     for before in (_BASE_T + 20, _BASE_T + 100, _BASE_T + 1e9):
         for camera in ("camera_a", "camera_b"):
             for limit in (1, 10, 100):
                 new = scrub_routes._highlight_items(settings, camera, before, limit)
-                assert new == _old_items(settings, camera, before, limit)
+                # Compared as JSON text: NaN never equals itself.
                 assert json.dumps(new) == json.dumps(_old_items(settings, camera, before, limit))
+
+
+@pytest.mark.parametrize("sql_scores", [True, False], ids=["sql-scores", "python-scores"])
+@pytest.mark.parametrize("blob", ['"just a string"', "42", "[0.5]"])
+def test_a_non_object_blob_fails_as_it_always_did(
+    tmp_path: Path, blob: str, sql_scores: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The old read raised on JSON that isn't an object (`.get` on it); so
+    does the new one, on either path -- nothing quietly changes."""
+    monkeypatch.setattr(scrub_routes, "_sql_scores", sql_scores)
+    path = tmp_path / "frigate.db"
+    conn = sqlite3.connect(path)
+    conn.executescript((FIXTURES / "v0.18.2.sql").read_text())
+    conn.execute(
+        "INSERT INTO event (id, label, camera, start_time, end_time, zones, has_clip, "
+        "has_snapshot, retain_indefinitely, data) "
+        "VALUES ('x', 'person', 'camera_a', 1, 2, '[]', 1, 1, 0, ?)",
+        (blob,),
+    )
+    conn.commit()
+    conn.close()
+    fake_config = tmp_path / "frigate-config.yml"
+    fake_config.write_text("cameras: {}\n")
+    settings = Settings(
+        frigate=FrigateSection(
+            base_url="http://frigate.test:5000", config_path=fake_config, db_path=path
+        ),
+        sidecar=SidecarSection(db_path=tmp_path / "marcellus.db", bind_port=5001),
+        scrub=ScrubSection(enabled=False, cache_dir=tmp_path / "scrub"),
+    )
+    with pytest.raises(AttributeError):
+        _old_items(settings, "camera_a", 10, 10)
+    with pytest.raises(AttributeError):
+        scrub_routes._highlight_items(settings, "camera_a", 10, 10)
+
+
+# -- which SQL path, decided once ---------------------------------------------
+
+
+def test_sql_scores_are_probed_once_and_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(scrub_routes, "_sql_scores", None)
+    with caplog.at_level("INFO", logger="marcellus.routes.scrub"):
+        first = scrub_routes.sql_scores_supported()
+        second = scrub_routes.sql_scores_supported()
+    assert first is second
+    lines = [r.getMessage() for r in caplog.records if "highlights: SQLite" in r.getMessage()]
+    assert len(lines) == 1
+    assert sqlite3.sqlite_version in lines[0]
+    if sqlite3.sqlite_version_info >= (3, 38, 0):
+        assert first is True and "in SQL" in lines[0]
+
+
+async def test_a_locked_database_surfaces_and_is_not_retried(
+    app: Any, frigate_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"database is locked" propagates exactly as it did before (no second
+    read through another path)."""
+    calls = 0
+
+    def _locked(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(db, "newest_events", _locked)
+    async with _client(app) as c:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            await c.get("/v1/highlights/camera_a", params={"before": time.time()})
+    assert calls == 1
+    assert scrub_routes._highlights_gate(app.state).free == scrub_routes._HIGHLIGHTS_CONCURRENCY
+
+
+# -- the queue -----------------------------------------------------------------
+
+
+async def test_a_request_queued_past_the_deadline_gets_503(
+    app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scrub_routes, "_HIGHLIGHTS_QUEUE_TIMEOUT_S", 0.1)
+
+    def _slow(*args: Any) -> list[dict[str, Any]]:
+        time.sleep(0.4)
+        return []
+
+    monkeypatch.setattr(scrub_routes, "_highlight_items", _slow)
+    async with _client(app) as c:
+        results = await asyncio.gather(
+            *(
+                c.get("/v1/highlights/camera_a", params={"before": time.time() - i})
+                for i in range(3)
+            )
+        )
+        codes = sorted(r.status_code for r in results)
+        assert codes == [200, 200, 503]
+        busy = next(r for r in results if r.status_code == 503)
+        assert busy.headers["retry-after"] == str(scrub_routes._HIGHLIGHTS_RETRY_AFTER_S)
+        assert busy.json()["detail"]["error"] == "upstream_busy"
+        # Nothing leaked: both slots are free and the next request is served.
+        assert scrub_routes._highlights_gate(app.state).free == 2
+        again = await c.get("/v1/highlights/camera_a", params={"before": time.time()})
+        assert again.status_code == 200
+
+
+async def test_a_caller_gone_while_queued_costs_no_read(
+    app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from starlette.requests import Request
+
+    async def _gone(self: Any) -> bool:
+        return True
+
+    called = False
+
+    def _items(*args: Any) -> list[dict[str, Any]]:
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(Request, "is_disconnected", _gone)
+    monkeypatch.setattr(scrub_routes, "_highlight_items", _items)
+    async with _client(app) as c:
+        r = await c.get("/v1/highlights/camera_a", params={"before": time.time()})
+    assert r.status_code == 499
+    assert not called
+    assert scrub_routes._highlights_gate(app.state).free == 2
+
+
+async def test_a_cancelled_request_holds_its_slot_until_the_read_ends(
+    app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = threading.Event()
+
+    def _blocked(*args: Any) -> list[dict[str, Any]]:
+        release.wait(5)
+        return []
+
+    monkeypatch.setattr(scrub_routes, "_highlight_items", _blocked)
+    async with _client(app) as c:
+        task = asyncio.ensure_future(
+            c.get("/v1/highlights/camera_a", params={"before": time.time()})
+        )
+        gate = None
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            gate = getattr(app.state, "highlights_gate", None)
+            if gate is not None and gate.free == 1:
+                break
+        assert gate is not None and gate.free == 1
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert gate.free == 1  # the read is still running on its thread
+        release.set()
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if gate.free == 2:
+                break
+        assert gate.free == 2
+
+
+async def test_gate_hands_permits_over_in_order_and_never_drifts() -> None:
+    gate = scrub_routes._Gate(1)
+    assert await gate.acquire(0.01)
+    assert not await gate.acquire(0.01)  # timed out
+    assert gate.free == 0
+
+    waiter = asyncio.ensure_future(gate.acquire(1.0))
+    await asyncio.sleep(0)
+    gate.release()  # handed straight to the waiter
+    assert await waiter
+    assert gate.free == 0
+
+    # A waiter cancelled just after being handed a permit passes it on.
+    late = asyncio.ensure_future(gate.acquire(1.0))
+    await asyncio.sleep(0)
+    gate.release()
+    late.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await late
+    assert gate.free == 1
+    assert await gate.acquire(0.01)
+    gate.release()
+    assert gate.free == 1

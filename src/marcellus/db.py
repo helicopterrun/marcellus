@@ -1563,6 +1563,7 @@ def newest_events(
     *,
     budget: int = NEWEST_EVENTS_SCAN_BUDGET,
     columns: str = "*",
+    prepare: str = "",
 ) -> list[sqlite3.Row]:
     """Full `event` rows for `camera` starting before `before`, newest first:
     the rows of `SELECT * FROM event WHERE camera = ? AND start_time < ?
@@ -1582,7 +1583,11 @@ def newest_events(
     order). Both reads share one snapshot, so rowids can't move in between.
 
     `columns` narrows the final read (SQL select-list expressions); each row
-    also carries the `_event_rowid` it was fetched by.
+    also carries the `_event_rowid` it was fetched by. With `prepare` (extra
+    select-list expressions, starting with a comma) the page's rows are first
+    materialized with those columns added, and `columns` is evaluated over
+    that: a per-row expression `columns` uses several times is then computed
+    once. Needs SQLite 3.35+ (`AS MATERIALIZED`).
     """
     in_txn = conn.in_transaction
     if not in_txn:
@@ -1593,10 +1598,15 @@ def newest_events(
             return []
         rowids = [rowid for _, rowid in keys]
         marks = ",".join("?" * len(rowids))
-        rows = conn.execute(
-            f"SELECT rowid AS _event_rowid, {columns} FROM event WHERE rowid IN ({marks})",
-            rowids,
-        ).fetchall()
+        if prepare:
+            sql = (
+                f"WITH page AS MATERIALIZED (SELECT rowid AS _event_rowid, *{prepare} "
+                f"FROM event WHERE rowid IN ({marks})) "
+                f"SELECT _event_rowid, {columns} FROM page"
+            )
+        else:
+            sql = f"SELECT rowid AS _event_rowid, {columns} FROM event WHERE rowid IN ({marks})"
+        rows = conn.execute(sql, rowids).fetchall()
     finally:
         if not in_txn:
             conn.rollback()

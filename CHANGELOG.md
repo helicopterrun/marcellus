@@ -78,17 +78,23 @@ may change behaviour). Numbers are pull requests.
   behind it for seconds. The page is now read newest-first off Frigate's
   start-time index (stopping once the page is full; a camera with few events
   uses its own index), only the page's rows are read in full, and the read
-  runs on a worker thread, at most two at a time. Old, settled pages (`before`
-  an hour or more in the past, no event still running) are also kept in memory
-  for five minutes. The response is unchanged: same events, same order (ties on
-  start time break the way the stock query broke them) and no new caching
-  headers.
+  runs on a worker thread, at most two at a time. A request that has queued
+  for a slot for 5 s is answered 503 (`upstream_busy`, `Retry-After: 2`); one
+  whose caller has gone by then is dropped without reading. On SQLite 3.38+ the
+  event scores are cut out of `data` in SQL instead of parsing the whole blob
+  in Python (rows whose `data` isn't plain JSON, such as Python's `NaN`, are
+  still parsed in Python); older SQLite keeps the Python parse. The startup log
+  says which (`highlights: SQLite <version> -- event scores read …`). Old,
+  settled pages (`before` an hour or more in the past, no event still running)
+  are also kept in memory for five minutes. The response is unchanged: same
+  events, same scores, same order (ties on start time break the way the stock
+  query broke them) and no new caching headers.
 - **Proxied video, images and playlists are no longer gzipped.** Which media
   types Starlette's gzip middleware skips depends on its version; the sidecar
   now decides itself: `/vod/` and `/live/` paths, `video/*`, `audio/*`, images
-  other than SVG, HLS playlists, `application/octet-stream`, archives, 206
-  responses and anything already encoded pass through untouched. HTML and JSON
-  still compress, at level 6 instead of 9.
+  other than SVG, HLS playlists, `application/octet-stream`, archives, 206 and
+  `pathsend` responses and anything already encoded pass through untouched.
+  HTML and JSON still compress, at level 6 instead of 9.
 - **Docker install order:** `install.sh` used to start the container and only
   then tell you to edit the host paths in `.env`; a wrong or missing path was
   mounted by Docker as an empty root-owned directory, so nothing errored and

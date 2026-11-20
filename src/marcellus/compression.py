@@ -112,6 +112,12 @@ class _GZipResponder:
                 await self.send(message)
             return
         if kind != "http.response.body":
+            # `http.response.pathsend` (a file the server sends itself) and
+            # anything else that isn't a body chunk: never compressed. If the
+            # start is still held, it goes out first, unchanged.
+            if self.mode is None and self.start is not None:
+                self.mode = "pass"
+                await self.send(self.start)
             await self.send(message)
             return
         if self.mode == "pass":
