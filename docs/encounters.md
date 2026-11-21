@@ -468,6 +468,32 @@ Existing rows (or ones linked while Frigate was unreachable) have
 `dir_source=''`; `marcellus encounters backfill-direction --limit N`
 rewalks and recomputes them.
 
+`lead_label` (nullable, 2026-11) rides the same read: Frigate's `event.label`
+of the atom's lead event (`event_ids[0]`), taken from the rows
+`load_direction` already fetches (`observations.Direction.lead_label`), so
+linking does no extra query. A Frigate event's label is fixed at track
+creation, so an update whose Frigate read failed keeps the stored value
+(`COALESCE`). It feeds the `label` of `/v1/encounters` stops
+(`visits.lead_event_label`: the recorded label, else the review's only base
+label, else null). Rows linked before the column existed stay NULL; no
+backfill, since a single-label review covers them and a multi-label one is
+the only case it could not.
+
+### Stops on the wire
+
+Each `stops[]` entry of an `EncounterSummary` is `{camera, zone, start, end,
+event_id, label}` (`visits.build_stops`, `models/wire.py` `EncounterStop`).
+`event_id`/`label` (additive, no `v` bump, null when unknown) name the stop's
+lead member -- first alert-severity member with event ids, else first member
+with any -- and its `event_ids[0]`: the same rule as `store.recompute` uses for
+`primary_event_id`, applied within the stop, so `primary_event_id` always
+matches exactly one stop's `event_id` and the top level needs no
+`primary_label`/`primary_camera`. No `score` (Frigate's top score is still
+climbing when an atom links and is not stored) and no `event_start`/`event_end`
+(a stop's `start`/`end` are its review segments' times, within a second or two
+of the event's own; the event times are not stored and reading them would put
+a Frigate query on the request path).
+
 ## Repair
 
 `marcellus encounters repair [--dry-run] [--limit N]`

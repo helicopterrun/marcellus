@@ -22,6 +22,8 @@
         {
           "camera": "street-cam",
           "end": 1785950834.704,
+          "event_id": "1785950822.704-r7",
+          "label": "person",
           "start": 1785950822.704,
           "zone": "Sidewalk"
         }
@@ -54,6 +56,8 @@
         {
           "camera": "porch-cam",
           "end": 1785949034.704,
+          "event_id": "1785949022.704-r5",
+          "label": null,
           "start": 1785949022.704,
           "zone": "Front Door"
         }
@@ -83,6 +87,8 @@
         {
           "camera": "gate-face",
           "end": 1785947234.704,
+          "event_id": "1785947222.704-r4",
+          "label": "raccoon",
           "start": 1785947222.704,
           "zone": null
         }
@@ -146,24 +152,32 @@
         {
           "camera": "street-cam",
           "end": 1785945434.704,
+          "event_id": "1785945422.704-r1",
+          "label": "person",
           "start": 1785945422.704,
           "zone": "Sidewalk"
         },
         {
           "camera": "yard-cam",
           "end": 1785945479.704,
+          "event_id": "1785945452.704-r2",
+          "label": "dog",
           "start": 1785945452.704,
           "zone": "Front Garden"
         },
         {
           "camera": "porch-cam",
           "end": 1785945494.704,
+          "event_id": "1785945482.704-r3",
+          "label": "person",
           "start": 1785945482.704,
           "zone": "Front Door"
         },
         {
           "camera": "street-cam",
           "end": 1785945524.704,
+          "event_id": "1785945512.704-r6",
+          "label": "person",
           "start": 1785945512.704,
           "zone": "Sidewalk"
         }

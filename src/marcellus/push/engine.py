@@ -237,6 +237,7 @@ class PushEngine:
                         await delivery_wire.handle_delivery_resolve(
                             obj.camera, obj.track_id, conn=conn, devices=devices,
                             transport=self.transport, config=self.push_config,
+                            label=obj.label or "",
                         )
                     finally:
                         conn.close()

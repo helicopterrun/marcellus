@@ -57,6 +57,12 @@ fields (see `push/delivery.py`, `push/live_activities.py`,
   resolved and so on), and `glyph` (an icon id).
 - `card_key`: built from the camera name, the subject kind and Frigate's
   internal track id for the object.
+- `event_id` and `label`: Frigate's event id for the object the alert is about
+  (the same kind of id as in `card_key`) and its Frigate label, such as
+  `person` or `car`, so the app can show that event as soon as you open the
+  alert. Left out when the sidecar does not know them. Never a name, a handle
+  or a face number: a recognized person's alert carries the same fields as
+  anyone else's.
 - Timestamps, a sound name, and an interruption level.
 - `media`: a URL of the form `<push.external_base_url>/v1/push/thumbnail/<handle>`.
   This is a link to **your** server, not a picture. The relay (and Apple) see

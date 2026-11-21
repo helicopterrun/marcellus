@@ -75,6 +75,10 @@ def _stops_of(member_rows: list[dict[str, Any]]) -> list[visits.MemberStop]:
             first_zone=m.get("first_zone") or "",
             zones=json.loads(m["zones_json"]),
             joined_at=m.get("joined_at") or 0.0,
+            event_ids=[str(e) for e in json.loads(m.get("event_ids_json") or "[]") if e],
+            severity=m.get("severity") or "detection",
+            labels=json.loads(m.get("labels_json") or "[]"),
+            lead_label=m.get("lead_label") or None,
         )
         for m in member_rows
     ]
@@ -125,7 +129,14 @@ def _title_and_stops(
         title.route_places(members, policy_settings.zone_display_name),
     )
     stops = [
-        {"camera": s.camera, "zone": s.zone, "start": s.start, "end": s.end}
+        {
+            "camera": s.camera,
+            "zone": s.zone,
+            "start": s.start,
+            "end": s.end,
+            "event_id": s.event_id,
+            "label": s.label,
+        }
         for s in visits.build_stops(members, policy_settings.zone_display_name)
     ]
     return text, stops

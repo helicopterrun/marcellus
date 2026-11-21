@@ -364,12 +364,20 @@ class EncounterMember(_Wire):
 
 class EncounterStop(_Wire):
     """One visit: consecutive same-camera members merged (`encounters/visits.py`).
-    `camera` is the raw key; `zone` a display name or null; `end` null while open."""
+    `camera` is the raw key; `zone` a display name or null; `end` null while open.
+
+    Additive (2026-11, no `v` bump): `event_id` is the Frigate event id of the
+    stop's lead event on this camera (first alert member's first detection,
+    else the first member's -- the same rule as `primary_event_id`); `label`
+    that event's Frigate label. Both null when unknown (no member carries an
+    event id; label not recorded and not implied by a single-label review)."""
 
     camera: str
     zone: str | None
     start: float
     end: float | None
+    event_id: str | None = None
+    label: str | None = None
 
 
 class EncounterSummary(_Wire):

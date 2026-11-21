@@ -24,7 +24,7 @@ import json
 import math
 import sqlite3
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from marcellus.db import parse_event_data, parse_path_data
@@ -45,6 +45,12 @@ class Direction:
     direction: str
     heading_deg: float | None
     source: str
+    #: Frigate's `event.label` for the atom's LEAD event (`event_ids[0]`, the
+    #: review's first detection), read off the same rows in the same query --
+    #: not a direction fact, but it is what `/v1/encounters` stops report as
+    #: `label` (`visits.Stop`). "" when that row was not found. A Frigate
+    #: event's label is fixed at track creation, so the link-time read is final.
+    lead_label: str = ""
 
 
 _EMPTY = Direction("", "", "", None, "")
@@ -274,12 +280,27 @@ def load_direction(
     if not ids:
         return _EMPTY
     placeholders = ",".join("?" for _ in ids)
+    where = f"FROM event WHERE id IN ({placeholders}) ORDER BY start_time"
     try:
-        rows = frigate_conn.execute(
-            f"SELECT id, zones, data FROM event WHERE id IN ({placeholders}) "
-            "ORDER BY start_time",
-            ids,
-        ).fetchall()
+        rows = frigate_conn.execute(f"SELECT id, label, zones, data {where}", ids).fetchall()
+    except sqlite3.OperationalError:
+        # An `event` table without `label` (never seen from Frigate itself):
+        # the direction still derives, the lead label stays unknown.
+        try:
+            rows = frigate_conn.execute(f"SELECT id, zones, data {where}", ids).fetchall()
+        except sqlite3.Error:
+            return _EMPTY
     except sqlite3.Error:
         return _EMPTY
-    return derive_direction(rows)
+    direction = derive_direction(rows)
+    lead_label = _lead_label(rows, ids[0])
+    return replace(direction, lead_label=lead_label) if lead_label else direction
+
+
+def _lead_label(rows: Sequence[Any], lead_id: str) -> str:
+    """`label` of the row whose `id` is `lead_id`, else ""."""
+    for row in rows:
+        if str(_row_get(row, "id") or "") == lead_id:
+            label = _row_get(row, "label")
+            return label.strip() if isinstance(label, str) else ""
+    return ""

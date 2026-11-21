@@ -816,7 +816,12 @@ CREATE TABLE IF NOT EXISTS encounter_members (
     last_zone       TEXT NOT NULL DEFAULT '',
     direction       TEXT NOT NULL DEFAULT '',
     heading_deg     REAL,
-    dir_source      TEXT NOT NULL DEFAULT ''
+    dir_source      TEXT NOT NULL DEFAULT '',
+    -- Frigate label of the atom's lead event (event_ids[0]), read off the same
+    -- event rows as direction. NULL = unknown (older rows, Frigate unreachable
+    -- at link time). Reported as a stop's `label` on /v1/encounters. Also in
+    -- _ADDED_COLUMNS.
+    lead_label      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_encounter_members_enc ON encounter_members(encounter_id, start_time);
 CREATE TABLE IF NOT EXISTS encounter_decisions (
@@ -1058,6 +1063,8 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("direction", "TEXT NOT NULL DEFAULT ''"),
         ("heading_deg", "REAL"),
         ("dir_source", "TEXT NOT NULL DEFAULT ''"),
+        # Lead event's Frigate label (2026-11), from the same link-time read.
+        ("lead_label", "TEXT"),
     ],
 }
 
