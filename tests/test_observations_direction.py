@@ -218,12 +218,15 @@ def test_upsert_keeps_lead_label_when_a_later_read_finds_none(tmp_path) -> None:
         ended = Atom(atom_id="r1", camera="cam", start_time=100.0, end_time=110.0,
                      labels=("car", "person"), event_ids=("ev1",))
         store.upsert_atom(conn, ended, LinkDecision(None, "new", 1.0), 110.0, direction=None)
-        row = store.member_row(conn, "r1")
-        assert row is not None and row["lead_label"] == "car"
+        def lead(atom_id: str) -> object:
+            return conn.execute(
+                "SELECT lead_label FROM encounter_members WHERE atom_id = ?", (atom_id,)
+            ).fetchone()["lead_label"]
+
+        assert lead("r1") == "car"
         legacy = Atom(atom_id="r2", camera="cam", start_time=200.0, end_time=210.0,
                       labels=("person",), event_ids=("ev2",))
         store.upsert_atom(conn, legacy, LinkDecision(None, "new", 1.0), 200.0)
-        row2 = store.member_row(conn, "r2")
-        assert row2 is not None and row2["lead_label"] is None
+        assert lead("r2") is None
     finally:
         conn.close()
