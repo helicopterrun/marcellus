@@ -302,6 +302,10 @@ async def test_merge_on_routes_second_camera_onto_the_first_card(
     assert second["secondary"] == "Alley Wide → Stairway Wide"
     assert "also on" not in second["secondary"]
     assert second["cameras_path"] == ["alley_wide", "stairway_wide"]
+    # The create names its own track; the cross-camera enrich, whose payload
+    # `camera` is the first camera's, carries no event id from the second.
+    assert first["event_id"] == "trkA" and first["label"] == "person"
+    assert "event_id" not in second and "label" not in second
     # One story, one collapse id.
     assert transport.sent[0]["collapse_id"] == transport.sent[1]["collapse_id"]
 

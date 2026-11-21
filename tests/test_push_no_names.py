@@ -119,6 +119,22 @@ async def test_named_person_never_reaches_device_payloads(sidecar_db_path: Path)
     ), "expected generic Person copy"
     _assert_clean(transport)
 
+    # Every card push names the opaque Frigate event it is about -- including
+    # the recognition relax -- and nothing about who the person is.
+    cards = [s["payload"] for s in transport.sent if not s.get("live_activity")]
+    card_mutations = {c.get("mutation") for c in cards}
+    assert {"create", "deescalate", "resolve"} <= card_mutations, card_mutations
+    identity_keys = {"sub_label", "sub_labels", "name", "person", "person_id", "people",
+                     "identity", "identities", "cluster_id", "face"}
+    for card in cards:
+        assert card["event_id"] == "trk1", card
+        assert not identity_keys & set(card), card
+        if card.get("mutation") != "resolve":
+            assert card["label"] == "person", card
+        else:
+            # The resolve call above carried no label: absent, never guessed.
+            assert "label" not in card, card
+
 
 def test_situation_pushes_carry_no_identity() -> None:
     situation = Situation(

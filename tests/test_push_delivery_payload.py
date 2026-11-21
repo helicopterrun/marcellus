@@ -186,3 +186,90 @@ async def test_sweep_urgent_resound_disabled_by_config(sidecar_db_path: Path):
     )
     assert resounded == 0
     assert transport.sent == []
+
+
+def _event_card(**kw):
+    card = Card(card_key="front:person:1755550001.123456-abc123", level="urgent",
+                created_at=0.0, updated_at=5.0, state_since_at=5.0)
+    base = dict(
+        sound=True, subject_kind="person", place_class="doors", camera="front",
+        zone_name="doors", glyph="figure.walk", primary="Person at Front Door",
+        secondary="Front Door · just now", event_ts=5.0,
+    )
+    base.update(kw)
+    return build_card_payload(card, "create", **base)
+
+
+def test_build_card_payload_event_id_and_label_are_additive():
+    payload = _event_card(event_id="1755550001.123456-abc123", event_label="person")
+    assert payload["event_id"] == "1755550001.123456-abc123"
+    assert payload["label"] == "person"
+    assert payload["v"] == CONTRACT_VERSION == 1
+    # Unknown: both keys absent, not null.
+    bare = _event_card()
+    assert "event_id" not in bare and "label" not in bare
+    # A label is never sent without the event it describes.
+    orphan = _event_card(event_label="person")
+    assert "event_id" not in orphan and "label" not in orphan
+
+
+def test_build_card_payload_with_event_fields_stays_far_under_apns_limit():
+    """Longest realistic fields everywhere (64-char camera and zone names,
+    a 32-hex encounter id, a five-camera path, full-length copy, a media URL
+    and a deep link): the card body stays well under APNs' 4 KB, and the new
+    event fields add under 100 bytes."""
+    from marcellus.push.payload import APNS_MAX_PAYLOAD_BYTES, payload_size
+
+    cam = "c" * 64
+    kw = dict(
+        camera=cam, zone_name="z" * 64, primary="P" * 120, secondary="S" * 180,
+        media="https://sidecar.example.invalid/v1/push/thumbnail/h_9f3a1c2d3e4f5061",
+        deep_link=f"elsinore://camera/{cam}", encounter_id="e" * 32,
+        cameras_path=[f"{cam[:-1]}{i}" for i in range(5)],
+    )
+    without = _event_card(**kw)
+    with_event = _event_card(
+        **kw, event_id="1755550001.123456-abcdef", event_label="motorcycle"
+    )
+    assert payload_size(with_event) < APNS_MAX_PAYLOAD_BYTES // 2
+    assert payload_size(with_event) - payload_size(without) < 100
+
+
+class _Tracks:
+    def __init__(self, labels):
+        self._labels = labels
+
+    def get(self, camera, track_id):
+        from marcellus.push.situations import TrackState
+
+        label = self._labels.get((camera, track_id))
+        return TrackState(label=label) if label is not None else None
+
+
+class _Engine:
+    def __init__(self, labels):
+        self.tracks = _Tracks(labels)
+
+
+def test_card_event_names_the_track_on_the_cards_own_camera():
+    from marcellus.push.delivery_wire import _card_event
+
+    engine = _Engine({("front", "trk1"): "car"})
+    # The engine's per-track label outranks the review's labels.
+    assert _card_event(engine, event_camera="front", card_camera="front", track_id="trk1",
+                       review_labels=("person", "car")) == ("trk1", "car")
+    # No tracked label: a single-label review implies it (qualifiers dropped)...
+    assert _card_event(None, event_camera="front", card_camera="front", track_id="trk2",
+                       review_labels=("person", "person-verified")) == ("trk2", "person")
+    # ...a multi-label review does not say which: id only.
+    assert _card_event(None, event_camera="front", card_camera="front", track_id="trk2",
+                       review_labels=("person", "car")) == ("trk2", "")
+    # A caller-supplied label (frigate/events paths) wins.
+    assert _card_event(engine, event_camera="front", card_camera="front", track_id="trk1",
+                       label="truck") == ("trk1", "truck")
+    # Merged onto another camera's card: this camera's track would point the
+    # app at the wrong picture, so nothing.
+    assert _card_event(engine, event_camera="front", card_camera="side", track_id="trk1",
+                       review_labels=("car",)) == ("", "")
+    assert _card_event(engine, event_camera="front", card_camera="front", track_id="",
+                       review_labels=("car",)) == ("", "")

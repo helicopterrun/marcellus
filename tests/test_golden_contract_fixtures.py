@@ -618,6 +618,9 @@ def _build_card_push_silent() -> dict[str, Any]:
         event_ts=SENT_AT,
         media=HANDLE,
         deep_link=f"elsinore://camera/{CAMERA}",
+        # The card's own track: the card key's tail on a create.
+        event_id=TRACK_ID,
+        event_label="package",
     )
 
 
@@ -725,6 +728,8 @@ def _build_card_push() -> dict[str, Any]:
         event_ts=SENT_AT - 42.0,
         media=HANDLE,
         deep_link=f"elsinore://camera/{CAMERA}",
+        event_id=TRACK_ID,
+        event_label="package",
     )
 
 
@@ -794,6 +799,7 @@ def _build_v1_encounters() -> dict[str, Any]:
     from marcellus import db as db_mod
     from marcellus.encounters import notability
     from marcellus.encounters.linker import Atom, LinkDecision
+    from marcellus.encounters.observations import Direction
     from marcellus.encounters.store import upsert_atom
 
     # A fixed location and zone map (not the host's clock or live policy) so
@@ -882,9 +888,20 @@ def _build_v1_encounters() -> dict[str, Any]:
                           zones=("front_door",), sub_labels=("amazon",), severity="alert"),
                 ),
             ]
+            # Stops carry their lead event's `event_id`/`label`. The label is
+            # the one read at link time when recorded (r2's two-label review
+            # names its first detection a dog), else the review's only label;
+            # the two-label delivery review (r5) with none recorded stays null.
+            lead_labels = {"r2": "dog"}
             for encounter_id, reason, atom in plan:
                 decision = LinkDecision(encounter_id, reason, 1.0 if reason == "new" else 0.9)
-                upsert_atom(sconn, atom, decision, atom.start_time, stamper=_stamper)
+                lead = lead_labels.get(atom.atom_id)
+                direction = (
+                    Direction("", "", "", None, "none", lead_label=lead) if lead else None
+                )
+                upsert_atom(
+                    sconn, atom, decision, atom.start_time, stamper=_stamper, direction=direction
+                )
             sconn.execute(
                 "UPDATE encounters SET sealed_at = ? WHERE id IN ('enc_walk', 'enc_delivery')",
                 (SENT_AT - 600.0,),

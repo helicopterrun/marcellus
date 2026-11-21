@@ -176,3 +176,54 @@ def test_backfill_rewalk_converges_after_one_pass(tmp_path) -> None:
     second_pass = _rewalk_once()
     assert second_pass == 0
     sidecar_conn.close()
+
+
+def test_load_direction_reads_lead_label_from_same_rows() -> None:
+    """`lead_label` is the label of `event_ids[0]` -- not whichever row sorts
+    first by start_time -- and a table without `label` still derives."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE event (id TEXT, label TEXT, zones TEXT, data TEXT, start_time REAL)"
+    )
+    conn.executemany(
+        "INSERT INTO event (id, label, zones, data, start_time) VALUES (?, ?, ?, ?, ?)",
+        [("ev-car", "car", None, "{}", 2.0), ("ev-person", "person", None, "{}", 1.0)],
+    )
+    assert load_direction(conn, ["ev-car", "ev-person"]).lead_label == "car"
+    assert load_direction(conn, ["missing", "ev-person"]).lead_label == ""
+
+    bare = sqlite3.connect(":memory:")
+    bare.row_factory = sqlite3.Row
+    bare.execute("CREATE TABLE event (id TEXT, zones TEXT, data TEXT, start_time REAL)")
+    bare.execute("INSERT INTO event VALUES ('ev1', NULL, '{}', 0.0)")
+    d = load_direction(bare, ["ev1"])
+    assert d.source == DIR_SOURCE_NONE and d.lead_label == ""
+
+
+def test_upsert_keeps_lead_label_when_a_later_read_finds_none(tmp_path) -> None:
+    """The lead label lands on the member row; an update whose Frigate read
+    failed (direction None) keeps it rather than blanking it."""
+    from marcellus import db
+    from marcellus.encounters import store
+    from marcellus.encounters.linker import Atom, LinkDecision
+    from marcellus.encounters.observations import Direction
+
+    conn = db.open_sidecar(tmp_path / "sidecar.db")
+    try:
+        atom = Atom(atom_id="r1", camera="cam", start_time=100.0, end_time=None,
+                    labels=("car", "person"), event_ids=("ev1",))
+        store.upsert_atom(conn, atom, LinkDecision(None, "new", 1.0), 100.0,
+                          direction=Direction("", "", "", None, "none", lead_label="car"))
+        ended = Atom(atom_id="r1", camera="cam", start_time=100.0, end_time=110.0,
+                     labels=("car", "person"), event_ids=("ev1",))
+        store.upsert_atom(conn, ended, LinkDecision(None, "new", 1.0), 110.0, direction=None)
+        row = store.member_row(conn, "r1")
+        assert row is not None and row["lead_label"] == "car"
+        legacy = Atom(atom_id="r2", camera="cam", start_time=200.0, end_time=210.0,
+                      labels=("person",), event_ids=("ev2",))
+        store.upsert_atom(conn, legacy, LinkDecision(None, "new", 1.0), 200.0)
+        row2 = store.member_row(conn, "r2")
+        assert row2 is not None and row2["lead_label"] is None
+    finally:
+        conn.close()

@@ -128,10 +128,24 @@ Gate Face camera". Over four places it keeps the first two and the last:
 
 Every encounter also carries `stops`: its members in time order with
 consecutive members on the same camera merged into one visit, each
-`{camera, zone, start, end}`. `camera` is the raw camera key, `zone` the first
-member's zone display name (null when it had none), `start` the earliest
-member start and `end` the latest member end (null while any member is still
-open). A return to an earlier camera is its own stop; there is no cap.
+`{camera, zone, start, end, event_id, label}`. `camera` is the raw camera key,
+`zone` the first member's zone display name (null when it had none), `start`
+the earliest member start and `end` the latest member end (null while any
+member is still open). A return to an earlier camera is its own stop; there is
+no cap.
+
+`event_id` is the Frigate event id of the stop's lead event on that camera,
+picked the way the encounter's `primary_event_id` is: the stop's first
+alert-severity member, else its first member with any event, and that member's
+first detection. So `primary_event_id` is always one of the stops' `event_id`s
+(the camera and label of the encounter's main event are that stop's).
+`label` is that event's Frigate label (`person`, `car`, `dog`...), read from
+Frigate when the review was linked into the encounter; for older rows it is filled in only when
+the member's review had a single label, since a review with several labels
+does not say which one its first detection carried. Either is null when not
+known (a member with no event ids, or a multi-label review linked before the
+label was recorded). A stop's `start`/`end` are its review segments' times,
+which can differ by a second or two from the Frigate event's own start/end.
 
 `GET /v1/capabilities` reports `encounters: {enabled, loops, tags,
 filters}`; `enabled` mirrors `encounters.enabled`, `loops` is always `false`

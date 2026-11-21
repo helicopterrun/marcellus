@@ -268,7 +268,10 @@ def upsert_atom(
     atom (computed from the Frigate RO connection, which this module never
     opens itself -- see `observations.load_direction`). Omitted/None writes
     the empty Direction, same as a genuinely undeterminable one; this upsert
-    must never fail because direction derivation couldn't.
+    must never fail because direction derivation couldn't. Its `lead_label`
+    is the exception: an update without one keeps the label already stored
+    (a Frigate event's label never changes, so a later failed read must not
+    erase a good one).
 
     `stamper` (see `notability.stamper_for`) restamps the encounter's
     tag/place/outcome from its members; omitted leaves them untouched.
@@ -337,7 +340,8 @@ def upsert_atom(
                     "end_time = ?, severity = ?, labels_json = ?, zones_json = ?, "
                     "event_ids_json = ?, sub_labels_json = ?, link_reason = ?, confidence = ?, "
                     "joined_at = ?, first_zone = ?, last_zone = ?, direction = ?, "
-                    "heading_deg = ?, dir_source = ? WHERE atom_id = ?",
+                    "heading_deg = ?, dir_source = ?, lead_label = COALESCE(?, lead_label) "
+                    "WHERE atom_id = ?",
                     (
                         encounter_id,
                         atom.camera,
@@ -356,6 +360,7 @@ def upsert_atom(
                         dir_.direction,
                         dir_.heading_deg,
                         dir_.source,
+                        dir_.lead_label or None,
                         atom.atom_id,
                     ),
                 )
@@ -368,7 +373,8 @@ def upsert_atom(
                     "UPDATE encounter_members SET camera = ?, start_time = ?, end_time = ?, "
                     "severity = ?, labels_json = ?, zones_json = ?, event_ids_json = ?, "
                     "sub_labels_json = ?, first_zone = ?, last_zone = ?, direction = ?, "
-                    "heading_deg = ?, dir_source = ? WHERE atom_id = ?",
+                    "heading_deg = ?, dir_source = ?, lead_label = COALESCE(?, lead_label) "
+                    "WHERE atom_id = ?",
                     (
                         atom.camera,
                         atom.start_time,
@@ -383,6 +389,7 @@ def upsert_atom(
                         dir_.direction,
                         dir_.heading_deg,
                         dir_.source,
+                        dir_.lead_label or None,
                         atom.atom_id,
                     ),
                 )
@@ -405,8 +412,8 @@ def upsert_atom(
                 "INSERT INTO encounter_members (atom_id, encounter_id, camera, start_time, "
                 "end_time, severity, labels_json, zones_json, event_ids_json, sub_labels_json, "
                 "link_reason, confidence, joined_at, first_zone, last_zone, direction, "
-                "heading_deg, dir_source) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "heading_deg, dir_source, lead_label) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     atom.atom_id,
                     encounter_id,
@@ -426,6 +433,7 @@ def upsert_atom(
                     dir_.direction,
                     dir_.heading_deg,
                     dir_.source,
+                    dir_.lead_label or None,
                 ),
             )
 
@@ -964,16 +972,19 @@ def set_direction(
     conn: sqlite3.Connection, atom_id: str, direction: Direction, *, commit: bool = True
 ) -> None:
     """Rewrite just the direction columns for one membership row (backfill
-    CLI) -- everything else about the row is left untouched."""
+    CLI) -- everything else about the row is left untouched. A lead label
+    already on the row survives a rewalk that found none (`COALESCE`)."""
     conn.execute(
         "UPDATE encounter_members SET first_zone = ?, last_zone = ?, direction = ?, "
-        "heading_deg = ?, dir_source = ? WHERE atom_id = ?",
+        "heading_deg = ?, dir_source = ?, lead_label = COALESCE(?, lead_label) "
+        "WHERE atom_id = ?",
         (
             direction.first_zone,
             direction.last_zone,
             direction.direction,
             direction.heading_deg,
             direction.source,
+            direction.lead_label or None,
             atom_id,
         ),
     )

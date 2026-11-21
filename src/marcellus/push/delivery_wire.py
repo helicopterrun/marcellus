@@ -616,6 +616,39 @@ def _encounter_family_compatible(
     return family_of(card_label) == family_of(label)
 
 
+def _card_event(
+    engine: PushEngine | None,
+    *,
+    event_camera: str,
+    card_camera: str,
+    track_id: str,
+    review_labels: Sequence[str] = (),
+    label: str = "",
+) -> tuple[str, str]:
+    """`(event_id, label)` for a card payload: the Frigate event (track) this
+    mutation is about and its Frigate label, or `("", "")` when the card
+    belongs to ANOTHER camera (a cross-camera merge -- the payload's `camera`
+    is the owner's, and an event id from this camera would point the app at
+    the wrong picture).
+
+    The label is the caller's own per-track label when it has one (the
+    `frigate/events` paths), else the engine's tracked label for this track,
+    else the review's only base label when it has exactly one -- a review
+    with several labels does not say which one this track carries, so "".
+    """
+    if not track_id or event_camera != card_camera:
+        return "", ""
+    if not label and engine is not None:
+        state = engine.tracks.get(event_camera, track_id)
+        label = (state.label or "") if state is not None else ""
+    if not label:
+        from marcellus.encounters.linker import normalise_labels
+
+        base = list(dict.fromkeys(normalise_labels(review_labels)[0]))
+        label = base[0] if len(base) == 1 else ""
+    return track_id, label
+
+
 def _pretty_camera(camera: str) -> str:
     return camera.replace("_", " ").title()
 
@@ -1809,6 +1842,10 @@ async def handle_delivery_event(
         # `silent` card, only to devices that can't show a Live Activity
         # (v3 §5.3). Every other mutation gates on `should_push`.
         if needs_card_payload(card.level, mutation):
+            card_event_id, card_event_label = _card_event(
+                engine, event_camera=event.camera, card_camera=owning_camera,
+                track_id=track_id, review_labels=event.labels,
+            )
             payload = build_card_payload(
                 card, mutation, sound=sound and not la_only,
                 subject_kind=subject_kind, place_class=place_class,
@@ -1819,6 +1856,7 @@ async def handle_delivery_event(
                 encounter_id=encounter_id or "",
                 cameras_path=cameras_path if len(cameras_path) >= 2 else None,
                 thread_by_encounter=bool(config.encounter_threading),
+                event_id=card_event_id, event_label=card_event_label,
             )
 
         fallback_devices: list[str] = []
@@ -1906,12 +1944,14 @@ async def handle_delivery_resolve(
     config: PushSection,
     zone_name: str = "",
     subject_kind: str = "",
+    label: str = "",
     now: float | None = None,
 ) -> int:
     """A tracked object ended (`frigate/events` `msg_type == "end"`) -- the
     faster, authoritative resolution signal `advance_card`'s `resolved=True`
     needs (see `cards.classify_mutation`'s docstring on why a ladder level
-    alone can't say this)."""
+    alone can't say this). `label` is the ended object's Frigate label, sent
+    as the resolve payload's `label` beside its `event_id`."""
     if not config.delivery_enabled:
         return 0
     now = time.time() if now is None else now
@@ -1976,6 +2016,8 @@ async def handle_delivery_resolve(
         demote_resolve: set[str] = set(la_covered)
         payload = None
         if needs_card_payload(card.level, mutation):
+            # The card is keyed on this camera's own natural key (aliases
+            # returned above), so the ended track IS its event.
             payload = build_card_payload(
                 card, mutation, sound=sound and not la_only, subject_kind=kind,
                 place_class="", camera=camera, zone_name=zone_name,
@@ -1983,6 +2025,7 @@ async def handle_delivery_resolve(
                 primary=primary, secondary=secondary, event_ts=now,
                 la_active=la_only,
                 escalation_sound=policy.get("escalation_sound", "urgent"),
+                event_id=track_id, event_label=label,
             )
         await send_card_mutation(
             conn, transport, devices, card, mutation, payload,
@@ -2219,6 +2262,12 @@ async def handle_recognition_event(
                 demote_recog.add(device.apns_token)
     payload = None
     if needs_card_payload(card.level, mutation):
+        # The event id only, never the sub_label that triggered this relax:
+        # a recognised track's card reads exactly like anyone else's.
+        card_event_id, card_event_label = _card_event(
+            None, event_camera=camera, card_camera=owning_camera,
+            track_id=track_id, label=label,
+        )
         payload = build_card_payload(
             card, mutation, sound=False, subject_kind=subject_kind,
             place_class=place_class, label=label, camera=owning_camera,
@@ -2226,6 +2275,7 @@ async def handle_recognition_event(
             primary=primary, secondary=secondary, event_ts=now,
             la_active=True,
             escalation_sound=recog_policy.get("escalation_sound", "urgent"),
+            event_id=card_event_id, event_label=card_event_label,
         )
     _recog_la = recog_policy.get("live_activities", {})
     await send_card_mutation(

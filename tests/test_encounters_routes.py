@@ -440,11 +440,86 @@ def test_v1_encounters_title_in_list_and_detail(client: TestClient, settings: Se
     detail = client.get(f"/v1/encounters/{enc}").json()
     assert detail["encounter"]["title"] == row["title"]
     expected_stops = [
-        {"camera": "alley-wide", "zone": "Back Walkway", "start": now - 300, "end": now - 295},
-        {"camera": "shed", "zone": None, "start": now - 280, "end": now - 275},
+        {
+            "camera": "alley-wide",
+            "zone": "Back Walkway",
+            "start": now - 300,
+            "end": now - 295,
+            "event_id": "ev-m1",
+            "label": "person",
+        },
+        {
+            "camera": "shed",
+            "zone": None,
+            "start": now - 280,
+            "end": now - 275,
+            "event_id": "ev-m2",
+            "label": "dog",
+        },
     ]
     assert row["stops"] == expected_stops
     assert detail["encounter"]["stops"] == expected_stops
+
+
+def test_v1_encounters_stop_event_id_and_label(client: TestClient, settings: Settings) -> None:
+    """Each stop names its lead event: within a merged stop the first alert
+    member's first detection outranks an earlier detection-only member, and
+    the encounter's `primary_event_id` is one of the stops' `event_id`s. A
+    stored lead label wins; a multi-label review without one gives null."""
+    from marcellus.encounters.observations import Direction
+
+    now = time.time()
+    conn = db.open_sidecar(settings.sidecar.db_path)
+    try:
+
+        def _atom(atom_id: str, camera: str, start: float, labels: tuple[str, ...],
+                  severity: str, event_ids: tuple[str, ...]) -> Atom:
+            return Atom(atom_id=atom_id, camera=camera, start_time=start,
+                        end_time=start + 5, labels=labels, event_ids=event_ids,
+                        severity=severity)
+
+        enc = upsert_atom(
+            conn,
+            _atom("s1", "drive-cam", now - 300, ("car", "person"), "detection", ("ev-s1",)),
+            LinkDecision(None, "new", 1.0),
+            now - 300,
+        )
+        # Same camera, later, alert: becomes the merged stop's lead. Its
+        # review is multi-label, but the link-time read recorded the label.
+        upsert_atom(
+            conn,
+            _atom("s2", "drive-cam", now - 290, ("car", "person"), "alert",
+                  ("ev-s2a", "ev-s2b")),
+            LinkDecision(enc, "same_camera", 0.9),
+            now - 290,
+            direction=Direction("", "", "", None, "none", lead_label="car"),
+        )
+        # A multi-label review with no recorded label: event id, null label.
+        upsert_atom(
+            conn,
+            _atom("s3", "yard-cam", now - 280, ("dog", "person"), "detection", ("ev-s3",)),
+            LinkDecision(enc, "adjacent", 0.9),
+            now - 280,
+        )
+        # No event ids at all (a synthesized row): both null.
+        upsert_atom(
+            conn,
+            _atom("s4", "porch-cam", now - 270, ("person",), "detection", ()),
+            LinkDecision(enc, "adjacent", 0.9),
+            now - 270,
+        )
+    finally:
+        conn.close()
+    row = client.get("/v1/encounters").json()["encounters"][0]
+    picked = [(s["camera"], s["event_id"], s["label"]) for s in row["stops"]]
+    assert picked == [
+        ("drive-cam", "ev-s2a", "car"),
+        ("yard-cam", "ev-s3", None),
+        ("porch-cam", None, None),
+    ]
+    assert row["primary_event_id"] == "ev-s2a"
+    assert row["primary_event_id"] in {s["event_id"] for s in row["stops"]}
+    EncountersResponse.model_validate(client.get("/v1/encounters").json())
 
 
 def test_v1_encounters_title_single_camera_fallback_and_identity(

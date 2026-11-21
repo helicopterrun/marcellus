@@ -338,7 +338,10 @@ story's content state is byte-identical to before.
 `card_key`, `mutation`, `level`, `subject_kind`, `place_class`, `camera`,
 `zone_name`, a semantic `glyph` id (icon mapping is client-side),
 `primary`/`secondary` copy (state-what-is-true grammar), `event_ts`,
-`state_since_ts`, optional `media`/`deep_link`. Zone display names in copy:
+`state_since_ts`, optional `media`/`deep_link`, and optional
+`event_id`/`label` (the Frigate event the mutation is about, on the card's
+own camera, and its Frigate label; omitted after a cross-camera merge and on
+re-sounds). Zone display names in copy:
 the sidecar-edited `zone_names` setting wins, Frigate's `friendly_name` is
 the fallback, humanized key last (`policy_settings.zone_display_name`).
 

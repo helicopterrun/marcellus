@@ -265,8 +265,16 @@ def build_card_payload(
     encounter_id: str = "",
     cameras_path: list[str] | None = None,
     thread_by_encounter: bool = False,
+    event_id: str = "",
+    event_label: str = "",
 ) -> dict[str, Any]:
     """The full APNs body for one card mutation (`docs/apns-payload-spec.md`).
+
+    `event_id` is the Frigate event id this mutation is about, on the card's
+    own `camera`; `event_label` that event's Frigate label. Both additive and
+    omitted when unknown; `label` is never sent without `event_id`. An event id
+    is an opaque Frigate key, not an identity: no name, handle, person id or
+    sub_label ever rides this payload.
 
     `interruption-level` comes from the *card's* level, not the mutation --
     a silent deescalate to `quiet` still carries `passive`, since that is
@@ -323,6 +331,12 @@ def build_card_payload(
     # couldn't name one in time -- older app builds ignore both.
     if encounter_id:
         payload["encounter_id"] = encounter_id
+    # Additive, optional (no `v` bump): the event the card is about, so a tap
+    # can draw its event card from the first frame. Absent when unknown.
+    if event_id:
+        payload["event_id"] = event_id
+        if event_label:
+            payload["label"] = event_label
     if cameras_path:
         payload["cameras_path"] = list(cameras_path)
     if media:

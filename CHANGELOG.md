@@ -33,6 +33,19 @@ may change behaviour). Numbers are pull requests.
 
 ### Added
 
+- **Event ids on encounter stops and card pushes.** Each `/v1/encounters` stop
+  (and `/v1/encounters/{id}`, `/v1/timeline`) gains `event_id`, the Frigate
+  event id of the stop's lead event (first alert member's first detection,
+  else the first member's: the `primary_event_id` rule within the stop), and
+  `label`, that event's Frigate label; both null when unknown. Card pushes
+  gain `event_id` and `label` for the tracked object the mutation is about,
+  omitted when not known (for example after a cross-camera merge). The app can
+  then draw the event from the first frame when a Review card or notification
+  opens. Additive, `v` stays 1. No names, handles or face ids are added to
+  pushes. The label is recorded at link time from the Frigate event rows the
+  encounter linker already reads (new nullable `encounter_members.lead_label`
+  column, added on startup); older rows fall back to a single-label review's
+  label, else null.
 - **Bearer tokens on the sidecar's routes.** The session gate accepts
   `Authorization: Bearer <token>` wherever it accepts the `frigate_token`
   cookie, as Frigate does.

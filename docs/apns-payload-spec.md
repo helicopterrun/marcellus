@@ -64,7 +64,9 @@ this; an additive, optional field does not. The app should treat an unknown
   "event_ts": 1785952622.704,
   "state_since_ts": 1785952618.0,
   "media": "https://sidecar.local/v1/push/thumbnail/h_9f3a",
-  "deep_link": "elsinore://card/front:stranger:track-42?t=1785952618.0"
+  "deep_link": "elsinore://card/front:stranger:track-42?t=1785952618.0",
+  "event_id": "track-42",
+  "label": "person"
 }
 ```
 
@@ -128,6 +130,10 @@ per-situation category to select actions by in this phase.
 | `state_since_ts` | float | When the **current level** became true -- not since the first detector event ever seen for this subject, and not reset by an `enrich` (same level, new facts) or a `resolve` (reports how long the resolved state held). Elapsed time for `secondary` is `event_ts - state_since_ts`. |
 | `media` | string, optional | Snapshot URL for the NSE to fetch and attach (`GET {push.external_base_url}/v1/push/thumbnail/{handle}`, unauth, self-authorizing -- same mechanism as the situations payload's handle, just resolved to a complete URL server-side instead of left to the app). Present only on `create` and `enrich` -- the card is still active and the snapshot may improve as Frigate refines the bounding box. Never present on `escalate`/`deescalate` (unaddressed this round) or `resolve` (the card is about to leave Notification Center; spending the NSE's ~15s fetch budget on an image nobody will see is waste). Omitted, not `null`, when there is nothing to show -- including when `push.external_base_url` isn't configured. The URL is sent optimistically alongside the push; if the Frigate fetch behind it is slow or fails, the notification simply lands without an image, never without existing at all. |
 | `deep_link` | string, optional | `elsinore://card/<card_key>[?t=<state_since_ts>]`. Omitted, not `null`, when there is nothing more specific than "open the app" to link to. The `t` query param is always appended when `deep_link` is present -- same rounded-to-milliseconds float as `state_since_ts` above, formatted identically. With `t`, the app opens the camera timeline parked at that moment; without a `deep_link` at all, it falls back to the review feed. Additive per the versioning rule above -- adding `t` did not bump `v`. |
+| `event_id` | string, optional | Additive (no `v` bump). The Frigate event id this mutation is about -- the tracked object whose review, `frigate/events` end or recognition produced it -- on the payload's own `camera`, so the app can draw that event's card from the first frame. **Omitted, not `null`**, when not known: a card that another camera's track enriched after a cross-camera merge (the payload's `camera` is the card owner's, so the contributing camera's event would be the wrong picture), the urgent re-sound, and the Push Doctor test card. An opaque Frigate key, not an identity. On a tracked-object card's `create` it equals the tail of `card_key` (`{camera}:{subject_kind}:{event_id}`): the key is minted from the founding track's Frigate event id and never changes, so on later mutations the tail still names the founding event while `event_id` names the current one. The app should read `event_id`, not parse `card_key`. |
+| `label` | string, optional | Additive. The Frigate label of `event_id` (`person`, `car`, `dog`, `package`...): `subject_kind` is a coarser routing class (`vehicle` for car/truck/motorcycle, `animal` for every animal, `thing` for the rest), so it cannot stand in for it. Sent only alongside `event_id`; omitted when the label is not known (no tracked label for the object and a review carrying several labels). |
+
+Size: the two fields add at most ~60 bytes. With the longest realistic values everywhere (64-character camera and zone names, full-length `primary`/`secondary`, a 32-hex `encounter_id`, a five-camera `cameras_path`, `media` and `deep_link`) a card body is about 1.9 KB, under half of APNs' 4 KB (`tests/test_push_delivery_payload.py`).
 
 ## Sound-accounting summary (design doc §3)
 
