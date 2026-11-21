@@ -15,19 +15,20 @@ from typing import Any, TypeVar
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from marcellus import __version__, db, fmt, frigate_api
 from marcellus.auth import FrigateAuthMiddleware
+from marcellus.compression import MediaSafeGZipMiddleware
 from marcellus.config import Settings, load_settings
 from marcellus.db import FrigateDBMissingError
 from marcellus.errors import error_detail
 from marcellus.faces.handles import handle_for
 from marcellus.frigate_api import FrigateClient
 from marcellus.guide import load_guide
+from marcellus.loop_lag import LoopLagMonitor
 from marcellus.push import delivery, delivery_wire
 from marcellus.push import store as push_store
 from marcellus.push.engine import PushEngine
@@ -603,6 +604,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     probe_task = asyncio.create_task(_probe_plus())
 
+    # How late the loop wakes up -- /healthz `checks.loop_lag_max_ms`, and a
+    # warning when something synchronous holds it (loop_lag.py).
+    loop_lag = LoopLagMonitor()
+    app.state.loop_lag = loop_lag
+    loop_lag_task = asyncio.create_task(loop_lag.run())
+    # Settle (and log, once) how /v1/highlights reads event scores on this
+    # host's SQLite, so the startup log says which path is live.
+    await asyncio.to_thread(scrub_routes.sql_scores_supported)
+
     if settings.face_capture.enabled:
         # Logged from the server too, not just from the timer job: a
         # misconfigured output_dir under ProtectSystem=strict makes the feature
@@ -800,6 +810,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         for pending in (
             task,
             probe_task,
+            loop_lag_task,
             outbox_task,
             push_task,
             sweep_task,
@@ -960,8 +971,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Every request needs the caller's own Frigate credential: the sidecar's own
     # routes and the proxy catch-all below alike (auth.py lists the exemptions).
     app.add_middleware(FrigateAuthMiddleware)
-    # Compress HTML/JSON responses (auth runs inside, gzip outside).
-    app.add_middleware(GZipMiddleware, minimum_size=1024)
+    # Compress HTML/JSON responses (auth runs inside, gzip outside); proxied
+    # video, images and playlists pass through untouched (compression.py).
+    app.add_middleware(MediaSafeGZipMiddleware, minimum_size=1024, compresslevel=6)
 
     # Proxy is a catch-all (/{path:path}) and MUST be registered last so every
     # other route -- /v1/*, /static, /healthz, the sidecar's own pages -- wins

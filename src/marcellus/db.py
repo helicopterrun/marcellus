@@ -1471,6 +1471,149 @@ def parse_path_data(raw: Any) -> list[tuple[float, float, float]]:
     return out
 
 
+#: How many `event` rows (all cameras) `newest_events` reads newest-first off
+#: the start-time index before handing over to the per-camera index. A camera
+#: with events near `before` fills its page long before this; one that has
+#: been quiet for a long time (detection off, say) would otherwise walk the
+#: whole fleet's history to find nothing.
+NEWEST_EVENTS_SCAN_BUDGET = 3000
+
+_NEWEST_SCAN_SQL = (
+    "SELECT rowid, camera, start_time FROM event WHERE start_time < ? "
+    "ORDER BY start_time DESC"
+)
+_NEWEST_BY_CAMERA_SQL = (
+    "SELECT rowid, start_time FROM event WHERE camera = ? AND start_time {op} ? "
+    "ORDER BY start_time DESC, rowid LIMIT ?"
+)
+
+
+def _scan_follows_time_index(conn: sqlite3.Connection) -> bool:
+    """True when SQLite can read `event` newest-first straight off an index
+    (Frigate's `event_start_time_end_time`), i.e. without a sort step. A
+    schema without one would sort the whole table on every call, so the
+    caller then uses the per-camera query instead."""
+    plan = conn.execute("EXPLAIN QUERY PLAN " + _NEWEST_SCAN_SQL, (0.0,)).fetchall()
+    detail = " ".join(str(row[3]) for row in plan)
+    return "INDEX" in detail and "TEMP B-TREE" not in detail
+
+
+def _newest_event_keys(
+    conn: sqlite3.Connection, camera: str, before: float, limit: int, budget: int
+) -> list[tuple[float, int]]:
+    """`(start_time, rowid)` of the page `newest_events` returns, in order."""
+    # A camera with at most `budget` events in all costs the per-camera query
+    # no more than the scan's own bound (and a camera with none, nothing).
+    # Counting them, capped, reads only `event_camera`.
+    small = conn.execute(
+        "SELECT count(*) FROM (SELECT 1 FROM event WHERE camera = ? LIMIT ?)",
+        (camera, budget + 1),
+    ).fetchone()[0] <= budget
+    if small or not _scan_follows_time_index(conn):
+        return [
+            (row[1], row[0])
+            for row in conn.execute(
+                _NEWEST_BY_CAMERA_SQL.format(op="<"), (camera, before, limit)
+            )
+        ]
+
+    picks: list[tuple[float, int]] = []
+    # Start time of the `limit`-th pick. Rows tied with it are still read, so
+    # the rowid tie-break below sees all of them; the first older row ends it.
+    cut: float | None = None
+    handover: float | None = None
+    scanned = 0
+    cur = conn.execute(_NEWEST_SCAN_SQL, (before,))
+    try:
+        for rowid, row_camera, start in cur:
+            if cut is not None and start != cut:
+                break
+            scanned += 1
+            if row_camera == camera:
+                picks.append((start, rowid))
+                if cut is None and len(picks) >= limit:
+                    cut = start
+            if cut is None and scanned >= budget:
+                handover = start
+                break
+    finally:
+        cur.close()
+
+    if handover is not None:
+        # Everything newer than `handover` has been seen; its own ties may
+        # not have been, so drop them and let the camera's index pick up from
+        # (and including) that instant.
+        picks = [p for p in picks if p[0] != handover]
+        picks.extend(
+            (row[1], row[0])
+            for row in conn.execute(
+                _NEWEST_BY_CAMERA_SQL.format(op="<="),
+                (camera, handover, limit - len(picks)),
+            )
+        )
+    picks.sort(key=lambda p: (-p[0], p[1]))
+    return picks[:limit]
+
+
+def newest_events(
+    conn: sqlite3.Connection,
+    camera: str,
+    before: float,
+    limit: int,
+    *,
+    budget: int = NEWEST_EVENTS_SCAN_BUDGET,
+    columns: str = "*",
+    prepare: str = "",
+) -> list[sqlite3.Row]:
+    """Full `event` rows for `camera` starting before `before`, newest first:
+    the rows of `SELECT * FROM event WHERE camera = ? AND start_time < ?
+    ORDER BY start_time DESC, rowid LIMIT ?`, without that query's cost.
+
+    Frigate indexes `event` by `camera` and by `start_time`, never by both.
+    Given the `camera` filter, SQLite (with no `ANALYZE` statistics, the
+    stock state) reads every event the camera ever had through
+    `event_camera`, `data` blobs included, and sorts them all to keep
+    `limit`. Here the page's keys come first, newest-first off the start-time
+    index -- stopping as soon as the page is full, or after `budget` rows,
+    where the camera index takes over for whatever is older -- and only the
+    page's own rows are then read in full.
+
+    Ties on `start_time` break on `rowid`, which is what the stock plan did
+    implicitly (its sort keeps rows in `event_camera` order, i.e. rowid
+    order). Both reads share one snapshot, so rowids can't move in between.
+
+    `columns` narrows the final read (SQL select-list expressions); each row
+    also carries the `_event_rowid` it was fetched by. With `prepare` (extra
+    select-list expressions, starting with a comma) the page's rows are first
+    materialized with those columns added, and `columns` is evaluated over
+    that: a per-row expression `columns` uses several times is then computed
+    once. Needs SQLite 3.35+ (`AS MATERIALIZED`).
+    """
+    in_txn = conn.in_transaction
+    if not in_txn:
+        conn.execute("BEGIN")
+    try:
+        keys = _newest_event_keys(conn, camera, before, limit, budget)
+        if not keys:
+            return []
+        rowids = [rowid for _, rowid in keys]
+        marks = ",".join("?" * len(rowids))
+        if prepare:
+            sql = (
+                f"WITH page AS MATERIALIZED (SELECT rowid AS _event_rowid, *{prepare} "
+                f"FROM event WHERE rowid IN ({marks})) "
+                f"SELECT _event_rowid, {columns} FROM page"
+            )
+        else:
+            sql = f"SELECT rowid AS _event_rowid, {columns} FROM event WHERE rowid IN ({marks})"
+        rows = conn.execute(sql, rowids).fetchall()
+    finally:
+        if not in_txn:
+            conn.rollback()
+    by_rowid = {row["_event_rowid"]: row for row in rows}
+    return [by_rowid[rowid] for rowid in rowids if rowid in by_rowid]
+
+
 def event_top_score(row: sqlite3.Row, parsed: dict[str, Any] | None = None) -> float | None:
     """Peak confidence for an event, wherever this Frigate version keeps it.
 
