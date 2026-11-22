@@ -90,6 +90,17 @@ notes, at tags `v0.17.2` and `v0.18.2`.
   the sidecar rounds the scale it sends to the nearest whole number (minimum 1)
   before calling it. The response grid still uses the scale the client asked
   for.
+- **`/v1/motion` `rate` reads `recordings` directly, the same on 0.17 and
+  0.18.** The absolute series (`rate`, `recorded`, `rate_reference`; spec
+  §4.6) reads `start_time`, `duration` and `motion`, unchanged between the two
+  releases (0.18's new `motion_heatmap` column is unread). Both releases'
+  recording maintainers write `end_time = start_time + duration` and `motion`
+  as the count of motion boxes summed over the segment's processed frames, so
+  the unit is Frigate's own and comparable within one camera only. The query
+  runs off the covering index `recordings_api_recordings_summary` (`camera,
+  start_time DESC, duration, motion, objects`), present in both schemas
+  (`test_read_uses_the_covering_summary_index` runs on both fixtures). `motion`
+  is nullable in both: NULL counts as 0.
 
 ## Inventory: Frigate database
 
@@ -100,7 +111,7 @@ Only three tables are read. `timeline`, `regions`, `previews`, `export`,
 |---|---|---|---|
 | `event` | `id`, `camera`, `label`, `sub_label`, `start_time`, `end_time`, `zones` (JSON list, also `json_each`), `has_clip`, `has_snapshot`, `false_positive`, `plus_id`, `retain_indefinitely`, `score` / `top_score` (column fallback only, since Frigate leaves them NULL), `area` / `ratio` (column-gated), `data` | `data.score`, `top_score`, `box` (`[x, y, w, h]`, also via `json_extract`), `region`, `type`, `attributes`, `max_severity`, `path_data` (`[[x, y], t]` or `[x, y, t]`) | `routes/scrub.py` (reel, highlights, cross-camera), `routes/triage.py`, `routes/search.py`, `routes/analysis.py`, `routes/inbox.py`, `triage/*`, `analysis/*`, `encounters/observations.py`, `faces/enrich.py`, `faces/crosscam.py`, `wildlife/finder.py` |
 | `reviewsegment` | `id`, `camera`, `start_time`, `end_time`, `severity`, `data` | `data.objects`, `zones`, `detections`, `sub_labels` | `routes/scrub.py` `_reviews_json`, `encounters/service.py` reconcile, `encounters/repair.py` |
-| `recordings` | `camera`, `start_time`, `end_time`, `path`, `motion`, `objects` | none | `db.py` coverage, `scrub/generator.py`, `routes/scrub.py` camera discovery, `routes/analysis.py`, `wildlife/finder.py` |
+| `recordings` | `camera`, `start_time`, `end_time`, `duration`, `path`, `motion`, `objects` | none | `db.py` coverage, `scrub/generator.py`, `scrub/motion_rate.py` (`/v1/motion` `rate`), `routes/scrub.py` camera discovery, `routes/analysis.py`, `wildlife/finder.py` |
 
 Several readers probe columns first with `PRAGMA table_info(event)` or catch
 `sqlite3.Error` and degrade. A schema break would then show up as missing

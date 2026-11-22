@@ -79,7 +79,9 @@ FRIGATE_COLUMNS_READ: dict[str, set[str]] = {
         "top_score", "area", "ratio", "retain_indefinitely", "data",
     },
     "reviewsegment": {"id", "camera", "start_time", "end_time", "severity", "data"},
-    "recordings": {"id", "camera", "path", "start_time", "end_time", "motion", "objects"},
+    "recordings": {
+        "id", "camera", "path", "start_time", "end_time", "duration", "motion", "objects",
+    },
 }
 
 #: (method, Frigate route template, auth dependency Marcellus relies on) for

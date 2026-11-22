@@ -266,6 +266,26 @@ Re-serve Frigate's `/api/review/activity/motion` (which is genuinely good — 61
 Contract: **any `scale`, always covering the full requested `[start, end)`, zero-filled where there is genuinely no data.** The sidecar fetches from Frigate at a safe scale (≤300), aggregates/zero-fills to the requested grid, and returns the bare-array form. Then the client's `ReelGranularity.motionScale` and `aggregatesMotion` both disappear. (This is also the `motion` block inside §4.5 — implement once, expose both.)
 
 - **`motion_unavailable` (additive, shipped `7cddddd`).** Both `/v1/motion` and the `motion` block inside `/v1/reel` (§4.5) gained an additive boolean, true when the sidecar could not produce a motion series for the window (e.g. Frigate's motion source is down, or the window predates coverage). It exists so the zero-fill contract above doesn't get misread as "genuinely zero" — a client should draw nothing rather than a false flat line when this is set.
+- **Absolute series: `rate`, `recorded`, `rate_reference`, `rate_unit` (additive, `/v1/motion` only).** `values` is Frigate's motion normalised to *the request window's own peak*, so its heights can't be compared between two windows: one stir on a quiet camera reads as high as a busy road. These fields come from `frigate.db` instead (`recordings.motion`, Frigate's per-segment motion counter) and are comparable between windows of **one camera**. Detect support with `/v1/capabilities` `motion.rate: true`; the fields are still best-effort per response, so check for the keys.
+
+  ```json
+  {
+    "start": 1785952262.704, "interval": 60.0,
+    "values":   [18.3, 0.0, 0.0, 100.0, 16.7, 22.5],
+    "rate":     [1.8333, 0.0, 0.0, 10.0, 1.6667, 2.25],
+    "recorded": [1.0, 0.917, 0.0, 0.833, 1.0, 0.5],
+    "rate_reference": 2.7,
+    "rate_unit": "motion_per_recorded_second"
+  }
+  ```
+
+  - `rate[i]` (same grid and length as `values`): the motion of every recording segment overlapping bucket `i`, each segment's motion apportioned by the share of the segment inside the bucket, divided by the recorded seconds overlapping the bucket. Unit `rate_unit` = `"motion_per_recorded_second"`: Frigate's own counter (its recording maintainer adds up the motion boxes found in each processed frame of the segment; it is not seconds of motion), so its scale depends on the camera's detect frame rate, resolution and motion settings — **never compare rates across cameras**. `0.0` both for "recorded, nothing moved" and for "nothing recorded"; `recorded` tells them apart.
+  - `recorded[i]`: fraction (0–1, 3 decimals) of the bucket's in-window seconds covered by at least one recording segment; overlapping segments count once. A continuously recording camera reads ~0.96–1.0 (segments don't abut exactly). The last bucket is measured against its in-window width.
+  - `rate_reference`: the camera's "normally busy" level — the 95th percentile (linear interpolation) of the 5-minute `rate` over the trailing 7 days (on an epoch-aligned 5-minute grid), ignoring buckets with `recorded` < 0.5. Absent when fewer than 12 buckets qualify, and absent on a response that couldn't wait for it: it is computed off the event loop, cached in memory per camera for an hour (a value up to a day old is served while a fresh one computes), single-flight, and a request never waits on it past the deadline below. Independent of the request's `scale`, since `rate` is per second at any scale.
+  - Rows: `motion` NULL counts as 0 (the segment's seconds still count as recorded); a segment with a NULL, zero or negative `duration` is skipped. A segment spans `[start_time, start_time + duration)`, which is how Frigate writes `end_time`; reading `duration` lets the query run off Frigate's covering index `recordings_api_recordings_summary`. Segments starting more than an hour before the window are not read (Frigate's are ~10 s).
+  - Best-effort: the read runs on a worker thread behind its own two-slot gate (not `/v1/highlights`'), alongside the Frigate fetch for `values`, with a 1.5 s deadline (queueing included). If it fails or misses the deadline the response is exactly the old shape — never a 5xx. `motion_unavailable` (Frigate's API down) does not suppress these fields.
+  - Size: each field adds about as much JSON as `values` (6 h at `scale=300`: ~1.3–1.5 KB instead of ~0.4 KB; 1 h at `scale=10`: ~5 KB more).
+  - Not in `/v1/reel`'s `motion` block: the reel would need a second `frigate.db` read it doesn't do today.
 
 ### 4.7 Highlights (Tier 1, after Tier 0) — `GET /v1/highlights/{camera}?before={ts}&limit=10`
 

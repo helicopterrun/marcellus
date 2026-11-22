@@ -67,6 +67,12 @@ class DecisionsCapabilities(_Wire):
     enabled: bool
 
 
+class MotionCapabilities(_Wire):
+    #: `/v1/motion` may carry `rate`/`recorded`/`rate_reference`/`rate_unit`.
+    #: Additive; the whole `motion` block is absent on older sidecars.
+    rate: bool
+
+
 class SearchCapabilities(_Wire):
     enabled: bool
     related_events: bool
@@ -123,6 +129,7 @@ class CapabilitiesResponse(_Wire):
     proxy: ProxyCapabilities
     push: PushCapabilities
     decisions: DecisionsCapabilities
+    motion: MotionCapabilities
     search: SearchCapabilities
     unifi_protect: UnifiProtectCapabilities
     encounters: EncountersCapabilities
@@ -180,6 +187,28 @@ class ReelMotion(_Wire):
     start: float
     interval: float
     values: list[float]
+
+
+# --------------------------------------------------------------------------
+# /v1/motion/{camera}  (§4.6) -- validate-then-return (optional keys are
+# omitted, never null)
+# --------------------------------------------------------------------------
+
+
+class MotionResponse(ReelMotion):
+    #: Frigate could not answer; `values` is a zero fill, not "no motion".
+    motion_unavailable: bool | None = None
+    #: Additive, present only when the sidecar could read `frigate.db` in
+    #: time; same grid as `values`. Frigate's per-segment motion counter per
+    #: recorded second (comparable within one camera only).
+    rate: list[float] | None = None
+    #: Fraction (0..1) of each bucket covered by recordings (with `rate`).
+    recorded: list[float] | None = None
+    #: The camera's 95th-percentile 5-minute `rate` over the last 7 days;
+    #: absent until computed, or with under an hour of recordings.
+    rate_reference: float | None = None
+    #: `"motion_per_recorded_second"` whenever `rate` is present.
+    rate_unit: str | None = None
 
 
 class ReelPathSummary(_Wire):

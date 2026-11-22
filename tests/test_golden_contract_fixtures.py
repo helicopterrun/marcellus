@@ -1047,6 +1047,65 @@ def _build_v1_reel() -> dict[str, Any]:
         return body
 
 
+def _build_v1_motion() -> dict[str, Any]:
+    """`/v1/motion` with the absolute series: six 60 s buckets holding a
+    segment straddling the window start and a bucket edge, a recording gap,
+    a zero-duration row (skipped), a NULL-motion row and an overlapping
+    segment, over two hours of history for `rate_reference`."""
+    camera = "yard"
+    w = SENT_AT - 360
+    rows: list[tuple[float, float, int | None]] = [
+        (SENT_AT - 7200 + 60 * i, 60.0, (0, 30, 60, 120, 600)[i % 5]) for i in range(110)
+    ]
+    rows += [
+        (w - 5, 60.0, 120),
+        (w + 55, 60.0, 0),
+        # no recordings for [w + 115, w + 190)
+        (w + 190, 60.0, 600),
+        (w + 250, 0.0, 999),
+        (w + 250, 60.0, None),
+        (w + 300, 30.0, 90),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        frigate_db = tmp / "frigate.db"
+        conn = sqlite3.connect(frigate_db)
+        conn.executescript(RECORDINGS_SCHEMA)
+        conn.executemany(
+            "INSERT INTO recordings (id, camera, path, start_time, end_time, duration, "
+            "motion, segment_size) VALUES (?, ?, ?, ?, ?, ?, ?, 5.0)",
+            [
+                (f"m{i}", camera, f"/x/m{i}.mp4", start, start + duration, duration, motion)
+                for i, (start, duration, motion) in enumerate(rows)
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        client = _v1_client(tmp, frigate_db=frigate_db)
+
+        async def _fixed_motion(
+            request: object, camera: str, start: float, end: float, scale: float
+        ) -> tuple[list[float], bool]:
+            # Frigate's own 0-100, normalised to this window's peak.
+            return [18.3, 0.0, 0.0, 100.0, 16.7, 22.5], False
+
+        from marcellus.routes import scrub as scrub_routes
+
+        with (
+            mock.patch("time.time", return_value=SENT_AT),
+            mock.patch.object(scrub_routes, "_fetch_and_aggregate_motion", _fixed_motion),
+        ):
+            resp = client.get(
+                f"/v1/motion/{camera}",
+                params={"start": w, "end": SENT_AT, "scale": 60},
+            )
+        assert resp.status_code == 200, resp.text
+        body: dict[str, Any] = resp.json()
+        assert "rate_reference" in body, body  # the fixture must show every field
+        return body
+
+
 def _build_v1_highlights() -> dict[str, Any]:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -1398,6 +1457,7 @@ FIXTURE_BUILDERS: dict[str, Callable[[], dict[str, Any]]] = {
     "v1_encounters.json": _build_v1_encounters,
     "v1_scrub_sheets.json": _build_v1_scrub_sheets,
     "v1_reel.json": _build_v1_reel,
+    "v1_motion.json": _build_v1_motion,
     "v1_highlights.json": _build_v1_highlights,
     "v1_events_search.json": _build_v1_events_search,
     "v1_events_related.json": _build_v1_events_related,
