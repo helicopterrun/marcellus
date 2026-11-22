@@ -24,8 +24,9 @@ import sqlite3
 import threading
 import time
 from collections import OrderedDict, deque
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
@@ -43,16 +44,19 @@ from marcellus.models.wire import (
     CapabilitiesResponse,
     CoverageResponse,
     HighlightsResponse,
+    MotionResponse,
     ReelResponse,
     SheetsResponse,
 )
 from marcellus.push import policy_settings
-from marcellus.scrub import grid
+from marcellus.scrub import grid, motion_rate
 from marcellus.scrub.motion import aggregate_motion, safe_fetch_scale
 from marcellus.scrub.motion_flight import MotionFlight
 
 router = APIRouter(prefix="/v1", tags=["v1"])
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 # Error vocabulary (docs spec §4.0) -- always paired with a machine-readable
 # `error` field so the client can distinguish "nothing here yet" from "broken".
@@ -310,6 +314,10 @@ async def capabilities(request: Request) -> dict[str, Any]:
             "relay_credentials": True,
         },
         "decisions": {"enabled": True},
+        # `/v1/motion` may carry the absolute series (`rate`, `recorded`,
+        # `rate_reference`, `rate_unit`; §4.6). Best-effort per response, so
+        # a client still checks for the keys. Additive.
+        "motion": {"rate": True},
         "search": {"enabled": True, "related_events": True},
         "unifi_protect": _protect_capabilities(settings, request.app.state),
         "encounters": _encounters_capabilities(settings),
@@ -691,18 +699,162 @@ async def _reel_motion(
     )
 
 
+#: The absolute motion series (`rate`/`recorded`/`rate_reference`, §4.6) is
+#: best-effort: `/v1/motion` waits at most this long for it (queueing for a
+#: read slot included) and otherwise answers without it. It runs alongside
+#: the Frigate HTTP fetch `values` already waits on, so on a healthy box it
+#: adds nothing (a 6 h window reads in ~10 ms in production).
+_MOTION_RATE_DEADLINE_S = 1.5
+#: At most this many window reads on worker threads at once. Own permits,
+#: not `/v1/highlights`' -- neither can starve the other.
+_MOTION_RATE_CONCURRENCY = 2
+#: Reference computations (7 days of one camera, a few hundred ms) get one
+#: slot of their own, so a grid of cameras opening at once queues them
+#: behind each other instead of in front of the window reads.
+_MOTION_REFERENCE_CONCURRENCY = 1
+#: A queued reference computation gives up after this long; a later request
+#: for that camera retries (no sooner than `REFERENCE_RETRY_S`).
+_MOTION_REFERENCE_QUEUE_TIMEOUT_S = 30.0
+#: A read on a worker thread can't be cancelled from the loop; SQLite aborts
+#: the statement at this ceiling instead, so a stuck read can't hold its slot.
+_MOTION_READ_CEILING_S = 10.0
+
+
+def _motion_rate_gate(app_state: Any) -> _Gate:
+    gate = getattr(app_state, "motion_rate_gate", None)
+    if gate is None:
+        gate = app_state.motion_rate_gate = _Gate(_MOTION_RATE_CONCURRENCY)
+    return cast(_Gate, gate)
+
+
+def _motion_reference_gate(app_state: Any) -> _Gate:
+    gate = getattr(app_state, "motion_reference_gate", None)
+    if gate is None:
+        gate = app_state.motion_reference_gate = _Gate(_MOTION_REFERENCE_CONCURRENCY)
+    return cast(_Gate, gate)
+
+
+def _motion_reference_cache(app_state: Any) -> motion_rate.RateReferenceCache:
+    cache = getattr(app_state, "motion_reference_cache", None)
+    if not isinstance(cache, motion_rate.RateReferenceCache):
+        cache = app_state.motion_reference_cache = motion_rate.RateReferenceCache()
+    return cache
+
+
+async def _gated_read(gate: _Gate, fn: Callable[[], _T], *, timeout_s: float) -> _T:
+    """Run `fn` on a worker thread holding one of `gate`'s permits, within
+    `timeout_s` overall (queueing included); `asyncio.TimeoutError` past it.
+
+    As in `/v1/highlights`, the permit goes back when the thread finishes,
+    not when the caller stops waiting, so a read that missed its deadline
+    still counts against the gate until it is done.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    if not await gate.acquire(timeout_s):
+        raise asyncio.TimeoutError
+    work = asyncio.ensure_future(asyncio.to_thread(fn))
+    work.add_done_callback(lambda done: _release_after(gate, done))
+    return await asyncio.wait_for(asyncio.shield(work), timeout=max(0.0, deadline - loop.time()))
+
+
+def _read_motion_rate(
+    settings: Any, camera: str, start: float, end: float, scale: float
+) -> tuple[list[float], list[float]]:
+    conn = db.open_frigate_ro(settings.frigate.db_path)
+    try:
+        motion_rate.interrupt_after(conn, _MOTION_READ_CEILING_S)
+        segments = motion_rate.read_segments(conn, camera, start, end)
+    finally:
+        conn.close()
+    return motion_rate.apportion(segments, start, end, scale)
+
+
+def _read_motion_reference(settings: Any, camera: str) -> float | None:
+    conn = db.open_frigate_ro(settings.frigate.db_path)
+    try:
+        motion_rate.interrupt_after(conn, _MOTION_READ_CEILING_S)
+        return motion_rate.compute_reference(conn, camera, time.time())
+    finally:
+        conn.close()
+
+
+async def _motion_reference(app_state: Any, camera: str, deadline_s: float) -> float | None:
+    """The camera's `rate_reference`, cached per camera (never raises)."""
+    settings = app_state.settings
+    gate = _motion_reference_gate(app_state)
+
+    async def _compute() -> float | None:
+        return await _gated_read(
+            gate,
+            lambda: _read_motion_reference(settings, camera),
+            timeout_s=_MOTION_REFERENCE_QUEUE_TIMEOUT_S,
+        )
+
+    return await _motion_reference_cache(app_state).get(camera, _compute, deadline_s=deadline_s)
+
+
+async def _motion_absolute(
+    request: Request, camera: str, start: float, end: float, scale: float
+) -> dict[str, Any] | None:
+    """The additive `/v1/motion` fields, or None when the window could not be
+    read within `_MOTION_RATE_DEADLINE_S` (the response then has exactly the
+    old shape). `rate_reference` alone may be missing (not computed yet, or
+    too little recorded). Never raises, cancellation aside."""
+    state = request.app.state
+    settings = state.settings
+    deadline_s = _MOTION_RATE_DEADLINE_S
+    started = time.monotonic()
+    # Both reads start now and share the deadline.
+    reference = asyncio.ensure_future(_motion_reference(state, camera, deadline_s))
+    try:
+        rate, recorded = await _gated_read(
+            _motion_rate_gate(state),
+            lambda: _read_motion_rate(settings, camera, start, end, scale),
+            timeout_s=deadline_s,
+        )
+    except asyncio.TimeoutError:
+        logger.info(
+            "motion: rate read for %s missed its %.2fs deadline; answering without it",
+            camera, deadline_s,
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001 -- the absolute series is best-effort
+        logger.warning(
+            "motion: rate read for %s failed after %.2fs: %r",
+            camera, time.monotonic() - started, exc,
+        )
+        return None
+    body: dict[str, Any] = {"rate": rate, "recorded": recorded}
+    ref = await reference
+    if ref is not None:
+        body["rate_reference"] = ref
+    body["rate_unit"] = motion_rate.RATE_UNIT
+    return body
+
+
 @router.get("/motion/{camera}")
 async def motion(camera: str, start: float, end: float, scale: float, request: Request) -> Any:
     """Total motion (§4.6) -- any `scale`, always covering the full requested
     `[start, end)`, zero-filled where there is genuinely no data. Fixes
     Frigate's two measured cliffs (all-zero wide scale, short-window
-    truncation) by fetching at a safe scale and aggregating ourselves."""
+    truncation) by fetching at a safe scale and aggregating ourselves.
+
+    Additive, present only when they could be read in time: `rate`,
+    `recorded`, `rate_reference` and `rate_unit`, an absolute series from
+    `frigate.db` that is comparable between windows of one camera."""
     _require_series(start, end, scale)
     await _require_known_camera(request, camera)
-    values, unavailable = await _fetch_and_aggregate_motion(request, camera, start, end, scale)
+    (values, unavailable), absolute = await asyncio.gather(
+        _fetch_and_aggregate_motion(request, camera, start, end, scale),
+        _motion_absolute(request, camera, start, end, scale),
+    )
     body: dict[str, Any] = {"start": start, "interval": scale, "values": values}
     if unavailable:
         body["motion_unavailable"] = True
+    if absolute is not None:
+        body.update(absolute)
+    MotionResponse.model_validate(body)
     return body
 
 

@@ -33,6 +33,9 @@
       }
     ]
   },
+  "motion": {
+    "rate": true
+  },
   "people": {
     "enabled": true,
     "encounter_filter": true,

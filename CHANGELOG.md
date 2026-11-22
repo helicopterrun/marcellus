@@ -33,6 +33,16 @@ may change behaviour). Numbers are pull requests.
 
 ### Added
 
+- **An absolute motion level on `/v1/motion`.** `values` stays Frigate's 0-100
+  normalised to the window's own peak, which can't be compared between
+  windows. The response gains `rate` (Frigate's per-segment motion counter per
+  recorded second, apportioned onto the same grid), `recorded` (fraction of
+  each bucket with recordings), `rate_reference` (the camera's 95th-percentile
+  5-minute rate over the last 7 days) and `rate_unit`, read from `frigate.db`
+  off the event loop behind its own gate and a 1.5 s deadline; on a failure or
+  a miss the response is the old shape. Comparable within one camera only.
+  `/v1/capabilities` gains `motion.rate`. Additive; `/v1/reel` is unchanged.
+
 - **Event ids on encounter stops and card pushes.** Each `/v1/encounters` stop
   (and `/v1/encounters/{id}`, `/v1/timeline`) gains `event_id`, the Frigate
   event id of the stop's lead event (first alert member's first detection,
