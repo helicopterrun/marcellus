@@ -33,6 +33,10 @@
       }
     ]
   },
+  "highlights": {
+    "id": true,
+    "severity": true
+  },
   "motion": {
     "rate": true
   },

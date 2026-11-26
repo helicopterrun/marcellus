@@ -1,15 +1,26 @@
 {
   "highlights": [
     {
+      "end": null,
+      "id": "h2",
+      "reason": "person",
+      "score": 0.7,
+      "severity": "detection",
+      "start": 1785952602.704
+    },
+    {
       "end": 1785952427.704,
+      "id": "h1",
       "reason": "car",
       "score": 0.62,
       "start": 1785952422.704
     },
     {
       "end": 1785952327.704,
+      "id": "h0",
       "reason": "person",
       "score": 0.91,
+      "severity": "alert",
       "start": 1785952322.704
     }
   ]
