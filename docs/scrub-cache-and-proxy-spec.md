@@ -292,9 +292,10 @@ Contract: **any `scale`, always covering the full requested `[start, end)`, zero
 Turns the reel from a ruler into a search tool — "take me to the next interesting thing", which needs a ranked index across a long span that no Frigate endpoint provides.
 
 ```
-200 → { "highlights": [ { "start": …, "end": …, "reason": "person", "score": 0.9 } ] }
+200 → { "highlights": [ { "start": …, "end": …, "reason": "person", "score": 0.9, "id": "…", "severity": "alert" } ] }
 ```
 
+- **`highlights[].id` and `highlights[].severity` (additive).** `id` is the Frigate event id; with `cluster_s > 0` it is the id of the earliest event in the cluster. `severity` is `"alert"` or `"detection"`, read from the event's `data.max_severity`; with `cluster_s > 0` it is the strongest in the cluster (`alert` over `detection`). Optional keys are omitted, never null: `severity` is absent when the event has no `max_severity` (it was in no review segment) or any other value. Older apps ignore both keys. Advertised by `/v1/capabilities` `highlights: {"id": true, "severity": true}` (the whole block is absent on older sidecars).
 - **`highlights[].reason` is a Frigate object label** (`person`, `car`, `package`, …) — the same vocabulary as `review`/`events` label fields, not a separate category scheme. State this explicitly: the client maps labels to lanes and deliberately returns `nil` for unrecognized ones, so an undocumented or inconsistent vocabulary here would silently drop every highlight.
 
 Cheap for the sidecar: precompute from `review` items + motion. This is the one item that adds a *feature* rather than removing client complexity — build it after Tier 0, before the rest of Tier 1.

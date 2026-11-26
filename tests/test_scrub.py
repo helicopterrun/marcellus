@@ -11,6 +11,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -2047,3 +2048,117 @@ def test_capabilities_cells_flag(client: TestClient) -> None:
     assert client.get("/v1/capabilities").json()["scrub_cache"]["cells"] is False
     client.app.state.settings.scrub.enabled = True  # type: ignore[attr-defined]
     assert client.get("/v1/capabilities").json()["scrub_cache"]["cells"] is True
+
+
+# ----- /v1/highlights: `id` and `severity` (additive) -----
+
+
+def _seed_sev(
+    frigate_db: Path,
+    rows: list[tuple[str, float, float | None, dict[str, Any] | None]],
+) -> None:
+    conn = sqlite3.connect(frigate_db)
+    for eid, start, end, data in rows:
+        conn.execute(
+            "INSERT INTO event (id, camera, label, start_time, end_time, score, top_score, "
+            "zones, data) VALUES (?, 'doorbell', 'person', ?, ?, NULL, NULL, '[]', ?)",
+            (eid, start, end, None if data is None else json.dumps(data)),
+        )
+    conn.commit()
+    conn.close()
+
+
+def _get_highlights(client: TestClient, now: float, **extra: Any) -> list[dict[str, Any]]:
+    r = client.get(
+        "/v1/highlights/doorbell",
+        params={"before": now, "limit": 50, **extra},
+        headers={"cookie": "session=fake"},
+    )
+    assert r.status_code == 200
+    out: list[dict[str, Any]] = r.json()["highlights"]
+    return out
+
+
+@pytest.mark.parametrize("sql_scores", [True, False])
+def test_highlights_carry_id_and_severity_only_when_known(
+    client: TestClient,
+    frigate_db_with_recordings: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sql_scores: bool,
+) -> None:
+    _skip_auth(monkeypatch)
+    monkeypatch.setattr(scrub_routes, "sql_scores_supported", lambda: sql_scores)
+    now = time.time()
+    _seed_sev(
+        frigate_db_with_recordings,
+        [
+            ("sev-a", now - 500, now - 495, {"top_score": 0.9, "max_severity": "alert"}),
+            ("sev-d", now - 400, now - 395, {"top_score": 0.8, "max_severity": "detection"}),
+            ("sev-none", now - 300, now - 295, {"top_score": 0.7}),
+            ("sev-other", now - 200, now - 195, {"max_severity": "banana"}),
+            ("sev-num", now - 150, now - 145, {"max_severity": 3}),
+            ("sev-nulldata", now - 100, now - 95, None),
+            ("sev-open", now - 50, None, {"max_severity": "alert"}),
+        ],
+    )
+    got = {h["id"]: h for h in _get_highlights(client, now)}
+    assert got["sev-a"]["severity"] == "alert"
+    assert got["sev-d"]["severity"] == "detection"
+    for k in ("sev-none", "sev-other", "sev-num", "sev-nulldata"):
+        assert "severity" not in got[k], k
+    assert got["sev-open"]["end"] is None and got["sev-open"]["severity"] == "alert"
+
+
+def test_highlights_cluster_keeps_earliest_id_and_strongest_severity(
+    client: TestClient, frigate_db_with_recordings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _skip_auth(monkeypatch)
+    now = time.time()
+    base = now - 4000
+    _seed_sev(
+        frigate_db_with_recordings,
+        [
+            ("c1", base, base + 10, {"max_severity": "detection"}),
+            ("c2", base + 20, base + 30, {"max_severity": "alert"}),
+            ("c3", base + 40, base + 50, {}),
+            ("c4", base + 900, base + 910, {"max_severity": "detection"}),
+            ("c5", base + 920, base + 930, {}),
+            ("c6", base + 2000, base + 2010, {}),
+            ("c7", base + 2020, base + 2030, {}),
+        ],
+    )
+    got = {
+        h["id"]: h
+        for h in _get_highlights(client, now, cluster_s=45)
+        if base - 1 <= h["start"] <= base + 3000
+    }
+    assert set(got) == {"c1", "c4", "c6"}
+    assert got["c1"]["events"] == 3 and got["c1"]["severity"] == "alert"
+    assert got["c4"]["severity"] == "detection"
+    assert "severity" not in got["c6"]
+
+
+def test_highlights_cluster_with_weaker_first_member_upgrades(
+    client: TestClient, frigate_db_with_recordings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _skip_auth(monkeypatch)
+    now = time.time()
+    base = now - 4000
+    _seed_sev(
+        frigate_db_with_recordings,
+        [
+            ("u1", base, base + 10, {}),
+            ("u2", base + 20, base + 30, {"max_severity": "detection"}),
+        ],
+    )
+    (item,) = [
+        h
+        for h in _get_highlights(client, now, cluster_s=45)
+        if base - 1 <= h["start"] <= base + 3000
+    ]
+    assert item["id"] == "u1" and item["severity"] == "detection"
+
+
+def test_capabilities_advertise_highlights_id_and_severity(client: TestClient) -> None:
+    body = client.get("/v1/capabilities").json()
+    assert body["highlights"] == {"id": True, "severity": True}

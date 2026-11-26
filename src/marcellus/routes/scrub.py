@@ -318,6 +318,9 @@ async def capabilities(request: Request) -> dict[str, Any]:
         # `rate_reference`, `rate_unit`; §4.6). Best-effort per response, so
         # a client still checks for the keys. Additive.
         "motion": {"rate": True},
+        # `/v1/highlights` items carry `id` (and `severity` when known).
+        # Additive; the whole `highlights` block is absent on older sidecars.
+        "highlights": {"id": True, "severity": True},
         "search": {"enabled": True, "related_events": True},
         "unifi_protect": _protect_capabilities(settings, request.app.state),
         "encounters": _encounters_capabilities(settings),
@@ -1251,6 +1254,12 @@ async def reel(
     return _etagged(request, body)
 
 
+#: `max_severity` values `/v1/highlights` passes through, with their rank.
+#: Anything else (or no key: the event was in no review segment) is omitted
+#: from the item.
+_SEVERITY_RANK = {"alert": 2, "detection": 1}
+
+
 def _cluster_highlights(
     highlights: list[dict[str, Any]], cluster_s: float
 ) -> list[dict[str, Any]]:
@@ -1284,6 +1293,12 @@ def _cluster_highlights(
                 else max(current["end"], item["end"])
             )
             current["events"] += 1
+            # `id` stays the earliest member's (input is ascending); severity
+            # is the strongest member's.
+            if _SEVERITY_RANK.get(item.get("severity", ""), 0) > _SEVERITY_RANK.get(
+                current.get("severity", ""), 0
+            ):
+                current["severity"] = item["severity"]
             # The destination is described by its most confident member.
             if (item["score"] or -1.0) > (current["score"] or -1.0):
                 current["score"] = item["score"]
@@ -1440,9 +1455,10 @@ _HIGHLIGHT_CLEAN = (
     " ELSE 1 END AS _clean"
 )
 _HIGHLIGHT_COLUMNS = (
-    "start_time, end_time, label, top_score, score, _clean, "
+    "id, start_time, end_time, label, top_score, score, _clean, "
     "CASE WHEN _clean THEN data -> '$.top_score' END AS _data_top_score, "
     "CASE WHEN _clean THEN data -> '$.score' END AS _data_score, "
+    "CASE WHEN _clean THEN data -> '$.max_severity' END AS _data_severity, "
     "CASE WHEN _clean THEN NULL ELSE data END AS data"
 )
 
@@ -1465,10 +1481,10 @@ def sql_scores_supported() -> bool:
             probe.row_factory = sqlite3.Row
             try:
                 probe.execute(
-                    "CREATE TABLE event (start_time, end_time, label, top_score, score, data)"
+                    "CREATE TABLE event (id, start_time, end_time, label, top_score, score, data)"
                 )
                 probe.execute(
-                    "INSERT INTO event VALUES (1, 2, 'person', NULL, NULL, ?)",
+                    "INSERT INTO event VALUES ('p', 1, 2, 'person', NULL, NULL, ?)",
                     ('{"top_score": 0.5}',),
                 )
                 row = probe.execute(
@@ -1508,6 +1524,23 @@ def _row_score(row: sqlite3.Row, from_sql: bool) -> float | None:
     return db.event_top_score(row)
 
 
+def _row_severity(row: sqlite3.Row, from_sql: bool) -> str | None:
+    """`data.max_severity` if it is `alert` or `detection`, else None."""
+    value: Any
+    if from_sql and row["_clean"]:
+        value = _json_value(row["_data_severity"])
+    else:
+        raw = row["data"]
+        parsed: Any = None
+        if raw:
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) else raw
+            except (json.JSONDecodeError, TypeError):
+                parsed = None
+        value = parsed.get("max_severity") if isinstance(parsed, dict) else None
+    return value if isinstance(value, str) and value in _SEVERITY_RANK else None
+
+
 def _highlight_items(
     settings: Any, camera: str, before: float, limit: int
 ) -> list[dict[str, Any]]:
@@ -1538,14 +1571,17 @@ def _highlight_items(
             h_start = shift.shift(r["start_time"])
             if margin and h_start >= before:
                 continue
-            items.append(
-                {
-                    "start": h_start,
-                    "end": shift.shift(r["end_time"]) if r["end_time"] is not None else None,
-                    "reason": r["label"],
-                    "score": _row_score(r, from_sql),
-                }
-            )
+            item: dict[str, Any] = {
+                "id": r["id"],
+                "start": h_start,
+                "end": shift.shift(r["end_time"]) if r["end_time"] is not None else None,
+                "reason": r["label"],
+                "score": _row_score(r, from_sql),
+            }
+            severity = _row_severity(r, from_sql)
+            if severity is not None:
+                item["severity"] = severity
+            items.append(item)
             if len(items) >= limit:
                 break
     finally:

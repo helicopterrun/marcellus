@@ -1122,13 +1122,23 @@ def _build_v1_highlights() -> dict[str, Any]:
             "INSERT INTO event (id, camera, label, start_time, end_time, top_score, zones, "
             "sub_label, has_clip, has_snapshot, data) VALUES ('h0', 'doorbell', 'person', ?, "
             "?, NULL, '[]', NULL, 1, 1, ?)",
-            (SENT_AT - 300, SENT_AT - 295, json.dumps({"top_score": 0.91})),
+            (
+                SENT_AT - 300,
+                SENT_AT - 295,
+                json.dumps({"top_score": 0.91, "max_severity": "alert"}),
+            ),
         )
         conn.execute(
             "INSERT INTO event (id, camera, label, start_time, end_time, top_score, zones, "
             "sub_label, has_clip, has_snapshot, data) VALUES ('h1', 'doorbell', 'car', ?, "
             "?, NULL, '[]', NULL, 1, 0, ?)",
             (SENT_AT - 200, SENT_AT - 195, json.dumps({"top_score": 0.62})),
+        )
+        conn.execute(
+            "INSERT INTO event (id, camera, label, start_time, end_time, top_score, zones, "
+            "sub_label, has_clip, has_snapshot, data) VALUES ('h2', 'doorbell', 'person', ?, "
+            "NULL, NULL, '[]', NULL, 0, 0, ?)",
+            (SENT_AT - 20, json.dumps({"top_score": 0.7, "max_severity": "detection"})),
         )
         conn.commit()
         conn.close()

@@ -24,7 +24,7 @@ Two usage patterns, chosen per route (see the routes themselves for which):
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -71,6 +71,13 @@ class MotionCapabilities(_Wire):
     #: `/v1/motion` may carry `rate`/`recorded`/`rate_reference`/`rate_unit`.
     #: Additive; the whole `motion` block is absent on older sidecars.
     rate: bool
+
+
+class HighlightsCapabilities(_Wire):
+    #: `/v1/highlights` items carry `id`, and `severity` when known.
+    #: Additive; the whole `highlights` block is absent on older sidecars.
+    id: bool
+    severity: bool
 
 
 class SearchCapabilities(_Wire):
@@ -130,6 +137,7 @@ class CapabilitiesResponse(_Wire):
     push: PushCapabilities
     decisions: DecisionsCapabilities
     motion: MotionCapabilities
+    highlights: HighlightsCapabilities
     search: SearchCapabilities
     unifi_protect: UnifiProtectCapabilities
     encounters: EncountersCapabilities
@@ -265,6 +273,11 @@ class ReelResponse(_Wire):
 
 
 class HighlightItem(_Wire):
+    #: Frigate event id; for a `cluster_s` destination, the earliest member's.
+    #: Additive; omitted by older sidecars.
+    id: str | None = None
+    #: Strongest `max_severity` among the members; omitted when unknown.
+    severity: Literal["alert", "detection"] | None = None
     start: float
     end: float | None
     reason: str

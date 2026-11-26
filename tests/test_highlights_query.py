@@ -372,6 +372,11 @@ _ODD_DATA = [
     '{"top_score": Infinity}',
     '{"top_score": -Infinity, "score": 0.25}',
     '{"score": NaN}',
+    '{"top_score": 0.5, "max_severity": "alert"}',
+    '{"score": 0.4, "max_severity": "detection"}',
+    '{"top_score": 0.6, "max_severity": "other"}',
+    '{"top_score": 0.6, "max_severity": null}',
+    '{"top_score": NaN, "max_severity": "alert"}',
     # Duplicate keys: SQLite reads the first, Python keeps the last.
     '{"top_score": 0.1, "top_score": 0.9}',
     '{"score": 0.2, "top_score": null, "score": 0.7}',
@@ -392,14 +397,21 @@ def _old_items(settings: Settings, camera: str, before: float, limit: int) -> li
             h_start = shift.shift(r["start_time"])
             if margin and h_start >= before:
                 continue
-            items.append(
-                {
-                    "start": h_start,
-                    "end": shift.shift(r["end_time"]) if r["end_time"] is not None else None,
-                    "reason": r["label"],
-                    "score": db.event_top_score(r),
-                }
-            )
+            item: dict[str, Any] = {
+                "id": r["id"],
+                "start": h_start,
+                "end": shift.shift(r["end_time"]) if r["end_time"] is not None else None,
+                "reason": r["label"],
+                "score": db.event_top_score(r),
+            }
+            try:
+                blob = json.loads(r["data"]) if r["data"] else None
+            except json.JSONDecodeError:
+                blob = None
+            sev = blob.get("max_severity") if isinstance(blob, dict) else None
+            if sev in ("alert", "detection"):
+                item["severity"] = sev
+            items.append(item)
             if len(items) >= limit:
                 break
     finally:
